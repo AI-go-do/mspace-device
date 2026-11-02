@@ -98,7 +98,7 @@ pytest --cov --cov-report=term-missing   # 우노·서버 없이 가짜 시리�
 |---|---|---|
 | `test` | 게이트웨이 테스트 + 커버리지 | develop · main 모두 통과해야 함 |
 | `firmware` | 우노 펌웨어 컴파일 (Keypad 포함) | develop · main 모두 통과해야 함 |
-| `sonar` | SonarQube Cloud 분석 | develop은 결과 표시만, **main은 새 코드 커버리지 80% 이상** (품질 게이트) |
+| `sonar` | 학교 SonarQube 서버 분석 (Secrets: `SONAR_HOST_URL`, `SONAR_TOKEN`) | develop은 결과 표시만, **main은 새 코드 커버리지 80% 이상** (품질 게이트) |
 | CodeRabbit | AI 리뷰 (한국어) | 참고용. 팀원 1명 승인은 따로 필요 |
 
 ## 6. 이벤트 형식과 eventId

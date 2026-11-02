@@ -1,7 +1,7 @@
 # PR마다 자동 확인
 #  - test: 게이트웨이 테스트 + 커버리지
 #  - firmware: 우노 펌웨어가 컴파일되는지
-#  - sonar: SonarQube Cloud 분석. develop은 결과 표시만, main으로 가는 PR은 품질 게이트(새 코드 커버리지 80% 이상) 통과해야 성공
+#  - sonar: 학교 SonarQube 서버 분석. develop은 결과 표시만, main으로 가는 PR은 품질 게이트(새 코드 커버리지 80% 이상) 통과해야 성공
 name: CI
 
 on:
@@ -42,25 +42,32 @@ jobs:
       - name: 컴파일
         run: arduino-cli compile -b arduino:avr:uno firmware/uno_sensor_node
 
+  # 학교 SonarQube 서버로 분석 (mspace-assistant와 같은 방식)
+  # Community 판은 PR·브랜치 분석이 없어서
+  #  - develop·main에 합쳐질 때: 분석만 (대시보드 갱신)
+  #  - main으로 가는 PR: 분석 + 품질 게이트(새 코드 커버리지 80%)를 기다려 실패하면 이 확인도 실패
+  # SONAR_TOKEN이 아직 없으면(설정 전) 건너뛴다
   sonar:
     needs: test
     runs-on: ubuntu-latest
     env:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
     steps:
+      - name: SONAR_TOKEN 확인
+        if: env.SONAR_TOKEN == ''
+        run: echo "::warning::SONAR_TOKEN이 아직 없어서 SonarQube 분석을 건너뛰어요."
       - uses: actions/checkout@v4
+        if: env.SONAR_TOKEN != '' && (github.event_name == 'push' || github.base_ref == 'main')
         with:
           fetch-depth: 0  # SonarQube가 "새 코드"를 구분하려면 전체 기록이 필요하다
       - uses: actions/download-artifact@v4
+        if: env.SONAR_TOKEN != '' && (github.event_name == 'push' || github.base_ref == 'main')
         with:
           name: coverage
-      - name: SONAR_TOKEN 확인
-        if: env.SONAR_TOKEN == ''
-        run: echo "::warning::SONAR_TOKEN이 아직 없어서 SonarQube 분석을 건너뛰어요 (mspace-core와 같은 방식)."
-      # SONAR_TOKEN 비밀값이 없으면(설정 전) 건너뛴다
       - uses: SonarSource/sonarqube-scan-action@v5
-        if: env.SONAR_TOKEN != ''
+        if: env.SONAR_TOKEN != '' && (github.event_name == 'push' || github.base_ref == 'main')
         with:
-          # main으로 가는 PR(또는 main push)일 때만 품질 게이트 결과를 기다려서, 실패하면 이 단계도 실패시킨다
           args: >
-            -Dsonar.qualitygate.wait=${{ github.base_ref == 'main' || github.ref == 'refs/heads/main' }}
+            -Dsonar.qualitygate.wait=${{ github.base_ref == 'main' }}
+            -Dsonar.qualitygate.timeout=300

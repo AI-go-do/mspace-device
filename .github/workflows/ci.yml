@@ -58,6 +58,14 @@ jobs:
       - name: SONAR_TOKEN 확인
         if: env.SONAR_TOKEN == ''
         run: echo "::warning::SONAR_TOKEN이 아직 없어서 SonarQube 분석을 건너뛰어요."
+      - name: 학교 SonarQube 서버 연결 확인
+        if: env.SONAR_HOST_URL != ''
+        run: |
+          if curl -sS -m 10 "$SONAR_HOST_URL/api/system/status"; then
+            echo ""; echo "서버 연결 OK"
+          else
+            echo "::warning::GitHub 러너에서 $SONAR_HOST_URL 에 연결할 수 없어요 (학교 망 안에서만 열리는 서버일 수 있음)"
+          fi
       - uses: actions/checkout@v4
         if: env.SONAR_TOKEN != '' && (github.event_name != 'pull_request' || github.base_ref == 'main')
         with:

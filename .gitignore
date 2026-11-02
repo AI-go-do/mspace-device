@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 .venv/
 .DS_Store
+coverage.xml
+.coverage
+.pytest_cache/

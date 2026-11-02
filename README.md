@@ -95,14 +95,24 @@ flowchart LR
 - `eventId` = 방 번호 - 켜질 때마다 뽑는 랜덤 번호 - 순서
 - 와이파이가 끊겨 중계가 같은 이벤트를 다시 보내도(최대 3번) 서버가 같은 eventId는 **한 번만 저장**해요 (중복 제거)
 - 가운데 랜덤 번호는 우노를 껐다 켜서 순서가 0부터 다시 시작해도 번호가 겹치지 않게 해요
-- 중계가 서버에 보낼 때 `receivedAt`(받은 시각, UTC)을 붙여요
+- 서버에는 이 값을 **UUID로 바꿔서** 보내요 (uuid5). 같은 입력이면 항상 같은 UUID라서 재전송해도 중복 제거가 그대로 돼요
+- 중계가 센서 이벤트를 서버에 보낼 때 `receivedAt`(받은 시각, UTC)을 붙여요
 
 ## 7. 서버와 맞출 것 (core, 지영님과 합의)
 
-| API | 요청 | 정할 것 |
-|---|---|---|
-| `POST /api/access/verify` | `{roomId, code}` | 응답 형식 (맞음 / 틀림 / 잠김), 장치 토큰 방식 |
-| `POST /api/sensor-events` | 위 이벤트 JSON | 누가 만들지, eventId unique 제약 |
+**출입 확인 (지영님 형식에 맞춤)**
+
+```json
+요청: {"eventId": "uuid", "roomId": 1, "deviceId": "keypad-1", "code": "123456"}
+응답: {"result": "OPENED"}  또는  {"result": "DENIED", "reason": "WRONG_CODE"}
+```
+
+중계는 `OPENED`일 때만 초록 LED, 그 밖에는(서버 응답 없음 포함) 빨간 LED를 켜요. 거부 이유는 로그에 남겨요.
+
+| 아직 정할 것 | 내용 |
+|---|---|
+| `POST /api/access/verify` | 잠김(5회 실패) 응답의 reason 이름, 장치 토큰 방식 |
+| `POST /api/sensor-events` | 누가 만들지, eventId unique 제약 |
 
 ## 8. 확장 계획
 

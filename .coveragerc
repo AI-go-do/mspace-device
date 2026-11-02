@@ -1,0 +1,6 @@
+[run]
+# 커버리지는 게이트웨이 코드만 잰다 (테스트 파일 자체는 빼고)
+include = gateway/*
+omit = gateway/tests/*
+# SonarQube가 경로를 찾을 수 있게 저장소 기준 상대 경로로 적는다
+relative_files = True

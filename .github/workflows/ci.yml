@@ -1,0 +1,60 @@
+# PR마다 자동 확인
+#  - test: 게이트웨이 테스트 + 커버리지
+#  - firmware: 우노 펌웨어가 컴파일되는지
+#  - sonar: SonarQube Cloud 분석. develop은 결과 표시만, main으로 가는 PR은 품질 게이트(새 코드 커버리지 80% 이상) 통과해야 성공
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r gateway/requirements-dev.txt
+      - run: pytest --cov --cov-report=xml --cov-report=term-missing
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.xml
+
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/compile-sketches@v1
+        with:
+          fqbn: arduino:avr:uno
+          sketch-paths: firmware/uno_sensor_node
+          libraries: |
+            - name: Keypad
+
+  sonar:
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # SonarQube가 "새 코드"를 구분하려면 전체 기록이 필요하다
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage
+      - name: SONAR_TOKEN 확인
+        run: |
+          if [ -z "$SONAR_TOKEN" ]; then
+            echo "::error::저장소 Secrets에 SONAR_TOKEN이 없어요. README의 SonarQube 설정을 확인하세요."
+            exit 1
+          fi
+      - uses: SonarSource/sonarqube-scan-action@v5
+        with:
+          # main으로 가는 PR(또는 main push)일 때만 품질 게이트 결과를 기다려서, 실패하면 이 단계도 실패시킨다
+          args: >
+            -Dsonar.qualitygate.wait=${{ github.base_ref == 'main' || github.ref == 'refs/heads/main' }}

@@ -85,6 +85,22 @@ flowchart LR
    ```
    포트는 자동으로 찾아요. 못 찾으면 `PORT=/dev/ttyACM0`처럼 지정해요.
 
+### 테스트
+
+```bash
+pip3 install -r gateway/requirements-dev.txt
+pytest --cov --cov-report=term-missing   # 우노·서버 없이 가짜 시리얼로 게이트웨이를 확인해요
+```
+
+### CI (PR마다 자동)
+
+| 확인 | 내용 | 합치기 조건 |
+|---|---|---|
+| `test` | 게이트웨이 테스트 + 커버리지 | develop · main 모두 통과해야 함 |
+| `firmware` | 우노 펌웨어 컴파일 (Keypad 포함) | develop · main 모두 통과해야 함 |
+| `sonar` | SonarQube Cloud 분석 | develop은 결과 표시만, **main은 새 코드 커버리지 80% 이상** (품질 게이트) |
+| CodeRabbit | AI 리뷰 (한국어) | 참고용. 팀원 1명 승인은 따로 필요 |
+
 ## 6. 이벤트 형식과 eventId
 
 ```json

@@ -17,15 +17,15 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false  # 토큰을 디스크에 남기지 않는다
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       - run: pip install -r gateway/requirements-dev.txt
       - run: pytest --cov --cov-report=xml --cov-report=term-missing
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage
           path: coverage.xml
@@ -33,7 +33,7 @@ jobs:
   firmware:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false  # 뒤에서 외부 설치 스크립트를 실행하므로 토큰을 남기지 않는다
       # arduino-cli로 직접 컴파일한다 (젯슨에서 올릴 때와 같은 도구)
@@ -73,16 +73,16 @@ jobs:
           else
             echo "::warning::GitHub 러너에서 $SONAR_HOST_URL 에 연결할 수 없어요 (학교 망 안에서만 열리는 서버일 수 있음)"
           fi
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         if: env.SONAR_TOKEN != '' && (github.event_name != 'pull_request' || github.base_ref == 'main')
         with:
           persist-credentials: false
           fetch-depth: 0  # SonarQube가 "새 코드"를 구분하려면 전체 기록이 필요하다
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: env.SONAR_TOKEN != '' && (github.event_name != 'pull_request' || github.base_ref == 'main')
         with:
           name: coverage
-      - uses: SonarSource/sonarqube-scan-action@v5
+      - uses: SonarSource/sonarqube-scan-action@2f77a1ec69fb1d595b06f35ab27e97605bdef703 # v5.3.2
         if: env.SONAR_TOKEN != '' && (github.event_name != 'pull_request' || github.base_ref == 'main')
         with:
           args: >

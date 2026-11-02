@@ -52,7 +52,7 @@ def post(path, body):
     같은 eventId로 다시 보내기 때문에, 서버가 eventId로 중복을 걸러야 한 번만 저장된다.
     """
     if DRY_RUN:
-        print("[DRY_RUN] POST", path, json.dumps(body, ensure_ascii=False))
+        print("[DRY_RUN] POST", path, body["eventId"])  # 번호(code)는 비밀이라 로그에 남기지 않는다
         # 테스트용: 123456만 통과
         return {"result": "OPENED"} if body.get("code") == "123456" else {"result": "DENIED", "reason": "WRONG_CODE"}
     for attempt in range(1, RETRIES + 1):  # attempt = 지금 몇 번째 시도인지 (1, 2, 3)
@@ -62,7 +62,8 @@ def post(path, body):
             return r.json() if r.content else {}
         except requests.RequestException as e:  # e = 실패 이유 (연결 끊김, 시간 초과 등)
             print(f"전송 실패 {attempt}/{RETRIES}: {e}")
-            time.sleep(attempt)  # 1초, 2초, 3초씩 점점 길게 기다렸다 재시도
+            if attempt < RETRIES:  # 마지막 실패 뒤에는 기다리지 않고 바로 거부한다
+                time.sleep(attempt)  # 1초, 2초씩 점점 길게 기다렸다 재시도
     return None
 
 
@@ -83,10 +84,12 @@ def main():
             print("JSON 아님:", line)
             continue
 
-        event["eventId"] = to_uuid(event["eventId"])  # 서버 형식(UUID)으로 바꾼다
-
         if event.get("sensorType") != "keypad":  # 지금은 키패드만 처리한다
             continue
+        if not all(k in event for k in ("eventId", "roomId", "code")):  # 필드가 빠진 줄은 건너뛴다
+            print("필드 없음:", line)
+            continue
+        event["eventId"] = to_uuid(event["eventId"])  # 서버 형식(UUID)으로 바꾼다
 
         # 출입 확인은 지영과 맞춘 4개 필드만 보낸다
         body = {
@@ -96,10 +99,11 @@ def main():
             "code": event["code"],
         }
         res = post("/api/access/verify", body)  # res = 서버의 판단 결과. 예: {"result": "OPENED"}
-        ok = bool(res) and res.get("result") == "OPENED"  # 열림일 때만 True. 서버 응답이 없으면 안전하게 거부(False)
+        res = res if isinstance(res, dict) else {}  # 응답이 이상한 형식이면 빈 응답으로 본다
+        ok = res.get("result") == "OPENED"  # 열림일 때만 True. 서버 응답이 없으면 안전하게 거부(False)
         ser.write(b"OK\n" if ok else b"NO\n")  # 우노에 결과를 돌려줘서 LED를 켜게 한다
-        reason = "" if ok else (res or {}).get("reason", "서버 응답 없음")  # 거부 이유. 나중에 5회 잠금 기능에 쓴다
-        print("출입", body["code"], "->", "열림" if ok else f"거부 ({reason})")
+        reason = "" if ok else res.get("reason", "서버 응답 없음")  # 거부 이유. 나중에 5회 잠금 기능에 쓴다
+        print("출입", body["eventId"], "->", "열림" if ok else f"거부 ({reason})")
 
 
 if __name__ == "__main__":

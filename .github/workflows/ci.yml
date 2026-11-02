@@ -4,6 +4,9 @@
 #  - sonar: 학교 SonarQube 서버 분석. develop은 결과 표시만, main으로 가는 PR은 품질 게이트(새 코드 커버리지 80% 이상) 통과해야 성공
 name: CI
 
+permissions:
+  contents: read  # 읽기만 한다 (쓰기 권한이 필요 없다)
+
 on:
   pull_request:
   push:
@@ -15,6 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false  # 토큰을 디스크에 남기지 않는다
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -29,6 +34,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false  # 뒤에서 외부 설치 스크립트를 실행하므로 토큰을 남기지 않는다
       # arduino-cli로 직접 컴파일한다 (젯슨에서 올릴 때와 같은 도구)
       - name: arduino-cli 설치
         run: |
@@ -69,6 +76,7 @@ jobs:
       - uses: actions/checkout@v4
         if: env.SONAR_TOKEN != '' && (github.event_name != 'pull_request' || github.base_ref == 'main')
         with:
+          persist-credentials: false
           fetch-depth: 0  # SonarQube가 "새 코드"를 구분하려면 전체 기록이 필요하다
       - uses: actions/download-artifact@v4
         if: env.SONAR_TOKEN != '' && (github.event_name != 'pull_request' || github.base_ref == 'main')

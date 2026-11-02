@@ -11,6 +11,7 @@
 // (재실 센서 PIR·조도·레이더는 다음 단계에서 추가: FR-DEV-101)
 
 #include <Keypad.h>
+#include <EEPROM.h>
 
 // ---------- 설정값 (방·배선이 바뀌면 여기만 고친다) ----------
 const int ROOM_ID = 1;        // 이 장치가 달린 방 번호. 서버의 방 id와 같아야 한다. 방마다 복제할 때 이것만 바꾼다
@@ -30,7 +31,7 @@ byte colPins[COLS] = {7, 6, 5, 4};    // 키패드 열1~4가 꽂힌 우노 핀
 Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);  // 위 설정으로 만든 키패드 객체
 
 // ---------- 실행 중에 바뀌는 값 ----------
-unsigned long bootId;      // 켜질 때마다 새로 뽑는 랜덤 번호. 재부팅으로 seq가 0부터 다시 시작해도 eventId가 겹치지 않게
+unsigned long bootId;      // 부팅 횟수. 켤 때마다 1씩 늘려 EEPROM에 저장한다. 재부팅으로 seq가 0부터 다시 시작해도 eventId가 겹치지 않게
 unsigned long seq = 0;     // 이벤트 순서 번호. 보낼 때마다 1씩 늘어난다
 String code = "";          // 지금까지 누른 숫자. 6자리 + #이면 서버로 보내고 비운다
 
@@ -57,10 +58,13 @@ void blink(int pin) {
 
 void setup() {
   Serial.begin(115200);         // 중계와 통신 속도. gateway.py의 115200과 같아야 한다
+  Serial.setTimeout(50);        // 응답 한 줄을 기다리는 시간. 길면 그동안 키패드를 못 읽는다 (기본 1초)
   pinMode(PIN_LED_OK, OUTPUT);  // LED 핀은 쓰기
   pinMode(PIN_LED_NO, OUTPUT);
-  randomSeed(analogRead(A5));   // 아무것도 안 꽂힌 A5의 잡음 값으로 난수 시작점을 정한다 (매번 다른 bootId)
-  bootId = random(10000, 99999);
+  EEPROM.get(0, bootId);        // 전원을 꺼도 남는 메모리(EEPROM)에서 지난 부팅 횟수를 읽는다
+  if (bootId == 0xFFFFFFFF) bootId = 0;  // 처음 쓰는 보드는 EEPROM이 FF로 차 있다
+  bootId++;
+  EEPROM.put(0, bootId);
 }
 
 void loop() {

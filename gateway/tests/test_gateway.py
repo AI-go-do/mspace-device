@@ -103,7 +103,9 @@ def test_keypad_opened_sends_ok(run):
 def test_keypad_denied_sends_no(run, capsys):
     written, _ = run([keypad_line("111111")], [FakeResponse({"result": "DENIED", "reason": "WRONG_CODE"})])
     assert written == [b"NO\n"]
-    assert "WRONG_CODE" in capsys.readouterr().out  # 거부 이유가 로그에 남는다
+    out = capsys.readouterr().out
+    assert "WRONG_CODE" in out  # 거부 이유가 로그에 남는다
+    assert "111111" not in out  # 번호(비밀)는 로그에 안 남는다
 
 
 def test_keypad_server_down_is_denied(run):
@@ -138,6 +140,24 @@ def test_skips_non_json_lines(run, capsys):
 def test_empty_response_body_is_denied(run):
     written, _ = run([keypad_line("123456")], [FakeResponse(None)])
     assert written == [b"NO\n"]  # 서버가 빈 응답이면 안전하게 거부
+
+
+def test_non_dict_response_is_denied(run):
+    written, _ = run([keypad_line("123456")], [FakeResponse(["OPENED"])])
+    assert written == [b"NO\n"]  # 응답 형식이 이상해도 멈추지 않고 거부
+
+
+def test_skips_keypad_line_missing_fields(run):
+    bad = json.dumps({"eventId": "1-1-1", "roomId": 1, "sensorType": "keypad"})  # code 없음
+    written, sent = run([bad, keypad_line("123456")], [FakeResponse({"result": "OPENED"})])
+    assert written == [b"OK\n"] and len(sent) == 1  # 빠진 줄은 건너뛰고 다음 줄은 처리
+
+
+def test_no_wait_after_last_retry(run, monkeypatch):
+    waits = []
+    monkeypatch.setattr(gateway.time, "sleep", waits.append)
+    run([keypad_line("123456")], [requests.ConnectionError("down")] * gateway.RETRIES)
+    assert waits == [2, 1, 2]  # 우노 켜짐 대기 2초, 재시도 1·2초. 3번째 실패 뒤에는 기다리지 않는다
 
 
 # ---- 서버 없이 테스트 (DRY_RUN) ----

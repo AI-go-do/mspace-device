@@ -46,6 +46,16 @@ def to_uuid(raw_id):
     return str(uuid.uuid5(EVENT_NS, raw_id))
 
 
+def valid_keypad(event):
+    """우노가 보내는 키패드 줄 형식인지 확인한다: eventId는 글자, roomId는 정수, code는 숫자 6자리."""
+    room, code = event.get("roomId"), event.get("code")
+    return (
+        isinstance(event.get("eventId"), str)
+        and isinstance(room, int) and not isinstance(room, bool)  # True/False도 int로 취급되므로 따로 막는다
+        and isinstance(code, str) and len(code) == 6 and code.isdigit()
+    )
+
+
 def post(path, body):
     """서버로 보내고 응답(JSON)을 돌려준다. 3번 모두 실패하면 None.
 
@@ -86,8 +96,8 @@ def main():
 
         if event.get("sensorType") != "keypad":  # 지금은 키패드만 처리한다
             continue
-        if not all(k in event for k in ("eventId", "roomId", "code")):  # 필드가 빠진 줄은 건너뛴다
-            print("필드 없음, 건너뜀")
+        if not valid_keypad(event):  # 형식이 어긋난 줄은 건너뛴다 (우노 코드와 같은 형식만 받는다)
+            print("형식이 맞지 않는 줄, 건너뜀")
             continue
         event["eventId"] = to_uuid(event["eventId"])  # 서버 형식(UUID)으로 바꾼다
 

@@ -149,10 +149,16 @@ def test_non_dict_response_is_denied(run):
     assert written == [b"NO\n"]  # 응답 형식이 이상해도 멈추지 않고 거부
 
 
-def test_skips_keypad_line_missing_fields(run):
-    bad = json.dumps({"eventId": "1-1-1", "roomId": 1, "sensorType": "keypad"})  # code 없음
-    written, sent = run([bad, keypad_line("123456")], [FakeResponse({"result": "OPENED"})])
-    assert written == [b"OK\n"] and len(sent) == 1  # 빠진 줄은 건너뛰고 다음 줄은 처리
+@pytest.mark.parametrize("bad", [
+    {"eventId": "1-1-1", "roomId": 1},                     # code 없음
+    {"eventId": None, "roomId": 1, "code": "123456"},      # eventId가 글자가 아님
+    {"eventId": "1-1-1", "roomId": True, "code": "123456"},  # roomId가 정수가 아님
+    {"eventId": "1-1-1", "roomId": 1, "code": "12a456"},   # code가 숫자 6자리가 아님
+])
+def test_skips_malformed_keypad_line(run, bad):
+    line = json.dumps({**bad, "sensorType": "keypad"})
+    written, sent = run([line, keypad_line("123456")], [FakeResponse({"result": "OPENED"})])
+    assert written == [b"OK\n"] and len(sent) == 1  # 이상한 줄은 건너뛰고 다음 줄은 처리
 
 
 def test_no_wait_after_last_retry(run, monkeypatch):

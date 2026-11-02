@@ -66,9 +66,7 @@ flowchart LR
 | 키패드 핀 5~8 (열1~4) | D7, D6, D5, D4 |
 | 초록 LED (맞음) | D12 → 220Ω → LED → GND |
 | 빨강 LED (틀림) | D13 → 220Ω → LED → GND |
-| PIR OUT | D2 (VCC 5V, GND) |
-| 레이더 OUT (도착 후) | D3 (VCC 5V, GND) |
-| 조도 CDS | 5V → CDS → A0 → 10kΩ → GND |
+| PIR · 조도 · 레이더 | 다음 단계(FR-DEV-101)에서 코드와 함께 추가. 배선도에는 미리 그려 둠 |
 
 키패드를 눌렀는데 다른 숫자가 찍히면 선을 바꾸지 말고 코드의 `rowPins`, `colPins` 순서만 바꿔요.
 
@@ -104,7 +102,6 @@ pytest --cov --cov-report=term-missing   # 우노·서버 없이 가짜 시리�
 ## 6. 이벤트 형식과 eventId
 
 ```json
-{"eventId":"1-48213-17","roomId":1,"sensorType":"pir","value":1,"ms":12345}
 {"eventId":"1-48213-18","roomId":1,"sensorType":"keypad","code":"123456","ms":12890}
 ```
 
@@ -112,7 +109,6 @@ pytest --cov --cov-report=term-missing   # 우노·서버 없이 가짜 시리�
 - 와이파이가 끊겨 중계가 같은 이벤트를 다시 보내도(최대 3번) 서버가 같은 eventId는 **한 번만 저장**해요 (중복 제거)
 - 가운데 랜덤 번호는 우노를 껐다 켜서 순서가 0부터 다시 시작해도 번호가 겹치지 않게 해요
 - 서버에는 이 값을 **UUID로 바꿔서** 보내요 (uuid5). 같은 입력이면 항상 같은 UUID라서 재전송해도 중복 제거가 그대로 돼요
-- 중계가 센서 이벤트를 서버에 보낼 때 `receivedAt`(받은 시각, UTC)을 붙여요
 
 ## 7. 서버와 맞출 것 (core, 지영님과 합의)
 

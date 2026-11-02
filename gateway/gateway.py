@@ -1,8 +1,7 @@
 """M-SPACE 게이트웨이 (노트북/젯슨용)
 
-우노가 USB 시리얼로 보내는 JSON 한 줄을 읽어서 서버로 보낸다.
-- 센서 이벤트(pir, radar, light) -> POST {SERVER}/api/sensor-events
-- 키패드 번호(keypad)           -> POST {SERVER}/api/access/verify, 결과를 우노에 OK/NO로 돌려줌
+우노가 USB 시리얼로 보내는 키패드 번호(JSON 한 줄)를 읽어서 서버에 물어보고,
+결과를 우노에 OK/NO로 돌려준다 (FR-ACC-001). 재실 센서 전달은 다음 단계에서 추가.
 
 출입 확인 API (core 담당 지영과 맞춘 형식):
   요청: {"eventId": "uuid", "roomId": 1, "deviceId": "keypad-1", "code": "123456"}
@@ -19,7 +18,6 @@ import json
 import os
 import time
 import uuid
-from datetime import datetime, timezone
 
 import requests
 import serial
@@ -55,9 +53,8 @@ def post(path, body):
     """
     if DRY_RUN:
         print("[DRY_RUN] POST", path, json.dumps(body, ensure_ascii=False))
-        if path == "/api/access/verify":  # 테스트용: 123456만 통과
-            return {"result": "OPENED"} if body.get("code") == "123456" else {"result": "DENIED", "reason": "WRONG_CODE"}
-        return {}
+        # 테스트용: 123456만 통과
+        return {"result": "OPENED"} if body.get("code") == "123456" else {"result": "DENIED", "reason": "WRONG_CODE"}
     for attempt in range(1, RETRIES + 1):  # attempt = 지금 몇 번째 시도인지 (1, 2, 3)
         try:
             r = requests.post(SERVER + path, json=body, timeout=3)  # r = 서버 응답. 3초 안에 답 없으면 실패
@@ -88,25 +85,21 @@ def main():
 
         event["eventId"] = to_uuid(event["eventId"])  # 서버 형식(UUID)으로 바꾼다
 
-        if event.get("sensorType") == "keypad":
-            # 출입 확인은 지영과 맞춘 4개 필드만 보낸다
-            body = {
-                "eventId": event["eventId"],
-                "roomId": event["roomId"],
-                "deviceId": f"keypad-{event['roomId']}",  # 방마다 키패드 1개라서 방 번호로 이름을 붙인다
-                "code": event["code"],
-            }
-            res = post("/api/access/verify", body)  # res = 서버의 판단 결과. 예: {"result": "OPENED"}
-            ok = bool(res) and res.get("result") == "OPENED"  # 열림일 때만 True. 서버 응답이 없으면 안전하게 거부(False)
-            ser.write(b"OK\n" if ok else b"NO\n")  # 우노에 결과를 돌려줘서 LED를 켜게 한다
-            reason = "" if ok else (res or {}).get("reason", "서버 응답 없음")  # 거부 이유. 나중에 5회 잠금 기능에 쓴다
-            print("출입", body["code"], "->", "열림" if ok else f"거부 ({reason})")
-        else:
-            # 장치에는 시계가 없어서 받은 시각(UTC)을 게이트웨이가 붙인다
-            event["receivedAt"] = datetime.now(timezone.utc).isoformat()
-            post("/api/sensor-events", event)
-            if not DRY_RUN:
-                print(event["sensorType"], event["value"])
+        if event.get("sensorType") != "keypad":  # 지금은 키패드만 처리한다
+            continue
+
+        # 출입 확인은 지영과 맞춘 4개 필드만 보낸다
+        body = {
+            "eventId": event["eventId"],
+            "roomId": event["roomId"],
+            "deviceId": f"keypad-{event['roomId']}",  # 방마다 키패드 1개라서 방 번호로 이름을 붙인다
+            "code": event["code"],
+        }
+        res = post("/api/access/verify", body)  # res = 서버의 판단 결과. 예: {"result": "OPENED"}
+        ok = bool(res) and res.get("result") == "OPENED"  # 열림일 때만 True. 서버 응답이 없으면 안전하게 거부(False)
+        ser.write(b"OK\n" if ok else b"NO\n")  # 우노에 결과를 돌려줘서 LED를 켜게 한다
+        reason = "" if ok else (res or {}).get("reason", "서버 응답 없음")  # 거부 이유. 나중에 5회 잠금 기능에 쓴다
+        print("출입", body["code"], "->", "열림" if ok else f"거부 ({reason})")
 
 
 if __name__ == "__main__":

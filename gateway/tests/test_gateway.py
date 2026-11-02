@@ -47,7 +47,7 @@ def keypad_line(code, seq=1):
     return json.dumps({"eventId": f"1-48213-{seq}", "roomId": 1, "sensorType": "keypad", "code": code, "ms": 10})
 
 
-def pir_line(value, seq=1):
+def pir_line(value, seq=1):  # 키패드가 아닌 줄 예시 (나중에 붙일 재실 센서)
     return json.dumps({"eventId": f"1-48213-{seq}", "roomId": 1, "sensorType": "pir", "value": value, "ms": 10})
 
 
@@ -121,26 +121,23 @@ def test_retry_then_success(run):
     assert len(sent) == 2
 
 
-# ---- 센서 이벤트 ----
+# ---- 키패드가 아닌 줄 ----
 
-def test_sensor_event_posted_with_received_at(run):
-    _, sent = run([pir_line(1)])
-    url, body = sent[0]
-    assert url.endswith("/api/sensor-events")
-    assert body["sensorType"] == "pir" and body["value"] == 1
-    assert "receivedAt" in body
-    assert body["eventId"] == gateway.to_uuid("1-48213-1")
+def test_ignores_non_keypad_events(run):
+    # 재실 센서 전달은 아직 안 한다 (다음 단계). 서버로 아무것도 안 보낸다
+    written, sent = run([pir_line(1)])
+    assert sent == [] and written == []
 
 
 def test_skips_non_json_lines(run, capsys):
-    _, sent = run(["", "hello", "{broken", pir_line(0)])
+    _, sent = run(["", "hello", "{broken", keypad_line("123456")], [FakeResponse({"result": "OPENED"})])
     assert len(sent) == 1  # 깨진 줄은 건너뛰고 정상 줄만 보낸다
     assert "JSON 아님" in capsys.readouterr().out
 
 
-def test_empty_response_body(run):
-    _, sent = run([pir_line(1)], [FakeResponse(None)])
-    assert len(sent) == 1
+def test_empty_response_body_is_denied(run):
+    written, _ = run([keypad_line("123456")], [FakeResponse(None)])
+    assert written == [b"NO\n"]  # 서버가 빈 응답이면 안전하게 거부
 
 
 # ---- 서버 없이 테스트 (DRY_RUN) ----

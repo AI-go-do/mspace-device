@@ -62,7 +62,11 @@ void setup() {
   pinMode(PIN_LED_OK, OUTPUT);  // LED 핀은 쓰기
   pinMode(PIN_LED_NO, OUTPUT);
   EEPROM.get(0, bootId);        // 전원을 꺼도 남는 메모리(EEPROM)에서 지난 부팅 횟수를 읽는다
-  if (bootId == 0xFFFFFFFF) bootId = 0;  // 처음 쓰는 보드는 EEPROM이 FF로 차 있다
+  if (bootId == 0xFFFFFFFF) {   // 처음 쓰는 보드는 EEPROM이 FF로 차 있다
+    // 보드를 새로 바꿔도 예전 보드의 번호와 겹치지 않게 랜덤한 곳에서 시작한다
+    randomSeed(analogRead(A5) ^ ((unsigned long)analogRead(A4) << 10) ^ micros());  // 안 꽂힌 핀의 잡음으로 시작점을 섞는다
+    bootId = random(1, 1000000) * 1000UL;
+  }
   bootId++;
   EEPROM.put(0, bootId);
 }

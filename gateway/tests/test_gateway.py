@@ -132,9 +132,11 @@ def test_ignores_non_keypad_events(run):
 
 
 def test_skips_non_json_lines(run, capsys):
-    _, sent = run(["", "hello", "{broken", keypad_line("123456")], [FakeResponse({"result": "OPENED"})])
+    _, sent = run(["", "hello", '{"code":"654321"', keypad_line("123456")], [FakeResponse({"result": "OPENED"})])
     assert len(sent) == 1  # 깨진 줄은 건너뛰고 정상 줄만 보낸다
-    assert "JSON 아님" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "JSON 아님" in out
+    assert "654321" not in out  # 깨진 줄에 섞인 번호도 로그에 안 남는다
 
 
 def test_empty_response_body_is_denied(run):

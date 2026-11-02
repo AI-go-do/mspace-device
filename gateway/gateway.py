@@ -81,13 +81,13 @@ def main():
         try:
             event = json.loads(line)  # event = 한 줄을 딕셔너리로 바꾼 것 (eventId, roomId, sensorType ...)
         except json.JSONDecodeError:
-            print("JSON 아님:", line)
+            print("JSON 아님 (내용은 번호가 섞일 수 있어 남기지 않음)")
             continue
 
         if event.get("sensorType") != "keypad":  # 지금은 키패드만 처리한다
             continue
         if not all(k in event for k in ("eventId", "roomId", "code")):  # 필드가 빠진 줄은 건너뛴다
-            print("필드 없음:", line)
+            print("필드 없음, 건너뜀")
             continue
         event["eventId"] = to_uuid(event["eventId"])  # 서버 형식(UUID)으로 바꾼다
 

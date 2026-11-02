@@ -28,12 +28,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: arduino/compile-sketches@v1
-        with:
-          fqbn: arduino:avr:uno
-          sketch-paths: firmware/uno_sensor_node
-          libraries: |
-            - name: Keypad
+      # arduino-cli로 직접 컴파일한다 (젯슨에서 올릴 때와 같은 도구)
+      - name: arduino-cli 설치
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=$HOME/bin sh
+          echo "$HOME/bin" >> $GITHUB_PATH
+      - name: 우노 지원·Keypad 설치
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install arduino:avr
+          arduino-cli lib install Keypad
+      - name: 컴파일
+        run: arduino-cli compile -b arduino:avr:uno firmware/uno_sensor_node
 
   sonar:
     needs: test

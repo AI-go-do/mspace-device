@@ -154,6 +154,8 @@ def test_non_dict_response_is_denied(run):
     {"eventId": None, "roomId": 1, "code": "123456"},      # eventId가 글자가 아님
     {"eventId": "1-1-1", "roomId": True, "code": "123456"},  # roomId가 정수가 아님
     {"eventId": "1-1-1", "roomId": 1, "code": "12a456"},   # code가 숫자 6자리가 아님
+    {"eventId": "1-1-1", "roomId": 1, "code": "²²²²²²"},   # 0~9가 아닌 숫자 글자
+    {"eventId": "\ud800", "roomId": 1, "code": "123456"},  # 깨진 글자 (UUID 변환에서 오류 나던 값)
 ])
 def test_skips_malformed_keypad_line(run, bad):
     line = json.dumps({**bad, "sensorType": "keypad"})

@@ -15,6 +15,7 @@
 """
 import glob
 import json
+import re
 import os
 import time
 import uuid
@@ -46,13 +47,17 @@ def to_uuid(raw_id):
     return str(uuid.uuid5(EVENT_NS, raw_id))
 
 
+EVENT_ID_RE = re.compile(r"[0-9]+-[0-9]+-[0-9]+")  # 우노 형식: 방번호-부팅번호-순번
+CODE_RE = re.compile(r"[0-9]{6}")                   # 숫자 6자리 (0~9만. ² 같은 다른 숫자 글자는 안 됨)
+
+
 def valid_keypad(event):
-    """우노가 보내는 키패드 줄 형식인지 확인한다: eventId는 글자, roomId는 정수, code는 숫자 6자리."""
-    room, code = event.get("roomId"), event.get("code")
+    """우노가 보내는 키패드 줄 형식인지 확인한다. 형식이 다르면 False (게이트웨이가 멈추지 않게)."""
+    eid, room, code = event.get("eventId"), event.get("roomId"), event.get("code")
     return (
-        isinstance(event.get("eventId"), str)
+        isinstance(eid, str) and EVENT_ID_RE.fullmatch(eid) is not None
         and isinstance(room, int) and not isinstance(room, bool)  # True/False도 int로 취급되므로 따로 막는다
-        and isinstance(code, str) and len(code) == 6 and code.isdigit()
+        and isinstance(code, str) and CODE_RE.fullmatch(code) is not None
     )
 
 

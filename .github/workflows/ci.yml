@@ -31,6 +31,7 @@ jobs:
       # arduino-cli로 직접 컴파일한다 (젯슨에서 올릴 때와 같은 도구)
       - name: arduino-cli 설치
         run: |
+          mkdir -p $HOME/bin
           curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=$HOME/bin sh
           echo "$HOME/bin" >> $GITHUB_PATH
       - name: 우노 지원·Keypad 설치

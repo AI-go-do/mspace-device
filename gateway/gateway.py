@@ -5,13 +5,14 @@
 
 출입 확인 API (core 담당 지영과 맞춘 형식):
   요청: {"eventId": "uuid", "roomId": 1, "deviceId": "keypad-1", "code": "123456"}
+        헤더 Authorization: Bearer <장치 토큰>
   응답: {"result": "OPENED"}  또는  {"result": "DENIED", "reason": "WRONG_CODE"}
 
 서버가 아직 없으면 DRY_RUN=1 로 실행하면 보낼 내용만 화면에 찍는다.
 
 설치:  pip3 install pyserial requests
 실행:  DRY_RUN=1 python3 gateway.py
-       SERVER=http://서버주소:8080 python3 gateway.py
+       SERVER=http://서버주소:8080 DEVICE_TOKEN=<장치 토큰> python3 gateway.py
 """
 import glob
 import json
@@ -26,6 +27,8 @@ import serial
 # 설정값은 코드를 고치지 않고 실행할 때 환경변수로 바꿀 수 있다
 SERVER = os.environ.get("SERVER", "http://localhost:8080")  # 예약 서버(core) 주소
 DRY_RUN = os.environ.get("DRY_RUN") == "1"  # True면 서버에 안 보내고 화면에만 찍는다 (서버 없이 테스트용)
+# 장치 토큰: 서버가 "등록된 키패드"인지 확인하는 값 (사람 로그인 토큰과 따로). 값은 저장소에 넣지 않고 .env에만 둔다
+DEVICE_TOKEN = os.environ.get("DEVICE_TOKEN")
 # 우노가 꽂힌 USB 포트. 지정 안 하면 아래 이름 중 처음 찾은 것을 쓴다. 없으면 None
 #   리눅스: ttyACM(정품), ttyUSB(호환 보드) / 맥: cu.usbmodem(정품), cu.usbserial·cu.wchusbserial(호환 보드)
 PORT = os.environ.get("PORT") or (
@@ -72,10 +75,14 @@ def post(path, body):
         return {"result": "OPENED"} if body.get("code") == "123456" else {"result": "DENIED", "reason": "WRONG_CODE"}
     for attempt in range(1, RETRIES + 1):  # attempt = 지금 몇 번째 시도인지 (1, 2, 3)
         try:
-            r = requests.post(SERVER + path, json=body, timeout=3)  # r = 서버 응답. 3초 안에 답 없으면 실패
-            r.raise_for_status()  # 4xx·5xx 오류 응답도 실패로 처리
+            r = requests.post(SERVER + path, json=body, timeout=3,  # r = 서버 응답. 3초 안에 답 없으면 실패
+                              headers={"Authorization": f"Bearer {DEVICE_TOKEN}"})  # 장치 토큰을 같이 보낸다
+            if 400 <= r.status_code < 500:  # 4xx(토큰·형식 오류)는 다시 보내도 결과가 같아서 바로 거부한다
+                print(f"서버가 요청을 거부함 ({r.status_code}), 다시 보내지 않음")
+                return None
+            r.raise_for_status()  # 5xx(서버 오류)는 실패로 처리해서 다시 보낸다
             return r.json() if r.content else {}
-        except requests.RequestException as e:  # e = 실패 이유 (연결 끊김, 시간 초과 등)
+        except requests.RequestException as e:  # e = 실패 이유 (연결 끊김, 시간 초과, 5xx)
             print(f"전송 실패 {attempt}/{RETRIES}: {e}")
             if attempt < RETRIES:  # 마지막 실패 뒤에는 기다리지 않고 바로 거부한다
                 time.sleep(attempt)  # 1초, 2초씩 점점 길게 기다렸다 재시도
@@ -85,6 +92,8 @@ def post(path, body):
 def main():
     if not PORT:
         raise SystemExit("우노를 못 찾았어요. USB 연결을 확인하거나 PORT=/dev/ttyACM0 처럼 지정하세요.")
+    if not DRY_RUN and not DEVICE_TOKEN:
+        raise SystemExit("DEVICE_TOKEN이 없어요. .env에 넣고 불러오거나, 서버 없이 테스트하려면 DRY_RUN=1 로 실행하세요.")
     print("연결:", PORT, "| 서버:", "DRY_RUN" if DRY_RUN else SERVER)
     ser = serial.Serial(PORT, 115200, timeout=1)  # ser = 우노와 연결된 시리얼 통로. 115200은 우노 코드와 같은 속도
     time.sleep(2)  # 우노는 시리얼 연결 시 재부팅되므로 켜질 때까지 기다린다

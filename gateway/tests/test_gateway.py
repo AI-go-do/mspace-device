@@ -56,6 +56,7 @@ def run(monkeypatch):
     """가짜 우노 줄을 넣고 main()을 돌린 뒤, (우노에 쓴 값, 서버로 보낸 요청 목록)을 돌려준다."""
     monkeypatch.setattr(gateway.time, "sleep", lambda s: None)  # 테스트에서는 기다리지 않는다
     monkeypatch.setattr(gateway, "PORT", "/dev/fake")
+    monkeypatch.setattr(gateway, "DEVICE_TOKEN", "test-token")
 
     def _run(lines, responses=None, dry_run=False):
         monkeypatch.setattr(gateway, "DRY_RUN", dry_run)
@@ -64,8 +65,9 @@ def run(monkeypatch):
         sent = []
         queue = list(responses or [])
 
-        def fake_post(url, json=None, timeout=None):
+        def fake_post(url, json=None, timeout=None, headers=None):
             sent.append((url, json))
+            assert headers == {"Authorization": "Bearer test-token"}  # 장치 토큰을 항상 같이 보낸다
             r = queue.pop(0) if queue else FakeResponse({})
             if isinstance(r, Exception):
                 raise r
@@ -170,9 +172,30 @@ def test_no_wait_after_last_retry(run, monkeypatch):
     assert waits == [2, 1, 2]  # 우노 켜짐 대기 2초, 재시도 1·2초. 3번째 실패 뒤에는 기다리지 않는다
 
 
+def test_4xx_is_not_retried(run, capsys):
+    written, sent = run([keypad_line("123456")], [FakeResponse({}, status=401)])
+    assert written == [b"NO\n"]
+    assert len(sent) == 1  # 401은 다시 보내도 같으니 한 번만 보낸다
+    assert "401" in capsys.readouterr().out
+
+
+def test_5xx_is_retried(run):
+    written, sent = run([keypad_line("123456")], [FakeResponse({}, status=503), FakeResponse({"result": "OPENED"})])
+    assert written == [b"OK\n"] and len(sent) == 2  # 서버 오류는 다시 보내서 성공
+
+
+def test_missing_token_exits(monkeypatch):
+    monkeypatch.setattr(gateway, "PORT", "/dev/fake")
+    monkeypatch.setattr(gateway, "DRY_RUN", False)
+    monkeypatch.setattr(gateway, "DEVICE_TOKEN", None)
+    with pytest.raises(SystemExit):
+        gateway.main()
+
+
 # ---- 서버 없이 테스트 (DRY_RUN) ----
 
-def test_dry_run(run, capsys):
+def test_dry_run(run, capsys, monkeypatch):
+    monkeypatch.setattr(gateway, "DEVICE_TOKEN", None)  # DRY_RUN은 토큰 없이 된다
     written, sent = run([keypad_line("123456", 1), keypad_line("999999", 2), pir_line(1, 3)], dry_run=True)
     assert written == [b"OK\n", b"NO\n"]
     assert sent == []  # 서버로는 아무것도 안 보낸다

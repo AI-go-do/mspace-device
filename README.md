@@ -79,9 +79,12 @@ flowchart LR
    ```bash
    pip3 install -r gateway/requirements.txt
    DRY_RUN=1 python3 gateway/gateway.py              # 서버 없이 테스트: 123456#만 초록
+   echo 'DEVICE_TOKEN=<지영님께 받은 장치 토큰>' > .env   # 토큰은 .env에만 (저장소에 안 올라가요)
+   set -a; . ./.env; set +a                          # .env 값을 불러오기
    SERVER=http://<core 주소> python3 gateway/gateway.py
    ```
    포트는 자동으로 찾아요. 못 찾으면 `PORT=/dev/ttyACM0`처럼 지정해요.
+   서버에는 `Authorization: Bearer <장치 토큰>` 헤더로 보내요. 토큰이 없으면 DRY_RUN만 돼요.
 
 ### 테스트
 

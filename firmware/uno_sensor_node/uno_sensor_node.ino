@@ -75,7 +75,11 @@ void loop() {
   // 키패드: 숫자 6자리 입력 후 #으로 전송, *로 지우기
   char k = keypad.getKey();  // 방금 눌린 키. 안 눌렸으면 0
   if (k) {
-    if (k == '#') { if (code.length() == 6) sendCode(code); code = ""; }  // 6자리일 때만 보내고, 아니면 버린다
+    if (k == '#') {
+      if (code.length() == 6) sendCode(code);  // 6자리일 때만 서버에 확인
+      else blink(PIN_LED_NO);                  // 6자리가 아니면 빨강 LED로 잘못 눌렀다고 알린다
+      code = "";
+    }
     else if (k == '*') { code = ""; }                                     // 처음부터 다시 입력
     else if (k >= '0' && k <= '9' && code.length() < 6) { code += k; }   // 숫자만, 최대 6자리까지 모은다 (A~D는 무시)
   }

@@ -1,6 +1,7 @@
 # 키패드 ↔ core 통신 형식 (FR-ACC-001)
 
 > 상태: **초안** · 작성 수연 · 확인 지영(core), 재웅(장치 토큰)
+> core 쪽 공식 명세는 docs 저장소 [`api/README.md` 6장](https://github.com/AI-go-do/docs/blob/main/api/README.md#6-출입-키패드)이에요 (core `develop`에 구현됨). 이 문서는 **장치 쪽**(우노·게이트웨이)이 그 API를 어떻게 쓰는지 정리해요.
 > 4차 회의(11/3) 할 일 "키패드 ↔ core 통신 형식 문서로 남기기". 지금까지 코드에만 있던 약속을 한곳에 모았다.
 > ✅ = 코드에 이미 있음 / 🟡 = 제안, 확인 필요
 
@@ -55,9 +56,9 @@ Content-Type: application/json
 
 | 필드 | 형식 | 뜻 |
 |---|---|---|
-| `eventId` | UUID | 우노 `eventId`를 UUID로 바꾼 값. 중복 거르기용 (4장) |
+| `eventId` | 글자 1~64자 | 우노 `eventId`를 UUID(36자)로 바꾼 값. 중복 거르기용 (4장) |
 | `roomId` | 정수 | 방 번호 |
-| `deviceId` | 글자 | `keypad-<roomId>`. 방마다 키패드 1개 |
+| `deviceId` | 글자 50자 이하 (선택) | `keypad-<roomId>`. 방마다 키패드 1개 |
 | `code` | 글자, 숫자 6자리 | 입력한 번호 |
 
 - 요구사항 FR-ACC-001에는 `{roomId, code}`만 적혀 있다. `eventId`·`deviceId`는 지영과 따로 맞춘 것이고 TEAM.md의 `AccessEvent(eventId, roomId, deviceId, ...)`와 같은 이름이다. 🟡 **요구사항 문장도 4개 필드로 고칠지 확인 (지영)**
@@ -76,11 +77,11 @@ Content-Type: application/json
 |---|---|---|---|
 | `OPENED` | — | 번호 맞음. 처음이면 `BOOKED` → `IN_USE`(체크인), 그 뒤엔 문만 열림 | ✅ |
 | `DENIED` | `WRONG_CODE` | 이 방의 유효한 번호가 아님 (다른 방 번호 포함) | ✅ |
-| `DENIED` | `TOO_EARLY` | 시작 10분 전보다 이름 | 🟡 제안 |
-| `DENIED` | `LOCKED` | 5번 연속 틀려서 1분 잠김 | 🟡 제안 |
+| `DENIED` | `NOT_YET` | 시작 10분 전보다 이름 | ✅ core |
+| `DENIED` | `LOCKED` | 5번 연속 틀려서 1분 잠김 | ✅ core |
 
 - 게이트웨이는 `OPENED`가 아니면 모두 `NO`로 처리한다. 그래서 `reason` 이름이 바뀌어도 장치는 안 깨진다. `reason`은 로그와 나중에 LED 표시를 다르게 할 때 쓴다.
-- 🟡 **5회 잠금은 core가 센다**(제안). 장치는 재부팅되면 횟수를 잃고, 키패드가 여러 대여도 core는 하나라서.
+- 5회 잠금은 core가 센다 (`LOCKED`). 장치는 재부팅되면 횟수를 잃고, 키패드가 여러 대여도 core는 하나라서 이 방식이 맞다.
 
 ### 오류 (판단 전에 막힌 경우)
 
@@ -88,8 +89,8 @@ Content-Type: application/json
 
 | 상태 | 언제 | 게이트웨이 동작 |
 |---|---|---|
-| `400` | 형식이 틀림 | 다시 안 보냄, `NO` |
-| `401` | 장치 토큰 없음·틀림 | 다시 안 보냄, `NO` |
+| `400` `INVALID_REQUEST` | `eventId`·`roomId` 빠짐, 길이 넘음 | 다시 안 보냄, `NO` |
+| `401` `DEVICE_UNAUTHORIZED` | 장치 토큰 없음·틀림 | 다시 안 보냄, `NO` |
 | `5xx`, 연결 실패, 3초 안에 답 없음 | 서버 문제 | 같은 `eventId`로 최대 3번 (1초, 2초 쉬고) → 그래도 안 되면 `NO` |
 
 ## 4. eventId와 중복 거르기
@@ -97,7 +98,7 @@ Content-Type: application/json
 - 우노가 `방-bootId-seq`로 만든다. `seq`는 켜진 뒤 몇 번째 입력, `bootId`는 몇 번째로 켜졌는지(EEPROM에 저장, 켤 때마다 +1).
 - `bootId`는 **따로 보내는 필드가 아니라 eventId 안에 들어 있다.** 재부팅으로 `seq`가 1부터 다시 시작해도 `bootId`가 달라서 eventId가 안 겹친다.
 - 게이트웨이가 `uuid5(uuid5(NAMESPACE_DNS, "mspace-device"), "1-1000002-3")`으로 UUID를 만든다. 같은 입력이면 항상 같은 UUID라서 재전송해도 eventId가 같다.
-- 🟡 **core는 같은 eventId가 다시 오면 처음 결과를 그대로 돌려주고, 체크인을 두 번 하지 않는다**(지영 멱등 응답과 같은 방식).
+- core는 같은 eventId가 다시 와도 한 번만 처리한다 (api 명세 6장). 🟡 이때 처음 결과를 그대로 돌려주는지 확인 (지영)
 - 🟡 **보관 기간**: 재전송은 최대 약 12초 안에 끝나므로 받은 eventId는 하루 지나면 지워도 된다 (4차 회의 "eventId 보관 기간" 지영·수연).
 
 ## 5. 지영·재웅에게 확인할 것
@@ -105,8 +106,5 @@ Content-Type: application/json
 | # | 질문 | 누구 |
 |---|---|---|
 | 1 | 요청 4개 필드로 요구사항 문장 고치기 | 지영 |
-| 2 | `reason` 이름: `TOO_EARLY`, `LOCKED` 괜찮은지 | 지영 |
-| 3 | 5회 잠금을 core가 세는지 | 지영 |
-| 4 | 같은 eventId 재요청 시 처음 결과 그대로 돌려주기, 보관 하루 | 지영 |
-| 5 | 장치 토큰 발급 방법, 헤더 `Authorization: Bearer` 그대로 쓰는지 | 재웅 |
-| 6 | OpenAPI(`/swagger-ui`)에 이 형식을 올린 뒤 이 문서는 링크만 남기기 | 지영 |
+| 2 | 같은 eventId 재요청 시 처음 결과 그대로 돌려주는지, 보관 기간(하루 제안) | 지영 |
+| 3 | 장치 토큰 발급 방법과 테스트용 개발 서버 주소 | 재웅 |

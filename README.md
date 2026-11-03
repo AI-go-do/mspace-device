@@ -140,7 +140,9 @@ pytest --cov --cov-report=term-missing   # 우노·서버 없이 가짜 시리�
 - 가운데 부팅 횟수는 우노 EEPROM(전원을 꺼도 남는 메모리)에 저장돼서, 우노를 껐다 켜서 순서가 0부터 다시 시작해도 번호가 겹치지 않게 해요. 새 보드는 랜덤한 큰 수에서 시작해서 보드를 바꿔도 예전 번호와 겹치지 않아요
 - 서버에는 이 값을 **UUID로 바꿔서** 보내요 (uuid5). 같은 입력이면 항상 같은 UUID라서 재전송해도 중복 제거가 그대로 돼요
 
-## 7. 서버와 맞출 것 (core, 지영님과 합의)
+## 7. 서버와 맞출 것 (core 지영님, 토큰 재웅님)
+
+> 자세한 형식과 확인할 것 목록은 [docs/access-api.md](docs/access-api.md)에 있어요.
 
 **출입 확인 (지영님 형식에 맞춤)**
 
@@ -153,7 +155,7 @@ pytest --cov --cov-report=term-missing   # 우노·서버 없이 가짜 시리�
 
 | 아직 정할 것 | 내용 |
 |---|---|
-| `POST /api/access/verify` | 잠김(5회 실패) 응답의 reason 이름, 장치 토큰 방식 |
+| `POST /api/access/verify` | 장치 토큰 발급, 개발 서버 HTTPS 주소 (재웅) |
 | `POST /api/sensor-events` | 누가 만들지, eventId unique 제약 |
 
 ## 8. 확장 계획

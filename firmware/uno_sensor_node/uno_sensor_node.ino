@@ -5,7 +5,8 @@
 // 필요 라이브러리: Keypad (Arduino IDE > 라이브러리 관리 > "Keypad" by Mark Stanley)
 //
 // 배선
-//   4x4 키패드  : 왼쪽부터 행1~4 -> D11,D10,D9,D8 / 열1~4 -> D7,D6,D5,D4
+//   4x4 키패드  : 행 R1~R4 -> D11,D10,D9,D8 / 열 C1~C4 -> D7,D6,D5,D4
+//                 (선에 R·C 라벨이 있으면 라벨 기준. 순서가 C4~C1, R1~R4인 키패드도 있다)
 //   LED 초록    : D12 -> 220Ω -> LED -> GND
 //   LED 빨강    : D13 -> 220Ω -> LED -> GND
 // (재실 센서 PIR·조도·레이더는 다음 단계에서 추가: FR-DEV-101)
@@ -17,6 +18,7 @@
 const int ROOM_ID = 1;        // 이 장치가 달린 방 번호. 서버의 방 id와 같아야 한다. 방마다 복제할 때 이것만 바꾼다
 const int PIN_LED_OK = 12;    // 초록 LED 핀. 번호가 맞으면 켠다
 const int PIN_LED_NO = 13;    // 빨강 LED 핀. 번호가 틀리면 켠다
+const unsigned long LED_MS = 1500;  // LED를 켜 두는 시간 (ms)
 
 // ---------- 키패드 ----------
 const byte ROWS = 4, COLS = 4;  // 키패드 크기: 4행 4열
@@ -34,6 +36,8 @@ Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);  // 위 
 unsigned long bootId;      // 부팅 횟수. 켤 때마다 1씩 늘려 EEPROM에 저장한다. 재부팅으로 seq가 0부터 다시 시작해도 eventId가 겹치지 않게
 unsigned long seq = 0;     // 이벤트 순서 번호. 보낼 때마다 1씩 늘어난다
 String code = "";          // 지금까지 누른 숫자. 6자리 + #이면 서버로 보내고 비운다
+int ledPin = -1;           // 지금 켜져 있는 LED 핀. 꺼져 있으면 -1
+unsigned long ledOnAt = 0; // LED를 켠 시각 (millis 기준)
 
 // 키패드 번호 한 줄 출력
 // 예: {"eventId":"1-48213-18","roomId":1,"sensorType":"keypad","code":"123456","ms":12890}
@@ -49,11 +53,21 @@ void sendCode(const String& c) {
   Serial.println("}");
 }
 
-// LED를 1.5초 켰다 끈다
-void blink(int pin) {
+// LED를 켜고 켠 시각만 기억한다. delay()로 멈추지 않아서 그동안에도 키 입력을 계속 받는다
+void ledOn(int pin) {
+  if (ledPin >= 0) digitalWrite(ledPin, LOW);  // 다른 LED가 켜져 있으면 끄고 새로 켠다
   digitalWrite(pin, HIGH);
-  delay(1500);
-  digitalWrite(pin, LOW);
+  ledPin = pin;
+  ledOnAt = millis();
+}
+
+// loop()마다 불러서 LED_MS가 지났으면 끈다
+// millis() - ledOnAt 으로 빼서 비교하면 약 49일 뒤 millis()가 0으로 돌아가도 맞게 계산된다
+void updateLed() {
+  if (ledPin >= 0 && millis() - ledOnAt >= LED_MS) {
+    digitalWrite(ledPin, LOW);
+    ledPin = -1;
+  }
 }
 
 void setup() {
@@ -72,12 +86,14 @@ void setup() {
 }
 
 void loop() {
+  updateLed();  // 켜 둔 LED가 1.5초 지났으면 끈다 (기다리지 않고 확인만 한다)
+
   // 키패드: 숫자 6자리 입력 후 #으로 전송, *로 지우기
   char k = keypad.getKey();  // 방금 눌린 키. 안 눌렸으면 0
   if (k) {
     if (k == '#') {
       if (code.length() == 6) sendCode(code);  // 6자리일 때만 서버에 확인
-      else blink(PIN_LED_NO);                  // 6자리가 아니면 빨강 LED로 잘못 눌렀다고 알린다
+      else ledOn(PIN_LED_NO);                  // 6자리가 아니면 빨강 LED로 잘못 눌렀다고 알린다
       code = "";
     }
     else if (k == '*') { code = ""; }                                     // 처음부터 다시 입력
@@ -88,7 +104,7 @@ void loop() {
   if (Serial.available()) {
     String reply = Serial.readStringUntil('\n');  // 중계가 보낸 한 줄
     reply.trim();                                 // 앞뒤 공백·줄바꿈 제거
-    if (reply == "OK") blink(PIN_LED_OK);
-    else if (reply == "NO") blink(PIN_LED_NO);
+    if (reply == "OK") ledOn(PIN_LED_OK);
+    else if (reply == "NO") ledOn(PIN_LED_NO);
   }
 }

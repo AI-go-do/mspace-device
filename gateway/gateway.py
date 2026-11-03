@@ -180,7 +180,9 @@ def handle_line(line, verifier):
     except json.JSONDecodeError:
         print("JSON 아님 (내용은 번호가 섞일 수 있어 남기지 않음)")
         return None
-    handler = HANDLERS.get(event.get("sensorType"))  # 모르는 sensorType이면 None
+    sensor_type = event.get("sensorType")
+    # 모르는 sensorType이면 None. 글자가 아닌 값(리스트 등)은 표에서 찾을 수 없어 오류가 나므로 먼저 거른다
+    handler = HANDLERS.get(sensor_type) if isinstance(sensor_type, str) else None
     if handler is None:
         return None
     return handler(event, verifier)

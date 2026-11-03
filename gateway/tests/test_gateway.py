@@ -264,6 +264,13 @@ def test_handle_line_unknown_sensor_type():
     assert gateway.handle_line(pir_line(1), v) is None and v.bodies == []  # 처리기 표에 없으면 건너뜀
 
 
+@pytest.mark.parametrize("bad_type", [[], {}, None, 1])
+def test_handle_line_non_string_sensor_type(bad_type):
+    v = FakeVerifier({"result": "OPENED"})
+    line = json.dumps({"sensorType": bad_type, "eventId": "1-1-1", "roomId": 1, "code": "123456"})
+    assert gateway.handle_line(line, v) is None and v.bodies == []  # 리스트 등은 오류 없이 건너뜀
+
+
 def test_make_verifier_picks_by_config():
     assert isinstance(gateway.make_verifier(gateway.Config(dry_run=True)), gateway.DryRunVerifier)
     http = gateway.make_verifier(gateway.Config(server="http://core", device_token="t"))

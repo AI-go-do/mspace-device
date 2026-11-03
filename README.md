@@ -62,12 +62,13 @@ flowchart LR
 
 | 부품 | 우노 핀 |
 |---|---|
-| 키패드 핀 1~4 (행1~4) | D11, D10, D9, D8 |
-| 키패드 핀 5~8 (열1~4) | D7, D6, D5, D4 |
+| 키패드 행 R1~R4 | D11, D10, D9, D8 |
+| 키패드 열 C1~C4 | D7, D6, D5, D4 |
 | 초록 LED (맞음) | D12 → 220Ω → LED → GND |
 | 빨강 LED (틀림) | D13 → 220Ω → LED → GND |
 | PIR · 조도 · 레이더 | 다음 단계(FR-DEV-101)에서 코드와 함께 추가. 배선도에는 미리 그려 둠 |
 
+키패드 선에 `R1`·`C1` 같은 라벨이 있으면 왼쪽부터 순서대로가 아니라 **라벨 기준**으로 꽂아요 (C4~C1, R1~R4 순서인 키패드도 있어요).
 키패드를 눌렀는데 다른 숫자가 찍히면 선을 바꾸지 말고 코드의 `rowPins`, `colPins` 순서만 바꿔요.
 
 ## 5. 실행 방법
@@ -79,12 +80,38 @@ flowchart LR
    ```bash
    pip3 install -r gateway/requirements.txt
    DRY_RUN=1 python3 gateway/gateway.py              # 서버 없이 테스트: 123456#만 초록
-   echo 'DEVICE_TOKEN=<지영님께 받은 장치 토큰>' > .env   # 토큰은 .env에만 (저장소에 안 올라가요)
+   echo 'DEVICE_TOKEN=<받은 장치 토큰>' > .env   # 토큰은 .env에만 (저장소에 안 올라가요)
    set -a; . ./.env; set +a                          # .env 값을 불러오기
    SERVER=http://<core 주소> python3 gateway/gateway.py
    ```
    포트는 자동으로 찾아요. 못 찾으면 `PORT=/dev/ttyACM0`처럼 지정해요.
    서버에는 `Authorization: Bearer <장치 토큰>` 헤더로 보내요. 토큰이 없으면 DRY_RUN만 돼요.
+
+### 젯슨에서 올리기 (맥 IDE가 안 될 때)
+
+```bash
+~/bin/arduino-cli compile -b arduino:avr:uno firmware/uno_sensor_node
+~/bin/arduino-cli upload -p /dev/ttyUSB0 -b arduino:avr:uno firmware/uno_sensor_node
+```
+호환 우노(CH340 칩)는 `ch341` 드라이버가 필요해요. 재부팅해도 켜지게 하려면 한 번만:
+```bash
+sudo mkdir -p /lib/modules/$(uname -r)/kernel/drivers/usb/serial
+sudo cp ~/ch341/ch341.ko /lib/modules/$(uname -r)/kernel/drivers/usb/serial/
+sudo depmod -a
+echo ch341 | sudo tee /etc/modules-load.d/ch341.conf
+```
+
+### 게이트웨이 구조
+
+역할별로 나눠서, 하나를 바꿔도 나머지는 그대로예요.
+
+| 부품 | 하는 일 |
+|---|---|
+| `Config`, `load_config()` | 설정값(서버 주소, DRY_RUN, 토큰, 포트)을 한곳에 모음 |
+| `find_port()` | 우노가 꽂힌 USB 포트 찾기 |
+| `DryRunVerifier` / `HttpVerifier` | 번호 확인기. 같은 `verify(body)` 모양이라 연습용·진짜 서버를 바꿔 끼움 |
+| `handle_line()` + `HANDLERS` | 한 줄을 받아 `sensorType`별 처리기로 보냄. 재실 센서는 표에 한 줄 추가 |
+| `main()` | 위 부품을 조립하고 시리얼을 계속 읽음 |
 
 ### 테스트
 

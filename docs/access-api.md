@@ -62,6 +62,7 @@ Content-Type: application/json
 | `code` | 글자, 숫자 6자리 | 입력한 번호 |
 
 - 요구사항 FR-ACC-001에는 `{roomId, code}`만 적혀 있다. `eventId`·`deviceId`는 지영과 따로 맞춘 것이고 TEAM.md의 `AccessEvent(eventId, roomId, deviceId, ...)`와 같은 이름이다. 🟡 **요구사항 문장도 4개 필드로 고칠지 확인 (지영)**
+- 토큰이 지나가는 길이라 **실제 서버는 HTTPS로만** 부른다. `http://`는 노트북·젯슨 안에서 테스트할 때만 쓴다. 🟡 **개발·운영 서버 HTTPS 주소 확인 (재웅)**
 - 장치 토큰은 사람 로그인 토큰(JWT)과 **다른 종류**다. 키패드는 번호 확인만 할 수 있고 예약을 만들 수 없다. 값은 젯슨 `.env`에만 둔다. 🟡 **토큰 발급·형식은 재웅 담당 (4차 회의)**
 
 ### 응답
@@ -77,7 +78,7 @@ Content-Type: application/json
 |---|---|---|---|
 | `OPENED` | — | 번호 맞음. 처음이면 `BOOKED` → `IN_USE`(체크인), 그 뒤엔 문만 열림 | ✅ |
 | `DENIED` | `WRONG_CODE` | 이 방의 유효한 번호가 아님 (다른 방 번호 포함) | ✅ |
-| `DENIED` | `NOT_YET` | 시작 10분 전보다 이름 | ✅ core |
+| `DENIED` | `NOT_YET` | 시작 10분 전이 아직 안 됨 | ✅ core |
 | `DENIED` | `LOCKED` | 5번 연속 틀려서 1분 잠김 | ✅ core |
 
 - 게이트웨이는 `OPENED`가 아니면 모두 `NO`로 처리한다. 그래서 `reason` 이름이 바뀌어도 장치는 안 깨진다. `reason`은 로그와 나중에 LED 표시를 다르게 할 때 쓴다.
@@ -107,4 +108,4 @@ Content-Type: application/json
 |---|---|---|
 | 1 | 요청 4개 필드로 요구사항 문장 고치기 | 지영 |
 | 2 | 같은 eventId 재요청 시 처음 결과 그대로 돌려주는지, 보관 기간(하루 제안) | 지영 |
-| 3 | 장치 토큰 발급 방법과 테스트용 개발 서버 주소 | 재웅 |
+| 3 | 장치 토큰 발급 방법과 테스트용 개발 서버 주소 (HTTPS) | 재웅 |

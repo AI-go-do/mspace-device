@@ -142,6 +142,8 @@ pytest --cov --cov-report=term-missing   # 우노·서버 없이 가짜 시리�
 
 ## 7. 서버와 맞출 것 (core, 지영님과 합의)
 
+> 자세한 형식과 확인할 것 목록은 [docs/access-api.md](docs/access-api.md)에 있어요.
+
 **출입 확인 (지영님 형식에 맞춤)**
 
 ```json

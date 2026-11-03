@@ -55,11 +55,9 @@ def pir_line(value, seq=1):  # 키패드가 아닌 줄 예시 (나중에 붙일 
 def run(monkeypatch):
     """가짜 우노 줄을 넣고 main()을 돌린 뒤, (우노에 쓴 값, 서버로 보낸 요청 목록)을 돌려준다."""
     monkeypatch.setattr(gateway.time, "sleep", lambda s: None)  # 테스트에서는 기다리지 않는다
-    monkeypatch.setattr(gateway, "PORT", "/dev/fake")
-    monkeypatch.setattr(gateway, "DEVICE_TOKEN", "test-token")
 
-    def _run(lines, responses=None, dry_run=False):
-        monkeypatch.setattr(gateway, "DRY_RUN", dry_run)
+    def _run(lines, responses=None, dry_run=False, token="test-token"):
+        config = gateway.Config(port="/dev/fake", dry_run=dry_run, device_token=token)
         ser = FakeSerial(lines)
         monkeypatch.setattr(gateway.serial, "Serial", lambda *a, **k: ser)
         sent = []
@@ -75,7 +73,7 @@ def run(monkeypatch):
 
         monkeypatch.setattr(gateway.requests, "post", fake_post)
         with pytest.raises(StopIteration):
-            gateway.main()
+            gateway.main(config)
         return ser.written, sent
 
     return _run
@@ -184,25 +182,96 @@ def test_5xx_is_retried(run):
     assert written == [b"OK\n"] and len(sent) == 2  # 서버 오류는 다시 보내서 성공
 
 
-def test_missing_token_exits(monkeypatch):
-    monkeypatch.setattr(gateway, "PORT", "/dev/fake")
-    monkeypatch.setattr(gateway, "DRY_RUN", False)
-    monkeypatch.setattr(gateway, "DEVICE_TOKEN", None)
+def test_missing_token_exits():
     with pytest.raises(SystemExit):
-        gateway.main()
+        gateway.main(gateway.Config(port="/dev/fake", dry_run=False, device_token=None))
 
 
 # ---- 서버 없이 테스트 (DRY_RUN) ----
 
-def test_dry_run(run, capsys, monkeypatch):
-    monkeypatch.setattr(gateway, "DEVICE_TOKEN", None)  # DRY_RUN은 토큰 없이 된다
-    written, sent = run([keypad_line("123456", 1), keypad_line("999999", 2), pir_line(1, 3)], dry_run=True)
+def test_dry_run(run, capsys):
+    # DRY_RUN은 토큰 없이 된다
+    written, sent = run([keypad_line("123456", 1), keypad_line("999999", 2), pir_line(1, 3)], dry_run=True, token=None)
     assert written == [b"OK\n", b"NO\n"]
     assert sent == []  # 서버로는 아무것도 안 보낸다
     assert "[DRY_RUN]" in capsys.readouterr().out
 
 
-def test_no_port_exits(monkeypatch):
-    monkeypatch.setattr(gateway, "PORT", None)
+def test_no_port_exits():
     with pytest.raises(SystemExit):
-        gateway.main()
+        gateway.main(gateway.Config(port=None, dry_run=True))
+
+
+# ---- 설정 (Config, find_port) ----
+
+def test_load_config_from_env(monkeypatch):
+    monkeypatch.setattr(gateway, "find_port", lambda: "/dev/ttyUSB0")
+    c = gateway.load_config({"SERVER": "http://core:8080", "DRY_RUN": "1", "DEVICE_TOKEN": "t"})
+    assert c == gateway.Config(server="http://core:8080", dry_run=True, device_token="t", port="/dev/ttyUSB0")
+
+
+def test_load_config_defaults_and_port_override(monkeypatch):
+    monkeypatch.setattr(gateway, "find_port", lambda: "/dev/ttyUSB0")
+    c = gateway.load_config({"PORT": "/dev/ttyACM9"})
+    assert c.server == "http://localhost:8080" and c.dry_run is False and c.device_token is None
+    assert c.port == "/dev/ttyACM9"  # PORT를 정하면 자동으로 찾지 않는다
+
+
+def test_load_config_reads_os_environ(monkeypatch):
+    monkeypatch.setenv("DRY_RUN", "1")
+    monkeypatch.setattr(gateway, "find_port", lambda: None)
+    assert gateway.load_config().dry_run is True
+
+
+def test_find_port_order(monkeypatch):
+    fake = {"/dev/ttyUSB*": ["/dev/ttyUSB1", "/dev/ttyUSB0"], "/dev/cu.usbserial*": ["/dev/cu.usbserial-1"]}
+    monkeypatch.setattr(gateway.glob, "glob", lambda p: fake.get(p, []))
+    assert gateway.find_port() == "/dev/ttyUSB0"  # 앞 순서(ttyUSB)가 먼저, 그 안에서는 이름순
+
+
+def test_find_port_none(monkeypatch):
+    monkeypatch.setattr(gateway.glob, "glob", lambda p: [])
+    assert gateway.find_port() is None
+
+
+# ---- handle_line: 시리얼 없이 한 줄만 ----
+
+class FakeVerifier:
+    """서버 대신 정해진 답을 주는 확인기"""
+
+    def __init__(self, answer):
+        self.answer = answer
+        self.bodies = []
+
+    def verify(self, body):
+        self.bodies.append(body)
+        return self.answer
+
+
+def test_handle_line_without_serial():
+    v = FakeVerifier({"result": "OPENED"})
+    assert gateway.handle_line(keypad_line("123456") + "\n", v) == b"OK\n"
+    assert v.bodies[0]["code"] == "123456"
+
+
+def test_handle_line_ignores_json_that_is_not_object():
+    v = FakeVerifier({"result": "OPENED"})
+    assert gateway.handle_line("[1, 2]", v) is None and v.bodies == []
+
+
+def test_handle_line_unknown_sensor_type():
+    v = FakeVerifier({"result": "OPENED"})
+    assert gateway.handle_line(pir_line(1), v) is None and v.bodies == []  # 처리기 표에 없으면 건너뜀
+
+
+@pytest.mark.parametrize("bad_type", [[], {}, None, 1])
+def test_handle_line_non_string_sensor_type(bad_type):
+    v = FakeVerifier({"result": "OPENED"})
+    line = json.dumps({"sensorType": bad_type, "eventId": "1-1-1", "roomId": 1, "code": "123456"})
+    assert gateway.handle_line(line, v) is None and v.bodies == []  # 리스트 등은 오류 없이 건너뜀
+
+
+def test_make_verifier_picks_by_config():
+    assert isinstance(gateway.make_verifier(gateway.Config(dry_run=True)), gateway.DryRunVerifier)
+    http = gateway.make_verifier(gateway.Config(server="http://core", device_token="t"))
+    assert isinstance(http, gateway.HttpVerifier) and http.url == "http://core/api/access/verify"

@@ -30,6 +30,9 @@ Authorization: Bearer <장치 토큰>
 Content-Type: application/json
 ```
 
+- 운영에서는 **`https://`로만** 보낸다. 장치 토큰이 헤더에 실리기 때문이다. `http://`는 맥에서 로컬로 띄운 테스트에서만 쓴다 🟡
+- **장치 토큰 하나 = 장치 하나 = 방 하나.** core는 토큰으로 어느 장치·방인지 알고 있다. 요청의 `roomId`·`deviceId`가 토큰에 등록된 값과 다르면 거부한다(4장 `403`). 토큰 하나를 훔쳐도 다른 방 상태를 바꿀 수 없다 🟡
+
 ### 2-1. 재실 (`OCCUPANCY`)
 
 ```json
@@ -76,7 +79,7 @@ Content-Type: application/json
 |---|---|---|
 | `kind` | `CO2` | CO2 측정값 |
 | `ppm` | 정수 0~10000 | CO2 농도 |
-| `source` | 글자, 선택 | 센서 이름. 예: `scd40`, 실습 센서 이름, 가상 센서는 `virtual` |
+| `source` | 글자, 선택 | 센서 이름. 예: `scd40`, 실습 센서 이름, 가상 센서는 `virtual`. core는 `source` 칸에 저장 (재실의 `sources` 객체와 다른 칸) |
 
 **언제 보내나**: **1분마다** 🟡. 판단(1000ppm 넘었는지)은 core가 한다.
 
@@ -97,32 +100,43 @@ Content-Type: application/json
 
 ## 4. 응답 🟡
 
-키패드와 같이 **처리했으면 `200`**.
+키패드와 같이 **처리했으면 `200`**. 본문은 아래 둘 중 **하나**다.
 
+처음 받은 이벤트:
 ```json
 { "result": "STORED" }
-{ "result": "DUPLICATE" }
 ```
 
-- `DUPLICATE`: 같은 `eventId`가 이미 있음. 장치는 성공으로 보고 끝낸다.
+같은 `eventId`가 이미 있음 (장치는 성공으로 보고 끝낸다):
+```json
+{ "result": "DUPLICATE" }
+```
 
 | 오류 | 상태 | 언제 | 장치 동작 |
 |---|---|---|---|
 | `DEVICE_UNAUTHORIZED` | 401 | 장치 토큰 없음·틀림 | 다시 안 보냄, 로그 |
+| `DEVICE_ROOM_MISMATCH` | 403 | 토큰에 등록된 방·장치와 `roomId`·`deviceId`가 다름 | 다시 안 보냄, 로그 (설정 실수) |
 | `INVALID_REQUEST` | 400 | 빠진 값, 모르는 `kind`, `ppm` 범위 밖, 오프셋 없는 시각 | 다시 안 보냄, 로그 |
 | `5xx`, 연결 실패 | - | 서버 문제 | 같은 `eventId`로 다시 보냄 (키패드와 같은 재시도) |
 
 ## 5. 중복 거르기 · 끊김 🟡
 
 - 키패드와 같다. 장치가 `eventId`를 만들고, 재전송해도 같은 값. core는 `eventId` **unique 제약**으로 한 번만 저장한다 (이슈 #7).
-- 와이파이가 끊긴 동안의 이벤트는 장치가 모아 뒀다가 순서대로 보낸다. core는 `observedAt` 기준으로 계산한다.
+- 와이파이가 끊긴 동안의 이벤트는 장치가 모아 뒀다가 순서대로 보낸다.
+- **늦게 온 이벤트**: 재전송·지연으로 도착 순서가 `observedAt` 순서와 다를 수 있다. 그래서 core는 이렇게 한다.
+  - 모든 이벤트는 저장한다(기록·정확도 측정용).
+  - 방의 지금 재실 상태는 **`observedAt`이 지금 상태보다 새로울 때만** 바꾼다. 더 오래된 이벤트는 저장만 하고 상태를 덮지 않는다.
+  - `observedAt`이 같으면 먼저 저장된 것(`received_at` 순)을 따른다.
+  - 10·15분 타이머는 "비어 있음이 된 `observedAt`"부터 잰다. 받은 시각이 아니다.
+  - CO2 "3분 연속"도 `observedAt` 순서로 본 최근 3개 값으로 판단한다. 이미 지난 알림 시각보다 오래된 값은 새 알림을 만들지 않는다.
+  - `observedAt`이 지금보다 5분 넘게 미래면(장치 시계 오류) `400 INVALID_REQUEST`.
 - **센서 끊김**: 한 방에서 **10분 동안** 재실 이벤트가 하나도 안 오면 core는 그 방을 **"있음"**으로 본다 ✅ (FR-DEV-101 "틀리면 있음 쪽으로"). 5분마다 보내는 신호(2-1)가 두 번 빠지면 끊긴 것으로 본다. 끊겨서 자동 퇴실되는 일은 없다.
 
 ## 6. core가 하는 일 (지영님 확인) 🟡
 
 | 할 일 | 요구사항 | 제안 |
 |---|---|---|
-| 이벤트 저장 | FR-DEV-101 | 표 `sensor_event` (`event_id` unique, `room_id`, `device_id`, `kind`, `occupied`, `ppm`, `sources`, `observed_at`, `received_at`) |
+| 이벤트 저장 | FR-DEV-101 | 표 `sensor_event` (`event_id` unique, `room_id`, `device_id`, `kind`, `occupied`, `sources`(재실, JSON), `ppm`, `source`(CO2 센서 이름), `observed_at`, `received_at`) |
 | 방 지금 상태 | FR-DEV-102 | 방별 마지막 재실 상태와 바뀐 시각. 방 현황 화면·비서 `room_status` 도구가 읽음 |
 | 자리 비움 | FR-DEV-103 | `IN_USE` 예약이 있는 방이 "비어 있음"이 된 시각부터 10분 → 알림, 15분 → `AWAY_RELEASED` |
 | 환기 알림 | FR-DEV-104 | 1000ppm 넘는 값이 **3분 연속**(1분마다 3번)이면 알림. 잠깐 튀는 값은 무시. 같은 방 30분에 한 번 ✅ |
@@ -136,5 +150,5 @@ Content-Type: application/json
 | 지영 | 이 API를 core에 두는 게 맞는지, 경로 `/api/sensor-events` 괜찮은지 |
 | 지영 | 응답을 `200` + `STORED`/`DUPLICATE`로 하는 게 괜찮은지 (키패드처럼) |
 | 지영 | 끊김 판단 10분, CO2 "3분 연속" 기준 |
-| 재웅 | 센서 장치(ESP32)용 장치 토큰을 키패드와 따로 받을지. 장치 하나에 토큰 하나 |
+| 재웅 | 센서 장치(ESP32)용 장치 토큰을 키패드와 따로 받을지. 장치 하나에 토큰 하나, 토큰마다 방·장치 등록 (2장) |
 | 수연 | 실습 센서 중 무엇을 쓸지 (CO2·재실). 정해지면 3장 수신기 표에 넣기 |

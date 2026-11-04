@@ -19,6 +19,8 @@ const int ROOM_ID = 1;        // 이 장치가 달린 방 번호. 서버의 방 
 const int PIN_LED_OK = 12;    // 초록 LED 핀. 번호가 맞으면 켠다
 const int PIN_LED_NO = 13;    // 빨강 LED 핀. 번호가 틀리면 켠다
 const unsigned long LED_MS = 1500;  // LED를 켜 두는 시간 (ms)
+const unsigned long BLINK_MS = 200;     // "확인 중" 깜빡임 간격 (ms). 서버 답을 기다리는 동안 초록 LED를 깜빡인다
+const unsigned long WAIT_MAX_MS = 7000; // 답을 기다리는 최대 시간 (ms). 게이트웨이는 최대 약 5초 안에 답하므로 넉넉히 7초
 
 // ---------- 키패드 ----------
 const byte ROWS = 4, COLS = 4;  // 키패드 크기: 4행 4열
@@ -38,6 +40,8 @@ unsigned long seq = 0;     // 이벤트 순서 번호. 보낼 때마다 1씩 늘
 String code = "";          // 지금까지 누른 숫자. 6자리 + #이면 서버로 보내고 비운다
 int ledPin = -1;           // 지금 켜져 있는 LED 핀. 꺼져 있으면 -1
 unsigned long ledOnAt = 0; // LED를 켠 시각 (millis 기준)
+bool waiting = false;      // 서버 답을 기다리는 중인지. 기다리는 동안 초록 LED를 깜빡인다
+unsigned long waitStart = 0; // 기다리기 시작한 시각 (millis 기준)
 
 // 키패드 번호 한 줄 출력
 // 예: {"eventId":"1-48213-18","roomId":1,"sensorType":"keypad","code":"123456","ms":12890}
@@ -59,6 +63,33 @@ void ledOn(int pin) {
   digitalWrite(pin, HIGH);
   ledPin = pin;
   ledOnAt = millis();
+}
+
+// 번호를 보낸 직후 부른다. 켜져 있던 결과 LED를 끄고 "확인 중" 깜빡임을 시작한다
+void startWaiting() {
+  if (ledPin >= 0) digitalWrite(ledPin, LOW);
+  ledPin = -1;
+  waiting = true;
+  waitStart = millis();
+}
+
+// 답이 오면(또는 너무 오래 걸리면) 깜빡임을 멈춘다
+void stopWaiting() {
+  waiting = false;
+  digitalWrite(PIN_LED_OK, LOW);
+}
+
+// loop()마다 불러서 기다리는 중이면 초록 LED를 BLINK_MS마다 켰다 껐다 한다
+// WAIT_MAX_MS가 지나도 답이 없으면(USB 빠짐, 게이트웨이 꺼짐) 빨강 LED로 거부를 알린다
+void updateWaiting() {
+  if (!waiting) return;
+  unsigned long waited = millis() - waitStart;  // 빼서 비교하므로 millis()가 0으로 돌아가도 맞다
+  if (waited >= WAIT_MAX_MS) {
+    stopWaiting();
+    ledOn(PIN_LED_NO);
+    return;
+  }
+  digitalWrite(PIN_LED_OK, (waited / BLINK_MS) % 2 == 0 ? HIGH : LOW);  // 짝수 칸이면 켜고 홀수 칸이면 끈다
 }
 
 // loop()마다 불러서 LED_MS가 지났으면 끈다
@@ -86,13 +117,14 @@ void setup() {
 }
 
 void loop() {
-  updateLed();  // 켜 둔 LED가 1.5초 지났으면 끈다 (기다리지 않고 확인만 한다)
+  updateLed();      // 켜 둔 LED가 1.5초 지났으면 끈다 (기다리지 않고 확인만 한다)
+  updateWaiting();  // 서버 답을 기다리는 중이면 초록 LED를 깜빡인다
 
   // 키패드: 숫자 6자리 입력 후 #으로 전송, *로 지우기
   char k = keypad.getKey();  // 방금 눌린 키. 안 눌렸으면 0
   if (k) {
     if (k == '#') {
-      if (code.length() == 6) sendCode(code);  // 6자리일 때만 서버에 확인
+      if (code.length() == 6) { sendCode(code); startWaiting(); }  // 6자리일 때만 서버에 확인하고, 답 올 때까지 깜빡인다
       else ledOn(PIN_LED_NO);                  // 6자리가 아니면 빨강 LED로 잘못 눌렀다고 알린다
       code = "";
     }
@@ -104,7 +136,7 @@ void loop() {
   if (Serial.available()) {
     String reply = Serial.readStringUntil('\n');  // 중계가 보낸 한 줄
     reply.trim();                                 // 앞뒤 공백·줄바꿈 제거
-    if (reply == "OK") ledOn(PIN_LED_OK);
-    else if (reply == "NO") ledOn(PIN_LED_NO);
+    if (reply == "OK") { stopWaiting(); ledOn(PIN_LED_OK); }
+    else if (reply == "NO") { stopWaiting(); ledOn(PIN_LED_NO); }
   }
 }

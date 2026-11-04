@@ -35,7 +35,8 @@ from dataclasses import dataclass
 import requests
 import serial
 
-RETRIES = 3  # 서버 전송 실패 시 최대 시도 횟수
+RETRIES = 2  # 서버 전송 실패 시 최대 시도 횟수
+TIMEOUT = 2  # 한 번 보낼 때 서버 답을 기다리는 시간(초). 2초×2번 + 1초 쉼 = 최대 약 5초면 끝난다
 # eventId를 UUID로 바꿀 때 쓰는 고정 이름공간. 바꾸면 같은 이벤트가 다른 UUID가 되므로 고정해 둔다
 EVENT_NS = uuid.uuid5(uuid.NAMESPACE_DNS, "mspace-device")
 # 우노가 잡히는 포트 이름들. 리눅스: ttyACM(정품), ttyUSB(호환 보드) / 맥: cu.usbmodem(정품), cu.usbserial·cu.wchusbserial(호환 보드)
@@ -97,9 +98,9 @@ class HttpVerifier:
         self.retries = retries
 
     def verify(self, body):
-        for attempt in range(1, self.retries + 1):  # attempt = 지금 몇 번째 시도인지 (1, 2, 3)
+        for attempt in range(1, self.retries + 1):  # attempt = 지금 몇 번째 시도인지 (1, 2)
             try:
-                r = requests.post(self.url, json=body, timeout=3, headers=self.headers)  # 3초 안에 답 없으면 실패
+                r = requests.post(self.url, json=body, timeout=TIMEOUT, headers=self.headers)  # TIMEOUT초 안에 답 없으면 실패
                 if 400 <= r.status_code < 500:  # 4xx(토큰·형식 오류)는 다시 보내도 결과가 같아서 바로 거부한다
                     print(f"서버가 요청을 거부함 ({r.status_code}), 다시 보내지 않음")
                     return None
@@ -108,7 +109,7 @@ class HttpVerifier:
             except requests.RequestException as e:  # e = 실패 이유 (연결 끊김, 시간 초과, 5xx)
                 print(f"전송 실패 {attempt}/{self.retries}: {e}")
                 if attempt < self.retries:  # 마지막 실패 뒤에는 기다리지 않고 바로 거부한다
-                    time.sleep(attempt)  # 1초, 2초씩 점점 길게 기다렸다 재시도
+                    time.sleep(attempt)  # 1초 쉬고 재시도 (시도 횟수를 늘리면 2초, 3초…로 점점 길어진다)
         return None
 
 

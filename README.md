@@ -156,7 +156,7 @@ pytest --cov --cov-report=term-missing   # 우노·서버 없이 가짜 시리�
 | 아직 정할 것 | 내용 |
 |---|---|
 | `POST /api/access/verify` | 장치 토큰 발급, 개발 서버 HTTPS 주소 (재웅) |
-| `POST /api/sensor-events` | 누가 만들지, eventId unique 제약 |
+| `POST /api/sensor-events` | 형식 초안 [docs/sensor-events-api.md](docs/sensor-events-api.md). core에 둘지, 응답·끊김 기준 (지영), 센서 장치 토큰 (재웅) |
 
 ## 8. 확장 계획
 

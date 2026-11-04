@@ -202,6 +202,26 @@ def test_no_port_exits():
         gateway.main(gateway.Config(port=None, dry_run=True))
 
 
+@pytest.mark.parametrize("server, ok", [
+    ("https://dev-mspace.java21.net", True),
+    ("http://localhost:8411", True),
+    ("http://127.0.0.1:8411", True),
+    ("http://[::1]:8411", True),
+    ("http://dev-mspace.java21.net", False),   # 원격 http는 토큰이 그대로 보여서 안 된다
+    ("http://localhost.evil.com", False),      # 앞부분만 localhost인 가짜 주소
+    ("http://192.168.0.5:8411", False),        # 같은 와이파이라도 http는 안 된다
+    ("ftp://localhost", False),
+    ("https://", False),
+])
+def test_is_safe_server(server, ok):
+    assert gateway.is_safe_server(server) is ok
+
+
+def test_remote_http_server_exits():
+    with pytest.raises(SystemExit):
+        gateway.main(gateway.Config(server="http://dev-mspace.java21.net", port="/dev/fake", device_token="t"))
+
+
 # ---- 설정 (Config, find_port) ----
 
 def test_load_config_from_env(monkeypatch):
@@ -213,7 +233,7 @@ def test_load_config_from_env(monkeypatch):
 def test_load_config_defaults_and_port_override(monkeypatch):
     monkeypatch.setattr(gateway, "find_port", lambda: "/dev/ttyUSB0")
     c = gateway.load_config({"PORT": "/dev/ttyACM9"})
-    assert c.server == "http://localhost:8080" and c.dry_run is False and c.device_token is None
+    assert c.server == "http://localhost:8411" and c.dry_run is False and c.device_token is None
     assert c.port == "/dev/ttyACM9"  # PORT를 정하면 자동으로 찾지 않는다
 
 

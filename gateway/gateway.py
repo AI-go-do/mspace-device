@@ -26,12 +26,14 @@
 from __future__ import annotations
 
 import glob
+import ipaddress
 import json
 import os
 import re
 import time
 import uuid
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 import requests
 import serial
@@ -51,7 +53,7 @@ PORT_PATTERNS = ["/dev/ttyACM*", "/dev/ttyUSB*", "/dev/cu.usbmodem*", "/dev/cu.u
 @dataclass(frozen=True)
 class Config:
     """게이트웨이 설정값 묶음. 코드를 고치지 않고 실행할 때 환경변수로 바꾼다."""
-    server: str = "http://localhost:8080"  # 예약 서버(core) 주소
+    server: str = "http://localhost:8411"  # 예약 서버(core) 주소. 기본값은 내 컴퓨터에 띄운 core
     dry_run: bool = False                  # True면 서버에 안 보내고 화면에만 찍는다 (서버 없이 테스트용)
     device_token: str | None = None        # 장치 토큰. 서버가 "등록된 키패드"인지 확인하는 값. 저장소에 넣지 않고 .env에만 둔다
     port: str | None = None                # 우노가 꽂힌 USB 포트. 못 찾으면 None
@@ -75,6 +77,23 @@ def load_config(env=None):
         device_token=env.get("DEVICE_TOKEN"),
         port=env.get("PORT") or find_port(),
     )
+
+
+def is_safe_server(server):
+    """장치 토큰을 보내도 되는 주소인지. https는 괜찮고, http는 내 컴퓨터(localhost·127.0.0.1·::1)일 때만."""
+    parts = urlsplit(server)
+    if not parts.hostname:
+        return False
+    if parts.scheme == "https":
+        return True
+    if parts.scheme != "http":
+        return False
+    if parts.hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(parts.hostname).is_loopback  # 글자 앞부분이 아니라 실제 주소로 판단한다
+    except ValueError:  # 이름(예: core.example.com)은 loopback으로 보지 않는다
+        return False
 
 
 # ---------- 번호 확인 (verifier): 같은 모양 verify(body) 두 개 ----------
@@ -200,6 +219,8 @@ def main(config=None):
         raise SystemExit("우노를 못 찾았어요. USB 연결을 확인하거나 PORT=/dev/ttyACM0 처럼 지정하세요.")
     if not config.dry_run and not config.device_token:
         raise SystemExit("DEVICE_TOKEN이 없어요. .env에 넣고 불러오거나, 서버 없이 테스트하려면 DRY_RUN=1 로 실행하세요.")
+    if not config.dry_run and not is_safe_server(config.server):
+        raise SystemExit("원격 서버는 https://로만 연결해요 (장치 토큰이 실리므로). http://는 localhost 테스트에서만 써요.")
     print("연결:", config.port, "| 서버:", "DRY_RUN" if config.dry_run else config.server)
     verifier = make_verifier(config)
     ser = serial.Serial(config.port, 115200, timeout=1)  # ser = 우노와 연결된 시리얼 통로. 115200은 우노 코드와 같은 속도

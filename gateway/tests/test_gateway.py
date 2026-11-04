@@ -167,7 +167,7 @@ def test_no_wait_after_last_retry(run, monkeypatch):
     waits = []
     monkeypatch.setattr(gateway.time, "sleep", waits.append)
     run([keypad_line("123456")], [requests.ConnectionError("down")] * gateway.RETRIES)
-    assert waits == [2, 1, 2]  # 우노 켜짐 대기 2초, 재시도 1·2초. 3번째 실패 뒤에는 기다리지 않는다
+    assert waits == [2, 1]  # 우노 켜짐 대기 2초, 재시도 전 1초. 마지막 실패 뒤에는 기다리지 않는다
 
 
 def test_4xx_is_not_retried(run, capsys):
@@ -275,3 +275,10 @@ def test_make_verifier_picks_by_config():
     assert isinstance(gateway.make_verifier(gateway.Config(dry_run=True)), gateway.DryRunVerifier)
     http = gateway.make_verifier(gateway.Config(server="http://core", device_token="t"))
     assert isinstance(http, gateway.HttpVerifier) and http.url == "http://core/api/access/verify"
+
+
+def test_worst_case_wait_is_shorter_than_uno_wait():
+    # 우노의 "확인 중" 기다림(WAIT_MAX_MS 9초)보다 게이트웨이가 먼저 답해야 늦은 OK가 빨강을 뒤집지 않는다
+    # requests는 연결 시간과 답 시간을 따로 재므로 둘 다 더한다
+    worst = gateway.RETRIES * (gateway.CONNECT_TIMEOUT + gateway.TIMEOUT) + sum(range(1, gateway.RETRIES))
+    assert worst <= 7

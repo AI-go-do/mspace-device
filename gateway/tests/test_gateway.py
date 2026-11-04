@@ -277,7 +277,8 @@ def test_make_verifier_picks_by_config():
     assert isinstance(http, gateway.HttpVerifier) and http.url == "http://core/api/access/verify"
 
 
-def test_worst_case_wait_is_about_5_seconds():
-    # 우노의 "확인 중" 깜빡임(WAIT_MAX_MS 7초)보다 게이트웨이가 먼저 답해야 한다
-    worst = gateway.RETRIES * gateway.TIMEOUT + sum(range(1, gateway.RETRIES))
-    assert worst <= 5
+def test_worst_case_wait_is_shorter_than_uno_wait():
+    # 우노의 "확인 중" 기다림(WAIT_MAX_MS 9초)보다 게이트웨이가 먼저 답해야 늦은 OK가 빨강을 뒤집지 않는다
+    # requests는 연결 시간과 답 시간을 따로 재므로 둘 다 더한다
+    worst = gateway.RETRIES * (gateway.CONNECT_TIMEOUT + gateway.TIMEOUT) + sum(range(1, gateway.RETRIES))
+    assert worst <= 7

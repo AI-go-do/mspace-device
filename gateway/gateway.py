@@ -36,7 +36,9 @@ import requests
 import serial
 
 RETRIES = 2  # 서버 전송 실패 시 최대 시도 횟수
-TIMEOUT = 2  # 한 번 보낼 때 서버 답을 기다리는 시간(초). 2초×2번 + 1초 쉼 = 최대 약 5초면 끝난다
+CONNECT_TIMEOUT = 1  # 서버에 연결될 때까지 기다리는 시간(초)
+TIMEOUT = 2          # 연결된 뒤 서버 답을 기다리는 시간(초)
+# requests는 연결·답 시간을 따로 잰다. 최악 (1+2)초×2번 + 1초 쉼 = 7초. 우노는 9초까지 기다린다(WAIT_MAX_MS)
 # eventId를 UUID로 바꿀 때 쓰는 고정 이름공간. 바꾸면 같은 이벤트가 다른 UUID가 되므로 고정해 둔다
 EVENT_NS = uuid.uuid5(uuid.NAMESPACE_DNS, "mspace-device")
 # 우노가 잡히는 포트 이름들. 리눅스: ttyACM(정품), ttyUSB(호환 보드) / 맥: cu.usbmodem(정품), cu.usbserial·cu.wchusbserial(호환 보드)
@@ -100,7 +102,7 @@ class HttpVerifier:
     def verify(self, body):
         for attempt in range(1, self.retries + 1):  # attempt = 지금 몇 번째 시도인지 (1, 2)
             try:
-                r = requests.post(self.url, json=body, timeout=TIMEOUT, headers=self.headers)  # TIMEOUT초 안에 답 없으면 실패
+                r = requests.post(self.url, json=body, timeout=(CONNECT_TIMEOUT, TIMEOUT), headers=self.headers)  # 연결 1초, 답 2초 안에 안 오면 실패
                 if 400 <= r.status_code < 500:  # 4xx(토큰·형식 오류)는 다시 보내도 결과가 같아서 바로 거부한다
                     print(f"서버가 요청을 거부함 ({r.status_code}), 다시 보내지 않음")
                     return None

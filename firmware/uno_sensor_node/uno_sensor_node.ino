@@ -20,7 +20,7 @@ const int PIN_LED_OK = 12;    // 초록 LED 핀. 번호가 맞으면 켠다
 const int PIN_LED_NO = 13;    // 빨강 LED 핀. 번호가 틀리면 켠다
 const unsigned long LED_MS = 1500;  // LED를 켜 두는 시간 (ms)
 const unsigned long BLINK_MS = 200;     // "확인 중" 깜빡임 간격 (ms). 서버 답을 기다리는 동안 초록 LED를 깜빡인다
-const unsigned long WAIT_MAX_MS = 7000; // 답을 기다리는 최대 시간 (ms). 게이트웨이는 최대 약 5초 안에 답하므로 넉넉히 7초
+const unsigned long WAIT_MAX_MS = 9000; // 답을 기다리는 최대 시간 (ms). 게이트웨이는 최악 7초 안에 답하므로 넉넉히 9초
 
 // ---------- 키패드 ----------
 const byte ROWS = 4, COLS = 4;  // 키패드 크기: 4행 4열
@@ -123,7 +123,10 @@ void loop() {
   // 키패드: 숫자 6자리 입력 후 #으로 전송, *로 지우기
   char k = keypad.getKey();  // 방금 눌린 키. 안 눌렸으면 0
   if (k) {
-    if (k == '#') {
+    if (k == '#' && waiting) {
+      code = "";  // 확인 중에는 #을 무시한다. 번호가 두 번 가거나 앞 답이 뒤 기다림을 끝내는 걸 막는다
+    }
+    else if (k == '#') {
       if (code.length() == 6) { sendCode(code); startWaiting(); }  // 6자리일 때만 서버에 확인하고, 답 올 때까지 깜빡인다
       else ledOn(PIN_LED_NO);                  // 6자리가 아니면 빨강 LED로 잘못 눌렀다고 알린다
       code = "";

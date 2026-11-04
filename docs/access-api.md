@@ -94,7 +94,7 @@ Content-Type: application/json
 |---|---|---|
 | `400` `INVALID_REQUEST` | `eventId`·`roomId` 빠짐, 길이 넘음 | 다시 안 보냄, `NO` |
 | `401` `DEVICE_UNAUTHORIZED` | 장치 토큰 없음·틀림 | 다시 안 보냄, `NO` |
-| `5xx`, 연결 실패, 2초 안에 답 없음 | 서버 문제 | 같은 `eventId`로 최대 2번 (1초 쉬고) → 그래도 안 되면 `NO`. 최대 약 5초 |
+| `5xx`, 연결 실패(1초), 답 없음(2초) | 서버 문제 | 같은 `eventId`로 최대 2번 (1초 쉬고) → 그래도 안 되면 `NO`. 최악 약 7초 |
 
 ## 4. eventId와 중복 거르기
 
@@ -102,7 +102,7 @@ Content-Type: application/json
 - `bootId`는 **따로 보내는 필드가 아니라 eventId 안에 들어 있다.** 재부팅으로 `seq`가 1부터 다시 시작해도 `bootId`가 달라서 eventId가 안 겹친다.
 - 게이트웨이가 `uuid5(uuid5(NAMESPACE_DNS, "mspace-device"), "1-1000002-3")`으로 UUID를 만든다. 같은 입력이면 항상 같은 UUID라서 재전송해도 eventId가 같다.
 - core는 같은 eventId가 다시 와도 한 번만 처리하고, **처음 결과를 그대로 돌려준다** ✅ (core `access_event` 표에 eventId별 `result`·`reason` 저장). 그래서 재전송해도 체크인이 두 번 되지 않고 잠금 횟수도 다시 세지 않는다.
-- 🟡 **보관 기간**: 지금은 지우는 작업이 없어 계속 남는다. 재전송은 최대 약 5초 안에 끝나므로 하루 지나면 지워도 된다고 제안 (지영 답 기다림).
+- 🟡 **보관 기간**: 지금은 지우는 작업이 없어 계속 남는다. 재전송은 최대 약 7초 안에 끝나므로 하루 지나면 지워도 된다고 제안 (지영 답 기다림).
 
 ## 5. 지영·재웅에게 확인할 것
 

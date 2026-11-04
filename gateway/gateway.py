@@ -20,7 +20,8 @@
 
 설치:  pip3 install pyserial requests
 실행:  DRY_RUN=1 python3 gateway.py
-       SERVER=http://서버주소:8080 DEVICE_TOKEN=<장치 토큰> python3 gateway.py
+       SERVER=https://dev-mspace.java21.net DEVICE_TOKEN=<장치 토큰> python3 gateway.py
+       (http://는 localhost 테스트에서만. 토큰이 실리므로 원격 서버는 https)
 """
 from __future__ import annotations
 

@@ -82,10 +82,11 @@ flowchart LR
    DRY_RUN=1 python3 gateway/gateway.py              # 서버 없이 테스트: 123456#만 초록
    echo 'DEVICE_TOKEN=<받은 장치 토큰>' > .env   # 토큰은 .env에만 (저장소에 안 올라가요)
    set -a; . ./.env; set +a                          # .env 값을 불러오기
-   SERVER=http://<core 주소> python3 gateway/gateway.py
+   SERVER=https://dev-mspace.java21.net python3 gateway/gateway.py   # 토큰이 실리므로 원격 서버는 https만
    ```
    포트는 자동으로 찾아요. 못 찾으면 `PORT=/dev/ttyACM0`처럼 지정해요.
    서버에는 `Authorization: Bearer <장치 토큰>` 헤더로 보내요. 토큰이 없으면 DRY_RUN만 돼요.
+   `http://`는 내 컴퓨터에 띄운 core(`http://localhost:8411`) 테스트에서만 써요.
 
 ### 젯슨에서 올리기 (맥 IDE가 안 될 때)
 

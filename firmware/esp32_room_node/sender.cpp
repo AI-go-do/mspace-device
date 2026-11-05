@@ -35,6 +35,7 @@ static void popFront() {
 // "http://192.168.evil.com"처럼 앞부분만 같은 이름은 막도록 호스트 부분을 통째로 확인한다
 static bool isLocalHost(const String& url) {
   String host = url.substring(7);  // "http://" 뒤
+  if (host.indexOf('@') >= 0) return false;  // user@host 꼴은 받지 않는다 ("10.1.2.3:80@evil.com"도 막게 자르기 전에 본다)
   int end = host.length();
   const char stops[] = {'/', ':', '?', '#'};
   for (char c : stops) {
@@ -42,7 +43,6 @@ static bool isLocalHost(const String& url) {
     if (i >= 0 && i < end) end = i;
   }
   host = host.substring(0, end);
-  if (host.indexOf('@') >= 0) return false;  // user@host 꼴은 받지 않는다
   if (host.endsWith(".local") && host.length() > 6) return true;
   int a, b, c, d;
   char extra;

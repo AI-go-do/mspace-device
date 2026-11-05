@@ -67,17 +67,24 @@ void begin() {
 enum Result { SENT, DROP, RETRY };
 
 // 서버 응답 코드로 다음 행동을 정한다
+// 버리는 건 "이 이벤트 자체가 잘못됐다"는 답(400·409·413·422)뿐이다.
+// 401·403(토큰·방 설정), 404(서버에 아직 경로 없음), 408·429(바쁨), 3xx(주소 설정)는
+// 장치나 서버 설정 문제라서 이벤트는 그대로 두고 간격을 늘려 다시 보낸다 (재실 기록이 사라지지 않게)
 static Result classify(int status) {
   if (status >= 200 && status < 300) return SENT;  // STORED 또는 DUPLICATE. 둘 다 성공
+  if (status == 400 || status == 409 || status == 413 || status == 422) {
+    Serial.printf("[전송] 서버가 이 이벤트를 거부함(%d). 형식 문제라 이것만 버려요\n", status);
+    return DROP;
+  }
   if (status >= 300 && status < 400) {             // 리디렉션은 따라가지 않는다 (토큰이 다른 곳으로 가지 않게)
-    Serial.printf("[전송] 리디렉션(%d)은 따라가지 않아요. SERVER_URL을 확인하세요\n", status);
-    return DROP;
+    Serial.printf("[전송] 리디렉션(%d)은 따라가지 않아요. SERVER_URL을 확인하세요. 큐는 그대로 둬요\n", status);
+  } else if (status == 401 || status == 403) {
+    Serial.printf("[전송] 막힘(%d): 토큰·ROOM_ID·DEVICE_ID를 확인하세요. 큐는 그대로 둬요\n", status);
+  } else if (status == 404) {
+    Serial.println("[전송] 막힘(404): 서버에 경로가 아직 없어요 (EVENT_PATH 확인). 큐는 그대로 둬요");
+  } else {
+    Serial.printf("[전송] 실패(%d). 같은 eventId로 다시 보내요\n", status);  // 408·429·5xx·연결 실패(음수)
   }
-  if (status >= 400 && status < 500) {             // 401 토큰, 403 방·장치 불일치, 400 형식 -> 다시 보내도 같다
-    Serial.printf("[전송] 서버가 거부함(%d). 다시 보내지 않아요 (토큰·ROOM_ID·DEVICE_ID 확인)\n", status);
-    return DROP;
-  }
-  Serial.printf("[전송] 실패(%d). 같은 eventId로 다시 보내요\n", status);  // 5xx 또는 연결 실패(음수)
   return RETRY;
 }
 
@@ -89,6 +96,7 @@ static int httpPost(const char* json) {
   bool ok;
   if (mode == MODE_HTTPS) {
     secure.setCACert(SERVER_CA_PEM);  // 서버 인증서를 이 루트 인증서로 확인한다
+    secure.setHandshakeTimeout(5);    // https 인사(TLS)가 5초 넘게 멈추면 포기 (기본 120초 동안 센서를 못 읽음)
     ok = http.begin(secure, url);
   } else {
     ok = http.begin(plain, url);
@@ -121,7 +129,14 @@ void update(unsigned long nowMs) {
   }
   if (mode == MODE_BLOCKED || !net::online()) return;    // 보낼 수 없으면 모아 두기만
   if ((long)(nowMs - nextTryMs) < 0) return;              // 아직 기다리는 중 (재시도 간격)
-  if (!eventToJson(e, net::epochNow(), nowMs, json, sizeof(json))) return;  // 시계가 맞춰질 때까지 기다림
+  if (!eventToJson(e, net::epochNow(), nowMs, json, sizeof(json))) {  // 시계가 맞춰질 때까지 기다림
+    static unsigned long lastClockLogMs = 0;
+    if (lastClockLogMs == 0 || nowMs - lastClockLogMs >= 60000UL) {  // 1분에 한 번만 찍는다
+      lastClockLogMs = nowMs ? nowMs : 1;
+      Serial.printf("[전송] 인터넷 시계(NTP)를 기다리는 중이라 못 보내요 (%u개 대기). 와이파이가 UDP 123을 막는지 확인하세요\n", (unsigned)count);
+    }
+    return;
+  }
 
   Result r = classify(httpPost(json));
   if (r == RETRY) {

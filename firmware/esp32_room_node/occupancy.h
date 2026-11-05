@@ -8,7 +8,7 @@
 struct OccupancyReading {
   bool occupied;  // 최종 판단: 켜진 센서 중 하나라도 있음이면 true
   int8_t radar;   // 레이더 값 1/0. 레이더를 안 달았으면 -1 (보내지 않음)
-  int8_t pir;     // PIR 값 1/0. PIR을 안 달았으면 -1
+  int8_t pir;     // PIR 값 1/0 (마지막 움직임 뒤 PIR_HOLD_MS 동안은 1). PIR을 안 달았으면 -1
 };
 
 class OccupancySensor {
@@ -18,7 +18,9 @@ class OccupancySensor {
   bool poll(unsigned long nowMs, OccupancyReading& out);
 
  private:
-  OccupancyReading read();
+  OccupancyReading read(unsigned long nowMs);
+  unsigned long lastPirMotionMs_ = 0;  // PIR이 마지막으로 움직임을 본 시각 (millis)
+  bool pirMotionSeen_ = false;         // 켜진 뒤 PIR이 움직임을 한 번이라도 봤는지
   int lastOccupied_ = -1;       // 마지막으로 보낸 최종 판단. 처음엔 -1이라 첫 값은 무조건 보낸다
   unsigned long lastSentMs_ = 0;  // 마지막으로 보낸 시각 (millis)
   unsigned long lastReadMs_ = 0;  // 마지막으로 읽은 시각 (millis)

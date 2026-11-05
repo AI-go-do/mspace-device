@@ -1,7 +1,7 @@
 // M-SPACE 방 장치 (우노용) - 키패드 체크인 (FR-ACC-001) + 재실 센서 (FR-DEV-101)
 // 키패드로 받은 6자리 번호를 JSON 한 줄로 USB 시리얼에 출력하고,
 // 중계(노트북·젯슨)에서 오는 OK/NO 응답으로 LED를 켠다.
-// PIR·조도 값은 바뀔 때와 10초마다 JSON 한 줄로 출력한다.
+// PIR·조도 값은 바뀔 때와 10초마다 JSON 한 줄로 출력한다. PIR은 마지막 움직임 뒤 2분간 "있음"을 유지한다.
 // 번호가 맞는지는 서버가 판단한다. 장치는 번호를 저장하지 않는다.
 // 필요 라이브러리: Keypad (Arduino IDE > 라이브러리 관리 > "Keypad" by Mark Stanley)
 //
@@ -28,6 +28,7 @@ const int PIN_PIR = 2;        // PIR OUT 핀. 움직임이 있으면 1(HIGH), �
 const int PIN_CDS = A0;       // 조도 센서 핀. 0~1023, 밝을수록 큼 (위 배선 기준)
 const unsigned long SENSOR_BEAT_MS = 10000; // 값이 그대로여도 10초마다 보낸다. core가 "센서가 살아 있다"를 알 수 있게 (1분 안 오면 끊김)
 const int LIGHT_DELTA = 50;   // 조도가 50 이상 바뀌면 바로 보낸다. 작은 흔들림마다 보내지 않으려고
+const unsigned long PIR_HOLD_MS = 120000; // 마지막 움직임 뒤 2분은 "있음"으로 본다. PIR은 가만히 있는 사람을 못 봐서 (FR-DEV-103 "헷갈리면 있음")
 
 // ---------- 키패드 ----------
 const byte ROWS = 4, COLS = 4;  // 키패드 크기: 4행 4열
@@ -52,6 +53,8 @@ unsigned long waitStart = 0; // 기다리기 시작한 시각 (millis 기준)
 int lastPir = -1;          // 마지막으로 보낸 PIR 값. 처음엔 -1이라 첫 값은 무조건 보낸다
 int lastLight = -1000;     // 마지막으로 보낸 조도 값. 처음엔 차이가 커서 무조건 보낸다
 unsigned long lastSensorAt = 0; // 마지막으로 센서 값을 보낸 시각 (millis 기준)
+unsigned long lastMotionAt = 0; // PIR이 마지막으로 움직임(HIGH)을 본 시각 (millis 기준)
+bool motionSeen = false;        // 켜진 뒤 움직임을 한 번이라도 봤는지 (처음부터 2분간 "있음"이 되지 않게)
 
 // 키패드 번호 한 줄 출력
 // 예: {"eventId":"1-48213-18","roomId":1,"sensorType":"keypad","code":"123456","ms":12890}
@@ -83,9 +86,14 @@ void sendSensors(int pir, int light) {
 
 // loop()마다 불러서 센서를 읽는다. PIR이 바뀌었거나, 조도가 크게 바뀌었거나, 10초가 지났으면 보낸다
 // 키패드 번호를 기다리는 중에는 보내지 않는다 (게이트웨이가 서버 답을 기다리는 중이라 줄이 밀리지 않게)
+// pir 값은 "PIR이 지금 HIGH이거나, 마지막 움직임 뒤 2분이 안 지났으면 1"이다
 void updateSensors() {
+  if (digitalRead(PIN_PIR) == HIGH) {  // 기다리는 중에도 움직임은 기억해 둔다
+    lastMotionAt = millis();
+    motionSeen = true;
+  }
   if (waiting) return;
-  int pir = digitalRead(PIN_PIR);
+  int pir = (motionSeen && millis() - lastMotionAt < PIR_HOLD_MS) ? 1 : 0;
   int light = analogRead(PIN_CDS);
   bool beat = lastPir < 0 || millis() - lastSensorAt >= SENSOR_BEAT_MS;
   if (pir != lastPir || abs(light - lastLight) >= LIGHT_DELTA || beat) {

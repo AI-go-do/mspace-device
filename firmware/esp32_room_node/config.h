@@ -25,6 +25,7 @@
 // ---------- 주기 (docs/sensor-events-api.md 2장과 맞춤) ----------
 #define OCCUPANCY_BEAT_MS  10000UL  // 바뀌지 않아도 10초마다 보낸다. core는 1분(6번) 안 오면 끊김으로 보고 "있음" 처리
 #define SENSOR_READ_MS     50UL     // 센서 확인 간격
+#define PIR_HOLD_MS        120000UL // PIR은 마지막 움직임 뒤 2분간 "있음" (가만히 있는 사람을 못 봐서). 레이더는 그대로
 
 // ---------- 전송 ----------
 #define DRY_RUN            1        // 1이면 서버에 안 보내고 시리얼 모니터에 보낼 내용만 찍는다. 서버가 준비되면 0

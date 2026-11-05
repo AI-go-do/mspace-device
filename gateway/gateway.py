@@ -53,7 +53,7 @@ PORT_PATTERNS = ["/dev/ttyACM*", "/dev/ttyUSB*", "/dev/cu.usbmodem*", "/dev/cu.u
 @dataclass(frozen=True)
 class Config:
     """게이트웨이 설정값 묶음. 코드를 고치지 않고 실행할 때 환경변수로 바꾼다."""
-    server: str = "http://localhost:8411"  # 예약 서버(core) 주소. 기본값은 내 컴퓨터에 띄운 core
+    server: str = "http://localhost:8080"  # 예약 서버(core) 주소
     dry_run: bool = False                  # True면 서버에 안 보내고 화면에만 찍는다 (서버 없이 테스트용)
     device_token: str | None = None        # 장치 토큰. 서버가 "등록된 키패드"인지 확인하는 값. 저장소에 넣지 않고 .env에만 둔다
     port: str | None = None                # 우노가 꽂힌 USB 포트. 못 찾으면 None

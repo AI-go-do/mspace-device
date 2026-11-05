@@ -233,7 +233,7 @@ def test_load_config_from_env(monkeypatch):
 def test_load_config_defaults_and_port_override(monkeypatch):
     monkeypatch.setattr(gateway, "find_port", lambda: "/dev/ttyUSB0")
     c = gateway.load_config({"PORT": "/dev/ttyACM9"})
-    assert c.server == "http://localhost:8411" and c.dry_run is False and c.device_token is None
+    assert c.server == "http://localhost:8080" and c.dry_run is False and c.device_token is None
     assert c.port == "/dev/ttyACM9"  # PORT를 정하면 자동으로 찾지 않는다
 
 

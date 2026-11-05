@@ -20,23 +20,25 @@ M-SPACE 디바이스·센서 서비스예요. **문 앞 키패드 체크인**과
 ```mermaid
 flowchart LR
     kp[키패드] --> uno[우노]
-    sensor[PIR · 조도 · 레이더] --> uno
+    sensor[PIR · 조도] --> uno
     uno -- USB 시리얼 --> gw[중계<br/>노트북 또는 젯슨]
-    gw -- HTTP --> core[예약 서버 core]
+    gw -- HTTPS --> core[예약 서버 core]
     core -- OK / NO --> gw
     gw -- OK / NO --> uno
     uno --> led[초록 · 빨강 LED]
+    radar[레이더] --> esp[ESP32<br/>메인 장치]
+    esp -- 와이파이 HTTPS --> core
 ```
 
 - 우노는 와이파이가 없어서 USB로 노트북에 보내고, 노트북(`gateway/gateway.py`)이 서버에 대신 전달해요.
-- **ESP32가 오면** 노트북 없이 ESP32 → 서버로 바로 보내요. 보내는 형식이 같아서 서버는 바뀌지 않아요.
+- **ESP32가 메인 장치예요.** 노트북 없이 ESP32 → 서버로 바로 보내요. 보내는 형식이 같아서 서버는 바뀌지 않아요. 지금은 우노+젯슨(1번 방)과 ESP32(2번 방)를 같이 시험해요.
 - 번호가 맞는지는 **서버만 판단**해요. 장치는 번호를 저장하지 않고, 입력을 보내고 결과를 표시만 해요.
 
 ## 3. 진행 단계
 
 - [ ] **0. 준비:** 아두이노 IDE, Keypad 라이브러리, 우노 업로드 확인
 - [ ] **1. 키패드 체크인 (FR-ACC-001):** 6자리 + `#` 입력 → 서버 확인 → LED
-- [ ] **2. 센서 수집 (FR-DEV-101):** PIR·조도 값 전송, eventId 중복 제거
+- [ ] **2. 센서 수집 (FR-DEV-101):** PIR·조도 값 전송, eventId 중복 제거 (코드 준비됨, DRY_RUN 확인 남음)
 - [ ] **3. 레이더 + ESP32:** 가만히 있는 사람 감지, 와이파이 직접 전송
 - [ ] **4. 재실 판정:** 15분 연속 없음 = 빈 방, 헷갈리면 "있음". PIR / 레이더 / 둘 다 정확도 비교
 - [ ] **5. 방 현황 (FR-DEV-102):** 방별 비었음/사용 중 + 다음 예약
@@ -66,7 +68,9 @@ flowchart LR
 | 키패드 열 C1~C4 | D7, D6, D5, D4 |
 | 초록 LED (맞음) | D12 → 220Ω → LED → GND |
 | 빨강 LED (틀림) | D13 → 220Ω → LED → GND |
-| PIR · 조도 · 레이더 | 다음 단계(FR-DEV-101)에서 코드와 함께 추가. 배선도에는 미리 그려 둠 |
+| PIR (SR501) | VCC → 5V, GND → GND, OUT → **D2** |
+| 조도 (CDS) | 5V → CDS → **A0** → 10kΩ → GND (CDS와 10kΩ 사이를 A0에) |
+| 레이더 (LD2410C) | 우노가 아니라 **ESP32**에 달아요 (아래 "ESP32 방 장치") |
 
 키패드 선에 `R1`·`C1` 같은 라벨이 있으면 왼쪽부터 순서대로가 아니라 **라벨 기준**으로 꽂아요 (C4~C1, R1~R4 순서인 키패드도 있어요).
 키패드를 눌렀는데 다른 숫자가 찍히면 선을 바꾸지 말고 코드의 `rowPins`, `colPins` 순서만 바꿔요.
@@ -101,6 +105,61 @@ sudo depmod -a
 echo ch341 | sudo tee /etc/modules-load.d/ch341.conf
 ```
 
+### 재실 센서 확인 (PIR · 조도)
+
+1. PIR 뒤 주황 손잡이: 시간(Tx)은 왼쪽 끝(제일 짧게), 감도(Sx)는 가운데. 점퍼가 있으면 H(반복)
+2. 켜고 **1분쯤** 기다려요. PIR은 켜진 직후 1분 정도 값이 들쭉날쭉해요
+3. `DRY_RUN=1 python3 gateway/gateway.py` 실행 후
+   - 손을 흔들면 `재실 1번 방: 있음 (pir=1, ...)`
+   - 조도 센서를 손으로 가리면 `조도=` 숫자가 작아져요
+   - 가만히 두어도 10초마다 한 줄씩 나와요 (살아 있다는 신호)
+4. `[DRY_RUN] POST /api/sensor-events` 뒤에 core로 보낼 모양이 그대로 찍혀요. 실제 전송은 지영님과 주소·필드 이름을 정한 뒤 붙여요
+
+### ESP32 방 장치 (메인, 지금은 2번 방)
+
+실제로 쓸 장치는 ESP32예요. 방마다 하나씩 달고, 젯슨 없이 와이파이로 core에 바로 보내요. 지금은 우노+젯슨이 1번 방, ESP32가 2번 방이에요 (`config.h`의 `ROOM_ID`).
+
+**배선** ([docs/wiring-esp32.png](docs/wiring-esp32.png))
+
+![ESP32 배선도](docs/wiring-esp32.png)
+
+| LD2410C 레이더 | ESP32 |
+|---|---|
+| VCC | VIN (5V) |
+| GND | GND |
+| OUT | D27 |
+| TX · RX | 비움 |
+
+**올리기**
+1. 아두이노 IDE → 보드 매니저 → **esp32** (Espressif) 설치, 보드는 `ESP32 Dev Module`
+2. `firmware/esp32_room_node/esp32_room_node.ino` 열기 (같은 폴더 파일이 탭으로 같이 열려요) → 업로드
+3. 시리얼 모니터(115200): 레이더 앞에 서면 `재실 2번 방: 있음 (레이더=1)`, 그대로여도 10초마다 한 줄 + `[DRY_RUN] POST ...`
+
+**와이파이·서버 (준비되면)**
+1. `secrets.h.example`을 `secrets.h`로 복사해서 와이파이(2.4GHz), 서버 주소, 장치 토큰, 인증서 넣기. **GitHub에 안 올라가요**
+2. `config.h`에서 `DRY_RUN 0`
+3. 안전장치: 토큰이나 https 인증서가 없으면 보내지 않아요. 원격 `http://`도 막아요(맥 로컬 시험만 `ALLOW_HTTP_FOR_LOCAL_TEST 1`)
+
+**파일 (역할별)**
+
+| 파일 | 하는 일 |
+|---|---|
+| `config.h` | 방 번호, 핀, 어떤 센서를 달았나(`USE_RADAR`, `USE_PIR`), 주기, DRY_RUN |
+| `secrets.h` | 와이파이·서버 주소·토큰 (복사해서 만듦) |
+| `occupancy.*` | 레이더·PIR 읽기 → "하나라도 있음이면 있음"으로 합치기, 바뀜/10초 판단 |
+| `events.*` | core 형식 이벤트 (새 UUID eventId, 센서가 본 시각 observedAt) |
+| `net.*` | 와이파이 연결·자동 재연결, 인터넷 시계 |
+| `sender.*` | 큐에 모아 순서대로 전송. 5xx·연결 실패는 같은 eventId로 재시도(1→2→4…30초), 4xx·리디렉션은 버림 |
+
+**ESP32 확장 (나중에 붙일 자리)**
+
+| 기능 | 할 일 |
+|---|---|
+| PIR 같이 달기 (정확도 비교, 이슈 #13) | `USE_PIR 1`, OUT → D26. 코드는 이미 있음 |
+| CO2 (FR-DEV-104) | SCD40 읽는 파일 추가 → 1분마다 `makeCo2Event()`로 큐에 넣기. 보내는 쪽은 그대로 |
+| 키패드 체크인 (FR-ACC-001) | 우노 코드의 키패드·LED 부분을 옮기고, `/api/access/verify`로 보내는 함수 추가 |
+| 방 늘리기 | 같은 코드에 `ROOM_ID`·`DEVICE_ID`·토큰만 바꿔서 올리기 |
+
 ### 게이트웨이 구조
 
 역할별로 나눠서, 하나를 바꿔도 나머지는 그대로예요.
@@ -110,7 +169,8 @@ echo ch341 | sudo tee /etc/modules-load.d/ch341.conf
 | `Config`, `load_config()` | 설정값(서버 주소, DRY_RUN, 토큰, 포트)을 한곳에 모음 |
 | `find_port()` | 우노가 꽂힌 USB 포트 찾기 |
 | `DryRunVerifier` / `HttpVerifier` | 번호 확인기. 같은 `verify(body)` 모양이라 연습용·진짜 서버를 바꿔 끼움 |
-| `handle_line()` + `HANDLERS` | 한 줄을 받아 `sensorType`별 처리기로 보냄. 재실 센서는 표에 한 줄 추가 |
+| `handle_line()` + `HANDLERS` | 한 줄을 받아 `sensorType`별 처리기로 보냄 (`keypad`, `occupancy`) |
+| `handle_occupancy()` | 우노 재실 줄을 core 형식(`kind: OCCUPANCY`, `occupied`, `sources`, `observedAt`)으로 바꿈 |
 | `main()` | 위 부품을 조립하고 시리얼을 계속 읽음 |
 
 ### 테스트
@@ -133,6 +193,7 @@ pytest --cov --cov-report=term-missing   # 우노·서버 없이 가짜 시리�
 
 ```json
 {"eventId":"1-48213-18","roomId":1,"sensorType":"keypad","code":"123456","ms":12890}
+{"eventId":"1-48213-19","roomId":1,"sensorType":"occupancy","pir":1,"light":512,"ms":13000}
 ```
 
 - `eventId` = 방 번호 - 부팅 횟수 - 순서
@@ -172,7 +233,8 @@ pytest --cov --cov-report=term-missing   # 우노·서버 없이 가짜 시리�
 ## 폴더 구조
 
 ```
-firmware/uno_sensor_node/   우노 코드
+firmware/uno_sensor_node/   우노 코드 (키패드 · PIR · 조도) → 1번 방
+firmware/esp32_room_node/   ESP32 메인 장치 (레이더 → 와이파이로 core 직접) → 2번 방
 gateway/                    중계 (노트북·젯슨)
 docs/                       배선도·회로도 (png, svg)
 ```

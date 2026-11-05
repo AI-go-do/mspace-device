@@ -42,9 +42,7 @@
       <text x="146" y="136">R1·1</text><text x="146" y="172">R2·2</text><text x="146" y="208">R3·3</text><text x="146" y="244">R4·4</text><text x="146" y="280">C1·5</text><text x="146" y="316">C2·6</text><text x="146" y="352">C3·7</text><text x="146" y="388">C4·8</text>
     </g>
 
-    <!-- D3 레이더 (나중) -->
-    <path class="s" d="M300 420 H190" stroke="#5b6b66" stroke-dasharray="5 5"/>
-    <text class="st" x="186" y="424" text-anchor="end" style="fill:#5b6b66">레이더 OUT (도착 후)</text>
+    <!-- D3 비움: 레이더는 ESP32에 단다 (docs/wiring-esp32.png) -->
 
     <!-- D2 PIR -->
     <rect x="60" y="440" width="120" height="60" rx="6" fill="none" stroke="#7a4fc0" stroke-width="2"/>

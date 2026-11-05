@@ -1,7 +1,9 @@
 """M-SPACE 게이트웨이 (노트북/젯슨용)
 
 우노가 USB 시리얼로 보내는 키패드 번호(JSON 한 줄)를 읽어서 서버에 물어보고,
-결과를 우노에 OK/NO로 돌려준다 (FR-ACC-001). 재실 센서 전달은 다음 단계에서 추가.
+결과를 우노에 OK/NO로 돌려준다 (FR-ACC-001).
+재실 센서(PIR·조도) 줄은 core 형식(docs/sensor-events-api.md)으로 바꿔 화면에 찍는다 (FR-DEV-101).
+서버 전송은 지영과 주소·필드 이름을 정한 뒤 붙인다.
 
 출입 확인 API (core 담당 지영과 맞춘 형식):
   요청: {"eventId": "uuid", "roomId": 1, "deviceId": "keypad-1", "code": "123456"}
@@ -15,6 +17,7 @@
   find_port()             : 우노가 꽂힌 USB 포트를 찾는다
   DryRunVerifier          : 서버 없이 연습용으로 답한다 (123456만 통과)
   HttpVerifier            : 진짜 서버에 묻는다 (토큰, 재시도)
+  handle_occupancy()      : 재실 센서 줄을 core 형식으로 바꿔 화면에 찍는다
   handle_line()           : 우노가 보낸 한 줄을 받아 우노에 돌려줄 답(OK/NO)을 만든다
   main()                  : 위 부품을 조립해서 시리얼을 계속 읽는다
 
@@ -31,6 +34,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 import requests
 import serial
@@ -42,6 +46,7 @@ TIMEOUT = 2          # 연결된 뒤 서버 답을 기다리는 시간(초)
 # eventId를 UUID로 바꿀 때 쓰는 고정 이름공간. 바꾸면 같은 이벤트가 다른 UUID가 되므로 고정해 둔다
 EVENT_NS = uuid.uuid5(uuid.NAMESPACE_DNS, "mspace-device")
 # 우노가 잡히는 포트 이름들. 리눅스: ttyACM(정품), ttyUSB(호환 보드) / 맥: cu.usbmodem(정품), cu.usbserial·cu.wchusbserial(호환 보드)
+KST = timezone(timedelta(hours=9))  # 한국 시각(+09:00). core와 맞춘 시각 형식
 PORT_PATTERNS = ["/dev/ttyACM*", "/dev/ttyUSB*", "/dev/cu.usbmodem*", "/dev/cu.usbserial*", "/dev/cu.wchusbserial*"]
 
 
@@ -167,9 +172,57 @@ def handle_keypad(event, verifier):
     return b"OK\n" if ok else b"NO\n"
 
 
-# sensorType별 처리기 표. 재실 센서(pir, light 등)는 여기에 한 줄씩 추가한다 (FR-DEV-101)
+def is_int(value):
+    """진짜 정수인지. True/False도 int로 취급되므로 따로 막는다."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def valid_occupancy(event):
+    """우노가 보내는 재실 센서 줄 형식인지 확인한다. pir은 0/1, light는 0~1023."""
+    eid, room, pir, light = (event.get(k) for k in ("eventId", "roomId", "pir", "light"))
+    return (
+        isinstance(eid, str) and EVENT_ID_RE.fullmatch(eid) is not None
+        and is_int(room)
+        and is_int(pir) and pir in (0, 1)
+        and is_int(light) and 0 <= light <= 1023
+    )
+
+
+def occupancy_body(event, now=None):
+    """우노 재실 줄을 core 형식(docs/sensor-events-api.md 2-1장)으로 바꾼다.
+
+    우노에는 시계가 없어서 observedAt은 게이트웨이가 받은 시각(한국 시각)으로 붙인다.
+    occupied는 지금은 PIR 하나로 정한다. 레이더가 붙으면 "하나라도 있음이면 있음"(FR-DEV-103)으로 합친다.
+    """
+    now = now or datetime.now(KST)
+    return {
+        "eventId": to_uuid(event["eventId"]),
+        "roomId": event["roomId"],
+        "deviceId": f"sensor-{event['roomId']}",  # 방마다 센서 장치 1개라서 방 번호로 이름을 붙인다
+        "kind": "OCCUPANCY",
+        "occupied": event["pir"] == 1,
+        "sources": {"pir": event["pir"] == 1, "light": event["light"]},  # core는 기록만 한다 (정확도 비교용)
+        "observedAt": now.isoformat(timespec="seconds"),
+    }
+
+
+def handle_occupancy(event, verifier):
+    """재실 센서 줄: core 형식으로 바꿔 화면에 찍는다. 우노에 돌려줄 답은 없다."""
+    if not valid_occupancy(event):
+        print("형식이 맞지 않는 센서 줄, 건너뜀")
+        return None
+    body = occupancy_body(event)
+    state = "있음" if body["occupied"] else "없음"
+    print(f"재실 {body['roomId']}번 방: {state} (pir={event['pir']}, 조도={event['light']})")
+    if isinstance(verifier, DryRunVerifier):  # 연습 모드에서는 core에 보낼 모양을 그대로 보여 준다
+        print("[DRY_RUN] POST /api/sensor-events", json.dumps(body, ensure_ascii=False))
+    return None
+
+
+# sensorType별 처리기 표. 새 센서 줄은 여기에 한 줄씩 추가한다
 HANDLERS = {
     "keypad": handle_keypad,
+    "occupancy": handle_occupancy,
 }
 
 

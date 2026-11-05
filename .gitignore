@@ -6,3 +6,4 @@ __pycache__/
 coverage.xml
 .coverage
 .pytest_cache/
+firmware/esp32_room_node/secrets.h

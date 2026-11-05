@@ -146,7 +146,7 @@ Content-Type: application/json
 |---|---|---|
 | 이벤트 저장 | FR-DEV-101 | 표 `sensor_event` (`event_id` unique, `room_id`, `device_id`, `kind`, `occupied`, `sources`(재실, JSON), `ppm`, `source`(CO2 센서 이름), `observed_at`, `received_at`) |
 | 방 지금 상태 | FR-DEV-102 | 방별 마지막 재실 상태와 바뀐 시각. 방 현황 화면·비서 `room_status` 도구가 읽음 |
-| 자리 비움 | FR-DEV-103 | `IN_USE` 예약이 있는 방이 "비어 있음"이 된 시각부터 10분 → 알림, 15분 → `AWAY_RELEASED` |
+| 자리 비움 | FR-DEV-103 | `IN_USE` 예약이 있는 방이 "비어 있음"이 된 시각부터 10분 → 알림, 15분 → `AWAY_RELEASED`. 알림의 "아직 있어요"(앱 버튼, 예약당 1번)를 누르면 누른 시각부터 다시 재고, 그 뒤 10분 비면 알림 없이 `AWAY_RELEASED` ✅ (docs #39, core #63). 장치는 바뀌는 것 없음 |
 | 환기 알림 | FR-DEV-104 | 1000ppm 넘는 값이 **3분 연속**(1분마다 3번)이면 알림. 잠깐 튀는 값은 무시. 같은 방 30분에 한 번 ✅ |
 
 - 시계열 저장(InfluxDB)은 나중에 붙인다. 지금은 core DB 표 하나로 충분하다 (강사님: 인프라는 최소로).

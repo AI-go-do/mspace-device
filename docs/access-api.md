@@ -36,11 +36,25 @@ sequenceDiagram
 |---|---|---|
 | `eventId` | 글자, `방-bootId-seq` | 이벤트 고유 번호. 아래 4장 |
 | `roomId` | 정수 | 방 번호 (펌웨어 `ROOM_ID`) |
-| `sensorType` | 글자 | 지금은 `keypad`만. 재실 센서는 `pir`, `light` 등 추가 예정 (FR-DEV-101) |
+| `sensorType` | 글자 | `keypad`(번호 입력) 또는 `occupancy`(재실 센서, 아래) |
 | `code` | 글자, 숫자 6자리 | 입력한 번호. `0`으로 시작해도 안 사라지게 글자로 보낸다 |
 | `ms` | 정수 | 우노가 켜진 뒤 지난 ms. 우노엔 시계가 없어서 참고용 |
 
 게이트웨이 → 우노 답: `OK\n`(열림, 초록 LED) 또는 `NO\n`(거부, 빨강 LED).
+
+재실 센서 줄 (FR-DEV-101). 게이트웨이는 답하지 않는다.
+보내는 때: PIR 값이 바뀔 때, 조도가 50(`LIGHT_DELTA`) 넘게 바뀔 때, 바뀌지 않아도 10초마다. 키패드 답(`OK`/`NO`)을 기다리는 동안은 보내지 않고, 답이 온 뒤 이어서 보낸다:
+
+```json
+{"eventId":"1-1000002-4","roomId":1,"sensorType":"occupancy","pir":1,"light":512,"ms":13000}
+```
+
+| 필드 | 형식 | 뜻 |
+|---|---|---|
+| `pir` | 정수 `0`·`1` | PIR이 사람을 봤으면 1 |
+| `light` | 정수 `0`~`1023` | 조도 센서 값 (A0) |
+
+게이트웨이는 이 줄을 core 재실 이벤트(`kind: OCCUPANCY`, `occupied`, `sources`, `observedAt`)로 바꾼다. core 쪽 형식은 `docs/sensor-events-api.md`(PR #23).
 
 ## 3. 게이트웨이 → core: `POST /api/access/verify`
 

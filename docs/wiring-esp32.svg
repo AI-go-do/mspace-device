@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 560" role="img" aria-label="ESP32와 LD2410C 레이더 배선도">
+  <style>
+    .t{font-family:'Apple SD Gothic Neo','Malgun Gothic','WenQuanYi Zen Hei',sans-serif;font-size:12px;fill:#1d2a26}
+    .tm{font-family:ui-monospace,Menlo,monospace,'WenQuanYi Zen Hei';font-size:12px;fill:#e6f4f3}
+    .tl{font-family:'Apple SD Gothic Neo','Malgun Gothic','WenQuanYi Zen Hei',sans-serif;font-size:14px;font-weight:700;fill:#1d2a26}
+    .w{fill:none;stroke-width:2.6;stroke-linejoin:round}
+  </style>
+  <rect width="800" height="560" fill="#ffffff"/>
+  <text class="tl" x="20" y="30" style="font-size:17px">2번 방 장치: ESP32 + 레이더 (LD2410C)</text>
+  <text class="t" x="20" y="50" style="fill:#5b6b66">USB를 뽑은 상태에서 꽂고, 다 꽂은 뒤 확인하고 USB를 연결해요. 전원은 USB(맥)에서 받아요.</text>
+
+  <!-- ESP32 보드 -->
+  <rect x="60" y="110" width="250" height="340" rx="12" fill="#1f3b57"/>
+  <rect x="135" y="122" width="100" height="44" rx="4" fill="#c9d3dc"/>
+  <text class="tm" x="185" y="149" text-anchor="middle" style="fill:#1f3b57">안테나</text>
+  <text x="185" y="395" text-anchor="middle" style="font-family:'Apple SD Gothic Neo','Malgun Gothic','WenQuanYi Zen Hei',sans-serif;font-size:24px;font-weight:700;fill:#e6f4f3">ESP32</text>
+  <text class="tm" x="185" y="415" text-anchor="middle">보드: ESP32 Dev Module</text>
+  <rect x="160" y="430" width="50" height="30" rx="4" fill="#9aa5b1"/>
+  <text class="tm" x="185" y="478" text-anchor="middle" style="fill:#1d2a26">USB → 맥</text>
+
+  <!-- 오른쪽 핀 (쓰는 것만) -->
+  <g class="tm" text-anchor="end">
+    <text x="300" y="214">VIN (5V)</text>
+    <text x="300" y="254">GND</text>
+    <text x="300" y="294">D27 (GPIO27)</text>
+    <text x="300" y="334" style="fill:#b8c4cf">D26 (PIR, 선택)</text>
+  </g>
+  <g fill="#e6f4f3"><circle cx="310" cy="210" r="5"/><circle cx="310" cy="250" r="5"/><circle cx="310" cy="290" r="5"/><circle cx="310" cy="330" r="5"/></g>
+
+  <!-- 레이더 -->
+  <rect x="540" y="150" width="200" height="200" rx="10" fill="none" stroke="#c77d0a" stroke-width="2.4"/>
+  <text class="tl" x="640" y="176" text-anchor="middle">LD2410C 레이더</text>
+  <text class="t" x="640" y="334" text-anchor="middle" style="fill:#5b6b66">사람이 가만히 있어도 OUT = HIGH</text>
+  <g class="t" text-anchor="start">
+    <text x="556" y="214">VCC</text><text x="556" y="254">GND</text><text x="556" y="294">OUT</text>
+  </g>
+  <g fill="#c77d0a"><circle cx="540" cy="210" r="5"/><circle cx="540" cy="250" r="5"/><circle cx="540" cy="290" r="5"/></g>
+  <text class="t" x="640" y="372" text-anchor="middle" style="font-size:11px;fill:#5b6b66">TX·RX 핀은 안 써요 (비워 둠)</text>
+  <text class="t" x="640" y="388" text-anchor="middle" style="font-size:11px;fill:#5b6b66">핀 순서는 제품마다 달라요. 뒷면 라벨 기준으로 꽂기</text>
+
+  <!-- 선 -->
+  <path class="w" d="M310 210 H540" stroke="#d33a2c"/>
+  <path class="w" d="M310 250 H540" stroke="#2b3a8a"/>
+  <path class="w" d="M310 290 H540" stroke="#c77d0a"/>
+  <g class="t" text-anchor="middle">
+    <text x="425" y="202" style="fill:#d33a2c">5V (빨강 선 추천)</text>
+    <text x="425" y="242" style="fill:#2b3a8a">GND (검정 선 추천)</text>
+    <text x="425" y="282" style="fill:#a8690a">신호 (3.3V라 바로 꽂아도 됨)</text>
+  </g>
+
+  <!-- PIR 선택 -->
+  <path class="w" d="M310 330 H420 V420 H540" stroke="#7a4fc0" stroke-dasharray="6 5"/>
+  <rect x="540" y="400" width="200" height="60" rx="8" fill="none" stroke="#7a4fc0" stroke-width="2" stroke-dasharray="6 5"/>
+  <text class="tl" x="640" y="427" text-anchor="middle" style="fill:#7a4fc0">PIR (선택)</text>
+  <text class="t" x="640" y="447" text-anchor="middle" style="font-size:11px;fill:#5b6b66">OUT → D26, VCC → VIN, GND → GND</text>
+  <text class="t" x="640" y="478" text-anchor="middle" style="font-size:11px;fill:#7a4fc0">쓰려면 config.h에서 USE_PIR 1</text>
+
+  <!-- 표 -->
+  <g class="t">
+    <text x="20" y="520" style="font-weight:700">요약</text>
+    <text x="70" y="520">레이더 VCC → ESP32 VIN(5V)   ·   GND → GND   ·   OUT → D27   ·   TX·RX 비움</text>
+    <text x="70" y="540" style="fill:#5b6b66">보드에 VIN 대신 5V라고 적혀 있으면 5V에. 3V3 핀에 꽂으면 레이더가 안 켜질 수 있어요</text>
+  </g>
+</svg>

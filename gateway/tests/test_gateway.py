@@ -47,8 +47,13 @@ def keypad_line(code, seq=1):
     return json.dumps({"eventId": f"1-48213-{seq}", "roomId": 1, "sensorType": "keypad", "code": code, "ms": 10})
 
 
-def pir_line(value, seq=1):  # 키패드가 아닌 줄 예시 (나중에 붙일 재실 센서)
+def pir_line(value, seq=1):  # 처리기 표에 없는 sensorType 예시
     return json.dumps({"eventId": f"1-48213-{seq}", "roomId": 1, "sensorType": "pir", "value": value, "ms": 10})
+
+
+def occ_line(pir=1, light=512, seq=1, room=1):  # 우노가 보내는 재실 센서 줄
+    return json.dumps({"eventId": f"{room}-48213-{seq}", "roomId": room, "sensorType": "occupancy",
+                       "pir": pir, "light": light, "ms": 10})
 
 
 @pytest.fixture
@@ -314,3 +319,148 @@ def test_worst_case_wait_is_shorter_than_uno_wait():
     # requests는 연결 시간과 답 시간을 따로 재므로 둘 다 더한다
     worst = gateway.RETRIES * (gateway.CONNECT_TIMEOUT + gateway.TIMEOUT) + sum(range(1, gateway.RETRIES))
     assert worst <= 7
+
+
+# ---- 재실 센서 (FR-DEV-101) ----
+
+def test_occupancy_body_matches_spec():
+    now = gateway.datetime(2026, 11, 5, 10, 0, 0, tzinfo=gateway.KST)
+    body = gateway.occupancy_body(json.loads(occ_line(pir=1, light=300, room=2)), now)
+    assert body == {
+        "eventId": str(uuid.uuid5(gateway.EVENT_NS, "2-48213-1")),
+        "roomId": 2,
+        "deviceId": "sensor-2",
+        "kind": "OCCUPANCY",
+        "occupied": True,
+        "sources": {"pir": True, "light": 300},
+        "observedAt": "2026-11-05T10:00:00+09:00",
+    }
+    assert gateway.occupancy_body(json.loads(occ_line(pir=0)), now)["occupied"] is False
+
+
+def test_occupancy_default_time_is_kst():
+    body = gateway.occupancy_body(json.loads(occ_line()))
+    assert body["observedAt"].endswith("+09:00")
+
+
+def test_occupancy_dry_run_prints_body(run, capsys):
+    written, sent = run([occ_line(pir=1)], dry_run=True, token=None)
+    assert written == [] and sent == []  # 우노에 답하지 않고, 서버로도 아직 안 보낸다
+    out = capsys.readouterr().out
+    assert "재실 1번 방: 있음" in out
+    assert '"kind": "OCCUPANCY"' in out
+
+
+def test_occupancy_not_sent_to_server_yet(run, capsys):
+    written, sent = run([occ_line(pir=0)])
+    assert written == [] and sent == []
+    out = capsys.readouterr().out
+    assert "재실 1번 방: 없음" in out and "[DRY_RUN]" not in out
+
+
+@pytest.mark.parametrize("field,value", [
+    ("pir", 2), ("pir", True), ("pir", "1"), ("light", -1), ("light", 1024), ("light", 1.5),
+    ("roomId", "1"), ("roomId", True), ("eventId", "abc"), ("eventId", 1),
+])
+def test_occupancy_bad_line_skipped(field, value, capsys):
+    event = json.loads(occ_line())
+    event[field] = value
+    assert gateway.handle_line(json.dumps(event), gateway.DryRunVerifier()) is None
+    assert "형식이 맞지 않는 센서 줄" in capsys.readouterr().out
+
+
+def test_occupancy_between_keypad_lines(run):
+    written, _ = run([keypad_line("123456", 1), occ_line(seq=2), keypad_line("999999", 3)], dry_run=True, token=None)
+    assert written == [b"OK\n", b"NO\n"]  # 센서 줄이 끼어도 키패드 답 순서는 그대로
+
+
+# ---- 재실 이벤트 전송 (SensorSender) ----
+
+@pytest.fixture
+def sender(monkeypatch):
+    """가짜 서버 응답을 차례로 돌려주는 SensorSender. (sender, 보낸 요청 목록)"""
+    def _make(responses):
+        sent = []
+        queue = list(responses)
+
+        def fake_post(url, json=None, timeout=None, headers=None, allow_redirects=True):
+            sent.append((url, json, allow_redirects))
+            assert headers == {"Authorization": "Bearer test-token"}
+            r = queue.pop(0)
+            if isinstance(r, Exception):
+                raise r
+            return r
+
+        monkeypatch.setattr(gateway.requests, "post", fake_post)
+        return gateway.SensorSender("https://core.example", "test-token"), sent
+    return _make
+
+
+def occ_body(seq=1):
+    return gateway.occupancy_body(json.loads(occ_line(seq=seq)))
+
+
+def test_sensor_sender_posts_and_pops(sender):
+    s, sent = sender([FakeResponse({"result": "STORED"})])
+    s.push(occ_body())
+    assert s.step() == 0 and len(s.queue) == 0
+    url, body, redirects = sent[0]
+    assert url == "https://core.example/api/sensor-events" and body["kind"] == "OCCUPANCY"
+    assert redirects is False  # 리디렉션을 따라가지 않는다 (토큰 보호)
+    assert s.step() is None  # 큐가 비었으면 None
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 408, 429, 500, 503])
+def test_sensor_sender_keeps_event_on_config_or_server_error(sender, status):
+    s, sent = sender([FakeResponse(status=status), FakeResponse({"result": "STORED"})])
+    s.push(occ_body())
+    assert s.step() == 1 and len(s.queue) == 1  # 버리지 않고 1초 뒤 다시
+    assert s.step() == 0 and len(s.queue) == 0
+    assert sent[0][1]["eventId"] == sent[1][1]["eventId"]  # 같은 eventId로 다시 보낸다
+
+
+@pytest.mark.parametrize("status", [400, 409, 413, 422])
+def test_sensor_sender_drops_bad_event(sender, status, capsys):
+    s, _ = sender([FakeResponse(status=status)])
+    s.push(occ_body())
+    assert s.step() == 0 and len(s.queue) == 0
+    assert "이것만 버려요" in capsys.readouterr().out
+
+
+def test_sensor_sender_backoff_doubles_and_caps(sender):
+    s, _ = sender([requests.ConnectionError()] * 7 + [FakeResponse({})])
+    s.push(occ_body())
+    waits = [s.step() for _ in range(7)]
+    assert waits == [1, 2, 4, 8, 16, 30, 30]
+    assert s.step() == 0 and s.backoff == 1  # 성공하면 다시 1초부터
+
+
+def test_sensor_sender_queue_drops_oldest_when_full(sender):
+    s, _ = sender([])
+    for i in range(gateway.SENSOR_QUEUE_MAX + 5):
+        s.push({"eventId": str(i)})
+    assert len(s.queue) == gateway.SENSOR_QUEUE_MAX
+    assert s.queue[0]["eventId"] == "5"  # 가장 오래된 5개가 밀려남
+
+
+def test_occupancy_pushed_to_sender_when_on():
+    pushed = []
+
+    class FakeSender:
+        def push(self, body):
+            pushed.append(body)
+
+    gateway.handle_line(occ_line(pir=1), gateway.HttpVerifier("https://core.example", "t"), FakeSender())
+    assert len(pushed) == 1 and pushed[0]["occupied"] is True
+
+
+def test_load_config_send_sensors(monkeypatch):
+    monkeypatch.setattr(gateway, "find_port", lambda: None)
+    assert gateway.load_config({"SEND_SENSORS": "1"}).send_sensors is True
+    assert gateway.load_config({}).send_sensors is False
+
+
+def test_remote_http_server_exits():
+    cfg = gateway.Config(port="/dev/null", device_token="t", server="http://core.example.com")
+    with pytest.raises(SystemExit, match="https"):
+        gateway.main(cfg)

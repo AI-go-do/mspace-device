@@ -86,12 +86,13 @@ flowchart LR
    DRY_RUN=1 python3 gateway/gateway.py              # 서버 없이 테스트: 123456#만 초록
    echo 'DEVICE_TOKEN=<받은 장치 토큰>' > .env   # 토큰은 .env에만 (저장소에 안 올라가요)
    set -a; . ./.env; set +a                          # .env 값을 불러오기
-   SERVER=https://<core 주소> python3 gateway/gateway.py   # 원격 core는 https로만 (토큰 보호, http는 이 기기·사설망만)
-   SEND_SENSORS=1 SERVER=https://<core 주소> python3 gateway/gateway.py   # 재실 센서도 core로 보내기
+   SERVER=https://dev-mspace.java21.net python3 gateway/gateway.py   # 토큰이 실리므로 원격 서버는 https만
+   SEND_SENSORS=1 SERVER=https://dev-mspace.java21.net python3 gateway/gateway.py   # 재실 센서도 core로 보내기
    ```
    재실 센서 전송(`SEND_SENSORS=1`)은 core에 `/api/sensor-events`(core #60)가 올라간 뒤 켜요. 키패드를 막지 않게 뒤에서 보내고, 끊기거나 토큰·경로 문제(401·403·404)면 모아 뒀다가 다시 보내요(최대 360개, 약 1시간). 이벤트 자체가 틀린 것(400·409·413·422)만 버려요.
    포트는 자동으로 찾아요. 못 찾으면 `PORT=/dev/ttyACM0`처럼 지정해요.
    서버에는 `Authorization: Bearer <장치 토큰>` 헤더로 보내요. 토큰이 없으면 DRY_RUN만 돼요.
+   `http://`는 내 컴퓨터에 띄운 core 테스트에서만 써요. 원격 주소에 `http://`를 쓰면 게이트웨이가 시작하지 않아요(토큰 보호).
 
 ### 젯슨에서 올리기 (맥 IDE가 안 될 때)
 
@@ -222,7 +223,7 @@ pytest --cov --cov-report=term-missing   # 우노·서버 없이 가짜 시리�
 | 아직 정할 것 | 내용 |
 |---|---|
 | `POST /api/access/verify` | 장치 토큰 발급, 개발 서버 HTTPS 주소 (재웅) |
-| `POST /api/sensor-events` | 누가 만들지, eventId unique 제약 |
+| `POST /api/sensor-events` | 형식 초안 [docs/sensor-events-api.md](docs/sensor-events-api.md). core에 둘지, 응답·끊김 기준 (지영), 센서 장치 토큰 (재웅) |
 
 ## 8. 확장 계획
 

@@ -24,7 +24,8 @@ SEND_SENSORS=1이면 core POST /api/sensor-events로 보낸다 (FR-DEV-101). 키
 
 설치:  pip3 install pyserial requests
 실행:  DRY_RUN=1 python3 gateway.py
-       SERVER=https://<core 주소> DEVICE_TOKEN=<장치 토큰> python3 gateway.py  (원격은 https만)
+       SERVER=https://dev-mspace.java21.net DEVICE_TOKEN=<장치 토큰> python3 gateway.py
+       (http://는 localhost 테스트에서만. 토큰이 실리므로 원격 서버는 https)
        재실 센서도 보내려면 앞에 SEND_SENSORS=1 을 붙인다 (core에 /api/sensor-events가 올라간 뒤)
 """
 from __future__ import annotations
@@ -89,6 +90,27 @@ def load_config(env=None):
     )
 
 
+def is_loopback(url):
+    """주소가 내 컴퓨터(localhost·127.0.0.1·::1)인지. 글자 앞부분이 아니라 실제 주소로 판단한다."""
+    host = urlsplit(url).hostname
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host or "").is_loopback
+    except ValueError:  # 이름(예: core.example.com)은 loopback으로 보지 않는다
+        return False
+
+
+def is_safe_server(server):
+    """장치 토큰을 보내도 되는 주소인지. https는 괜찮고, http는 내 컴퓨터일 때만."""
+    parts = urlsplit(server)
+    if not parts.hostname:
+        return False
+    if parts.scheme == "https":
+        return True
+    return parts.scheme == "http" and is_loopback(server)
+
+
 # ---------- 번호 확인 (verifier): 같은 모양 verify(body) 두 개 ----------
 
 class DryRunVerifier:
@@ -111,11 +133,17 @@ class HttpVerifier:
         self.url = server + "/api/access/verify"
         self.headers = {"Authorization": f"Bearer {token}"}  # 장치 토큰을 같이 보낸다
         self.retries = retries
+        # 내 컴퓨터로 보낼 때는 프록시(HTTP_PROXY 설정)를 거치지 않는다. 토큰·번호가 밖으로 새지 않게
+        self.proxies = {"http": None, "https": None} if is_loopback(self.url) else None
 
     def verify(self, body):
         for attempt in range(1, self.retries + 1):  # attempt = 지금 몇 번째 시도인지 (1, 2)
             try:
-                r = requests.post(self.url, json=body, timeout=(CONNECT_TIMEOUT, TIMEOUT), headers=self.headers)  # 연결 1초, 답 2초 안에 안 오면 실패
+                r = requests.post(self.url, json=body, timeout=(CONNECT_TIMEOUT, TIMEOUT), headers=self.headers,
+                                  proxies=self.proxies, allow_redirects=False)  # 연결 1초, 답 2초 안에 안 오면 실패
+                if 300 <= r.status_code < 400:  # 다른 주소로 넘기라는 답(리디렉션)은 따라가지 않는다. 번호가 http로 샐 수 있어서
+                    print(f"서버가 다른 주소로 넘김 ({r.status_code}), 따라가지 않음")
+                    return None
                 if 400 <= r.status_code < 500:  # 4xx(토큰·형식 오류)는 다시 보내도 결과가 같아서 바로 거부한다
                     print(f"서버가 요청을 거부함 ({r.status_code}), 다시 보내지 않음")
                     return None
@@ -198,28 +226,6 @@ class SensorSender:
         threading.Thread(target=self.run_forever, daemon=True).start()
         return self
 
-
-def server_is_safe(url):
-    """토큰을 실어 보내도 되는 주소인지. https면 OK, http는 이 기기·사설망(10.x, 172.16~31.x, 192.168.x)·.local만 OK.
-    원격 http로 보내면 오가는 길에서 토큰과 키패드 번호가 그대로 보이기 때문에 막는다."""
-    try:
-        parts = urlsplit(url)
-        host = parts.hostname or ""
-    except ValueError:
-        return False
-    if "@" in parts.netloc:  # http://사설주소@원격주소 처럼 속이는 주소는 거절
-        return False
-    if parts.scheme == "https":
-        return bool(host)
-    if parts.scheme != "http":
-        return False
-    if host == "localhost" or host.endswith(".local"):
-        return True
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    return ip.is_loopback or (ip.version == 4 and ip.is_private and not ip.is_link_local)
 
 
 def make_verifier(config):
@@ -358,8 +364,8 @@ def main(config=None):
         raise SystemExit("우노를 못 찾았어요. USB 연결을 확인하거나 PORT=/dev/ttyACM0 처럼 지정하세요.")
     if not config.dry_run and not config.device_token:
         raise SystemExit("DEVICE_TOKEN이 없어요. .env에 넣고 불러오거나, 서버 없이 테스트하려면 DRY_RUN=1 로 실행하세요.")
-    if not config.dry_run and not server_is_safe(config.server):
-        raise SystemExit("원격 서버는 https로만 보내요(토큰 보호). http는 이 기기나 사설망(10.x·172.16~31.x·192.168.x)만 돼요.")
+    if not config.dry_run and not is_safe_server(config.server):
+        raise SystemExit("원격 서버는 https://로만 연결해요 (장치 토큰이 실리므로). http://는 localhost 테스트에서만 써요.")
     print("연결:", config.port, "| 서버:", "DRY_RUN" if config.dry_run else config.server,
           "| 재실 전송:", "켬" if config.send_sensors and not config.dry_run else "끔")
     verifier = make_verifier(config)

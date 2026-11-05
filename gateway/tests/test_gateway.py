@@ -68,8 +68,10 @@ def run(monkeypatch):
         sent = []
         queue = list(responses or [])
 
-        def fake_post(url, json=None, timeout=None, headers=None):
+        def fake_post(url, json=None, timeout=None, headers=None, proxies=None, allow_redirects=True):
             sent.append((url, json))
+            assert allow_redirects is False  # 리디렉션은 따라가지 않는다
+            assert proxies == {"http": None, "https": None}  # 테스트 서버는 localhost라 프록시를 안 거친다
             assert headers == {"Authorization": "Bearer test-token"}  # 장치 토큰을 항상 같이 보낸다
             r = queue.pop(0) if queue else FakeResponse({})
             if isinstance(r, Exception):
@@ -205,6 +207,36 @@ def test_dry_run(run, capsys):
 def test_no_port_exits():
     with pytest.raises(SystemExit):
         gateway.main(gateway.Config(port=None, dry_run=True))
+
+
+@pytest.mark.parametrize("server, ok", [
+    ("https://dev-mspace.java21.net", True),
+    ("http://localhost:8411", True),
+    ("http://127.0.0.1:8411", True),
+    ("http://[::1]:8411", True),
+    ("http://dev-mspace.java21.net", False),   # 원격 http는 토큰이 그대로 보여서 안 된다
+    ("http://localhost.evil.com", False),      # 앞부분만 localhost인 가짜 주소
+    ("http://192.168.0.5:8411", False),        # 같은 와이파이라도 http는 안 된다
+    ("ftp://localhost", False),
+    ("https://", False),
+])
+def test_is_safe_server(server, ok):
+    assert gateway.is_safe_server(server) is ok
+
+
+def test_redirect_is_denied(run):
+    written, sent = run([keypad_line("123456")], [FakeResponse({"result": "OPENED"}, status=307)])
+    assert written == [b"NO\n"] and len(sent) == 1  # 3xx는 열지 않고, 다시 보내지도 않는다
+
+
+def test_remote_server_uses_env_proxy():
+    assert gateway.HttpVerifier("https://dev-mspace.java21.net", "t").proxies is None  # 원격은 원래 설정 그대로
+    assert gateway.HttpVerifier("http://127.0.0.1:8080", "t").proxies == {"http": None, "https": None}
+
+
+def test_remote_http_server_exits():
+    with pytest.raises(SystemExit):
+        gateway.main(gateway.Config(server="http://dev-mspace.java21.net", port="/dev/fake", device_token="t"))
 
 
 # ---- 설정 (Config, find_port) ----
@@ -426,23 +458,6 @@ def test_load_config_send_sensors(monkeypatch):
     monkeypatch.setattr(gateway, "find_port", lambda: None)
     assert gateway.load_config({"SEND_SENSORS": "1"}).send_sensors is True
     assert gateway.load_config({}).send_sensors is False
-
-
-@pytest.mark.parametrize("url,ok", [
-    ("https://core.example.com", True),
-    ("http://localhost:8080", True),
-    ("http://127.0.0.1:8080", True),
-    ("http://10.116.64.12:8413", True),
-    ("http://192.168.0.5", True),
-    ("http://jetson.local:8080", True),
-    ("http://core.example.com", False),
-    ("http://8.8.8.8", False),
-    ("http://10.0.0.1@evil.example.com", False),
-    ("ftp://localhost", False),
-    ("https://", False),
-])
-def test_server_is_safe(url, ok):
-    assert gateway.server_is_safe(url) is ok
 
 
 def test_remote_http_server_exits():

@@ -22,7 +22,8 @@ OccupancyReading OccupancySensor::read(unsigned long nowMs) {
     lastPirMotionMs_ = nowMs;
     pirMotionSeen_ = true;
   }
-  r.pir = (pirMotionSeen_ && nowMs - lastPirMotionMs_ < PIR_HOLD_MS) ? 1 : 0;
+  if (pirMotionSeen_ && nowMs - lastPirMotionMs_ >= PIR_HOLD_MS) pirMotionSeen_ = false;  // 유지 시간이 끝나면 잊는다 (49일 뒤 millis 되감김에 다시 "있음"이 되지 않게)
+  r.pir = pirMotionSeen_ ? 1 : 0;
   if (r.pir == 1) r.occupied = true;
 #endif
   return r;

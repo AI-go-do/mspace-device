@@ -426,3 +426,26 @@ def test_load_config_send_sensors(monkeypatch):
     monkeypatch.setattr(gateway, "find_port", lambda: None)
     assert gateway.load_config({"SEND_SENSORS": "1"}).send_sensors is True
     assert gateway.load_config({}).send_sensors is False
+
+
+@pytest.mark.parametrize("url,ok", [
+    ("https://core.example.com", True),
+    ("http://localhost:8080", True),
+    ("http://127.0.0.1:8080", True),
+    ("http://10.116.64.12:8413", True),
+    ("http://192.168.0.5", True),
+    ("http://jetson.local:8080", True),
+    ("http://core.example.com", False),
+    ("http://8.8.8.8", False),
+    ("http://10.0.0.1@evil.example.com", False),
+    ("ftp://localhost", False),
+    ("https://", False),
+])
+def test_server_is_safe(url, ok):
+    assert gateway.server_is_safe(url) is ok
+
+
+def test_remote_http_server_exits():
+    cfg = gateway.Config(port="/dev/null", device_token="t", server="http://core.example.com")
+    with pytest.raises(SystemExit, match="https"):
+        gateway.main(cfg)

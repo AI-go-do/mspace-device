@@ -93,7 +93,8 @@ void updateSensors() {
     motionSeen = true;
   }
   if (waiting) return;
-  int pir = (motionSeen && millis() - lastMotionAt < PIR_HOLD_MS) ? 1 : 0;
+  if (motionSeen && millis() - lastMotionAt >= PIR_HOLD_MS) motionSeen = false;  // 유지 시간이 끝나면 잊는다 (49일 뒤 millis 되감김 대비)
+  int pir = motionSeen ? 1 : 0;
   int light = analogRead(PIN_CDS);
   bool beat = lastPir < 0 || millis() - lastSensorAt >= SENSOR_BEAT_MS;
   if (pir != lastPir || abs(light - lastLight) >= LIGHT_DELTA || beat) {

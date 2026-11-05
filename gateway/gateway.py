@@ -30,6 +30,7 @@ SEND_SENSORS=1이면 core POST /api/sensor-events로 보낸다 (FR-DEV-101). 키
 from __future__ import annotations
 
 import glob
+import ipaddress
 import json
 import os
 import re
@@ -39,6 +40,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 
 import requests
 import serial
@@ -197,6 +199,29 @@ class SensorSender:
         return self
 
 
+def server_is_safe(url):
+    """토큰을 실어 보내도 되는 주소인지. https면 OK, http는 이 기기·사설망(10.x, 172.16~31.x, 192.168.x)·.local만 OK.
+    원격 http로 보내면 오가는 길에서 토큰과 키패드 번호가 그대로 보이기 때문에 막는다."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+    except ValueError:
+        return False
+    if "@" in parts.netloc:  # http://사설주소@원격주소 처럼 속이는 주소는 거절
+        return False
+    if parts.scheme == "https":
+        return bool(host)
+    if parts.scheme != "http":
+        return False
+    if host == "localhost" or host.endswith(".local"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_loopback or (ip.version == 4 and ip.is_private and not ip.is_link_local)
+
+
 def make_verifier(config):
     """설정에 맞는 확인기를 고른다. 나머지 코드는 어느 쪽인지 몰라도 된다."""
     if config.dry_run:
@@ -333,6 +358,8 @@ def main(config=None):
         raise SystemExit("우노를 못 찾았어요. USB 연결을 확인하거나 PORT=/dev/ttyACM0 처럼 지정하세요.")
     if not config.dry_run and not config.device_token:
         raise SystemExit("DEVICE_TOKEN이 없어요. .env에 넣고 불러오거나, 서버 없이 테스트하려면 DRY_RUN=1 로 실행하세요.")
+    if not config.dry_run and not server_is_safe(config.server):
+        raise SystemExit("원격 서버는 https로만 보내요(토큰 보호). http는 이 기기나 사설망(10.x·172.16~31.x·192.168.x)만 돼요.")
     print("연결:", config.port, "| 서버:", "DRY_RUN" if config.dry_run else config.server,
           "| 재실 전송:", "켬" if config.send_sensors and not config.dry_run else "끔")
     verifier = make_verifier(config)

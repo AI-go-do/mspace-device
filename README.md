@@ -87,7 +87,9 @@ flowchart LR
    echo 'DEVICE_TOKEN=<받은 장치 토큰>' > .env   # 토큰은 .env에만 (저장소에 안 올라가요)
    set -a; . ./.env; set +a                          # .env 값을 불러오기
    SERVER=https://<core 주소> python3 gateway/gateway.py   # 원격 core는 https로만 (토큰 보호)
+   SEND_SENSORS=1 SERVER=https://<core 주소> python3 gateway/gateway.py   # 재실 센서도 core로 보내기
    ```
+   재실 센서 전송(`SEND_SENSORS=1`)은 core에 `/api/sensor-events`(core #60)가 올라간 뒤 켜요. 키패드를 막지 않게 뒤에서 보내고, 끊기거나 토큰·경로 문제(401·403·404)면 모아 뒀다가 다시 보내요(최대 360개, 약 1시간). 형식이 틀린 것(400)만 버려요.
    포트는 자동으로 찾아요. 못 찾으면 `PORT=/dev/ttyACM0`처럼 지정해요.
    서버에는 `Authorization: Bearer <장치 토큰>` 헤더로 보내요. 토큰이 없으면 DRY_RUN만 돼요.
 

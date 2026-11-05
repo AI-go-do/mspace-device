@@ -340,3 +340,89 @@ def test_occupancy_bad_line_skipped(field, value, capsys):
 def test_occupancy_between_keypad_lines(run):
     written, _ = run([keypad_line("123456", 1), occ_line(seq=2), keypad_line("999999", 3)], dry_run=True, token=None)
     assert written == [b"OK\n", b"NO\n"]  # 센서 줄이 끼어도 키패드 답 순서는 그대로
+
+
+# ---- 재실 이벤트 전송 (SensorSender) ----
+
+@pytest.fixture
+def sender(monkeypatch):
+    """가짜 서버 응답을 차례로 돌려주는 SensorSender. (sender, 보낸 요청 목록)"""
+    def _make(responses):
+        sent = []
+        queue = list(responses)
+
+        def fake_post(url, json=None, timeout=None, headers=None, allow_redirects=True):
+            sent.append((url, json, allow_redirects))
+            assert headers == {"Authorization": "Bearer test-token"}
+            r = queue.pop(0)
+            if isinstance(r, Exception):
+                raise r
+            return r
+
+        monkeypatch.setattr(gateway.requests, "post", fake_post)
+        return gateway.SensorSender("https://core.example", "test-token"), sent
+    return _make
+
+
+def occ_body(seq=1):
+    return gateway.occupancy_body(json.loads(occ_line(seq=seq)))
+
+
+def test_sensor_sender_posts_and_pops(sender):
+    s, sent = sender([FakeResponse({"result": "STORED"})])
+    s.push(occ_body())
+    assert s.step() == 0 and len(s.queue) == 0
+    url, body, redirects = sent[0]
+    assert url == "https://core.example/api/sensor-events" and body["kind"] == "OCCUPANCY"
+    assert redirects is False  # 리디렉션을 따라가지 않는다 (토큰 보호)
+    assert s.step() is None  # 큐가 비었으면 None
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 408, 429, 500, 503])
+def test_sensor_sender_keeps_event_on_config_or_server_error(sender, status):
+    s, sent = sender([FakeResponse(status=status), FakeResponse({"result": "STORED"})])
+    s.push(occ_body())
+    assert s.step() == 1 and len(s.queue) == 1  # 버리지 않고 1초 뒤 다시
+    assert s.step() == 0 and len(s.queue) == 0
+    assert sent[0][1]["eventId"] == sent[1][1]["eventId"]  # 같은 eventId로 다시 보낸다
+
+
+@pytest.mark.parametrize("status", [400, 409, 413, 422])
+def test_sensor_sender_drops_bad_event(sender, status, capsys):
+    s, _ = sender([FakeResponse(status=status)])
+    s.push(occ_body())
+    assert s.step() == 0 and len(s.queue) == 0
+    assert "이것만 버려요" in capsys.readouterr().out
+
+
+def test_sensor_sender_backoff_doubles_and_caps(sender):
+    s, _ = sender([requests.ConnectionError()] * 7 + [FakeResponse({})])
+    s.push(occ_body())
+    waits = [s.step() for _ in range(7)]
+    assert waits == [1, 2, 4, 8, 16, 30, 30]
+    assert s.step() == 0 and s.backoff == 1  # 성공하면 다시 1초부터
+
+
+def test_sensor_sender_queue_drops_oldest_when_full(sender):
+    s, _ = sender([])
+    for i in range(gateway.SENSOR_QUEUE_MAX + 5):
+        s.push({"eventId": str(i)})
+    assert len(s.queue) == gateway.SENSOR_QUEUE_MAX
+    assert s.queue[0]["eventId"] == "5"  # 가장 오래된 5개가 밀려남
+
+
+def test_occupancy_pushed_to_sender_when_on():
+    pushed = []
+
+    class FakeSender:
+        def push(self, body):
+            pushed.append(body)
+
+    gateway.handle_line(occ_line(pir=1), gateway.HttpVerifier("https://core.example", "t"), FakeSender())
+    assert len(pushed) == 1 and pushed[0]["occupied"] is True
+
+
+def test_load_config_send_sensors(monkeypatch):
+    monkeypatch.setattr(gateway, "find_port", lambda: None)
+    assert gateway.load_config({"SEND_SENSORS": "1"}).send_sensors is True
+    assert gateway.load_config({}).send_sensors is False

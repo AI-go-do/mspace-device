@@ -2,8 +2,8 @@
 
 우노가 USB 시리얼로 보내는 키패드 번호(JSON 한 줄)를 읽어서 서버에 물어보고,
 결과를 우노에 OK/NO로 돌려준다 (FR-ACC-001).
-재실 센서(PIR·조도) 줄은 core 형식(docs/sensor-events-api.md)으로 바꿔 화면에 찍는다 (FR-DEV-101).
-서버 전송은 지영과 주소·필드 이름을 정한 뒤 붙인다.
+재실 센서(PIR·조도) 줄은 core 형식(docs/sensor-events-api.md)으로 바꿔 화면에 찍고,
+SEND_SENSORS=1이면 core POST /api/sensor-events로 보낸다 (FR-DEV-101). 키패드를 막지 않게 뒤에서(스레드) 보낸다.
 
 출입 확인 API (core 담당 지영과 맞춘 형식):
   요청: {"eventId": "uuid", "roomId": 1, "deviceId": "keypad-1", "code": "123456"}
@@ -17,13 +17,15 @@
   find_port()             : 우노가 꽂힌 USB 포트를 찾는다
   DryRunVerifier          : 서버 없이 연습용으로 답한다 (123456만 통과)
   HttpVerifier            : 진짜 서버에 묻는다 (토큰, 재시도)
-  handle_occupancy()      : 재실 센서 줄을 core 형식으로 바꿔 화면에 찍는다
+  SensorSender            : 재실 이벤트를 줄 세워 뒤에서 core로 보낸다 (재시도, 끊겨도 모아 둠)
+  handle_occupancy()      : 재실 센서 줄을 core 형식으로 바꿔 화면에 찍고 SensorSender에 넘긴다
   handle_line()           : 우노가 보낸 한 줄을 받아 우노에 돌려줄 답(OK/NO)을 만든다
   main()                  : 위 부품을 조립해서 시리얼을 계속 읽는다
 
 설치:  pip3 install pyserial requests
 실행:  DRY_RUN=1 python3 gateway.py
        SERVER=https://<core 주소> DEVICE_TOKEN=<장치 토큰> python3 gateway.py  (원격은 https만)
+       재실 센서도 보내려면 앞에 SEND_SENSORS=1 을 붙인다 (core에 /api/sensor-events가 올라간 뒤)
 """
 from __future__ import annotations
 
@@ -31,8 +33,10 @@ import glob
 import json
 import os
 import re
+import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -59,6 +63,7 @@ class Config:
     dry_run: bool = False                  # True면 서버에 안 보내고 화면에만 찍는다 (서버 없이 테스트용)
     device_token: str | None = None        # 장치 토큰. 서버가 "등록된 키패드"인지 확인하는 값. 저장소에 넣지 않고 .env에만 둔다
     port: str | None = None                # 우노가 꽂힌 USB 포트. 못 찾으면 None
+    send_sensors: bool = False             # True면 재실 이벤트도 core로 보낸다 (core에 센서 API가 올라간 뒤 켠다)
 
 
 def find_port():
@@ -78,6 +83,7 @@ def load_config(env=None):
         dry_run=env.get("DRY_RUN") == "1",
         device_token=env.get("DEVICE_TOKEN"),
         port=env.get("PORT") or find_port(),
+        send_sensors=env.get("SEND_SENSORS") == "1",
     )
 
 
@@ -118,6 +124,77 @@ class HttpVerifier:
                 if attempt < self.retries:  # 마지막 실패 뒤에는 기다리지 않고 바로 거부한다
                     time.sleep(attempt)  # 1초 쉬고 재시도 (시도 횟수를 늘리면 2초, 3초…로 점점 길어진다)
         return None
+
+
+# ---------- 재실 이벤트 전송 (ESP32 sender.cpp와 같은 규칙) ----------
+
+SENSOR_QUEUE_MAX = 360   # 끊긴 동안 모아 둘 이벤트 수 (10초마다 1개 → 약 1시간). 넘치면 가장 오래된 것부터 버린다
+SENSOR_DROP = {400, 409, 413, 422}  # 이 이벤트 자체의 형식 문제 → 다시 보내도 같아서 버린다
+RETRY_MIN, RETRY_MAX = 1, 30        # 실패하면 1초, 2초, 4초 … 최대 30초 간격으로 다시
+
+
+class SensorSender:
+    """재실 이벤트를 줄(큐)에 세워 두고 앞에서부터 core로 보낸다.
+
+    - 2xx(STORED/DUPLICATE)면 성공, 400·409·413·422는 그 이벤트만 버린다
+    - 401·403·404·408·429·5xx·연결 실패는 버리지 않고 간격을 늘려 같은 eventId로 다시 보낸다
+      (토큰·서버 설정을 고치는 동안 기록이 사라지지 않게)
+    - 키패드 응답이 늦어지지 않게 별도 스레드에서 보낸다
+    """
+
+    def __init__(self, server, token):
+        self.url = server + "/api/sensor-events"
+        self.headers = {"Authorization": f"Bearer {token}"}
+        self.queue = deque(maxlen=SENSOR_QUEUE_MAX)  # 꽉 차면 append가 가장 오래된 것을 밀어낸다
+        self.lock = threading.Lock()
+        self.wake = threading.Event()
+        self.backoff = RETRY_MIN
+
+    def push(self, body):
+        with self.lock:
+            self.queue.append(body)
+        self.wake.set()
+
+    def step(self):
+        """맨 앞 하나를 보내 본다. 반환: 다음 시도까지 기다릴 초 (0이면 바로 다음 것, None이면 큐가 비었음)."""
+        with self.lock:
+            if not self.queue:
+                return None
+            body = self.queue[0]
+        try:
+            r = requests.post(self.url, json=body, timeout=(CONNECT_TIMEOUT, TIMEOUT), headers=self.headers,
+                              allow_redirects=False)  # 리디렉션을 따라가면 토큰이 다른 곳으로 갈 수 있다
+            status = r.status_code
+        except requests.RequestException as e:
+            status = None
+            print(f"[센서 전송] 연결 실패, 다시 보내요: {e.__class__.__name__}")
+        if status is not None and (200 <= status < 300 or status in SENSOR_DROP):
+            if status in SENSOR_DROP:
+                print(f"[센서 전송] 서버가 이 이벤트를 거부함({status}). 형식 문제라 이것만 버려요")
+            with self.lock:
+                if self.queue and self.queue[0] is body:
+                    self.queue.popleft()
+            self.backoff = RETRY_MIN
+            return 0
+        if status is not None:
+            hint = {401: "토큰 확인", 403: "토큰·방 번호 확인", 404: "서버에 센서 API가 아직 없음"}.get(status, "서버 문제")
+            print(f"[센서 전송] 막힘({status}, {hint}). {self.backoff}초 뒤 다시, 대기 {len(self.queue)}개")
+        wait = self.backoff
+        self.backoff = min(self.backoff * 2, RETRY_MAX)
+        return wait
+
+    def run_forever(self):
+        while True:
+            wait = self.step()
+            if wait is None:
+                self.wake.wait()
+                self.wake.clear()
+            elif wait:
+                time.sleep(wait)
+
+    def start(self):
+        threading.Thread(target=self.run_forever, daemon=True).start()
+        return self
 
 
 def make_verifier(config):
@@ -206,8 +283,8 @@ def occupancy_body(event, now=None):
     }
 
 
-def handle_occupancy(event, verifier):
-    """재실 센서 줄: core 형식으로 바꿔 화면에 찍는다. 우노에 돌려줄 답은 없다."""
+def handle_occupancy(event, verifier, sensors=None):
+    """재실 센서 줄: core 형식으로 바꿔 화면에 찍고, sensors가 있으면 core로 보낼 줄에 넣는다. 우노에 돌려줄 답은 없다."""
     if not valid_occupancy(event):
         print("형식이 맞지 않는 센서 줄, 건너뜀")
         return None
@@ -216,6 +293,8 @@ def handle_occupancy(event, verifier):
     print(f"재실 {body['roomId']}번 방: {state} (pir={event['pir']}, 조도={event['light']})")
     if isinstance(verifier, DryRunVerifier):  # 연습 모드에서는 core에 보낼 모양을 그대로 보여 준다
         print("[DRY_RUN] POST /api/sensor-events", json.dumps(body, ensure_ascii=False))
+    elif sensors is not None:
+        sensors.push(body)
     return None
 
 
@@ -226,7 +305,7 @@ HANDLERS = {
 }
 
 
-def handle_line(line, verifier):
+def handle_line(line, verifier, sensors=None):
     """우노가 보낸 한 줄을 처리하고, 우노에 돌려줄 값(b"OK\\n" 등)을 반환한다. 돌려줄 게 없으면 None."""
     line = line.strip()
     if not line.startswith("{"):  # JSON이 아닌 줄(빈 줄 등)은 건너뛴다
@@ -241,6 +320,8 @@ def handle_line(line, verifier):
     handler = HANDLERS.get(sensor_type) if isinstance(sensor_type, str) else None
     if handler is None:
         return None
+    if handler is handle_occupancy:
+        return handler(event, verifier, sensors)
     return handler(event, verifier)
 
 
@@ -252,14 +333,18 @@ def main(config=None):
         raise SystemExit("우노를 못 찾았어요. USB 연결을 확인하거나 PORT=/dev/ttyACM0 처럼 지정하세요.")
     if not config.dry_run and not config.device_token:
         raise SystemExit("DEVICE_TOKEN이 없어요. .env에 넣고 불러오거나, 서버 없이 테스트하려면 DRY_RUN=1 로 실행하세요.")
-    print("연결:", config.port, "| 서버:", "DRY_RUN" if config.dry_run else config.server)
+    print("연결:", config.port, "| 서버:", "DRY_RUN" if config.dry_run else config.server,
+          "| 재실 전송:", "켬" if config.send_sensors and not config.dry_run else "끔")
     verifier = make_verifier(config)
+    sensors = None
+    if config.send_sensors and not config.dry_run:
+        sensors = SensorSender(config.server, config.device_token).start()
     ser = serial.Serial(config.port, 115200, timeout=1)  # ser = 우노와 연결된 시리얼 통로. 115200은 우노 코드와 같은 속도
     time.sleep(2)  # 우노는 시리얼 연결 시 재부팅되므로 켜질 때까지 기다린다
 
     while True:
         line = ser.readline().decode(errors="ignore")  # line = 우노가 보낸 한 줄 (글자로 변환, 깨진 글자는 무시)
-        reply = handle_line(line, verifier)
+        reply = handle_line(line, verifier, sensors)
         if reply:
             ser.write(reply)  # 우노에 결과를 돌려줘서 LED를 켜게 한다
 

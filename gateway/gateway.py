@@ -79,21 +79,25 @@ def load_config(env=None):
     )
 
 
+def is_loopback(url):
+    """주소가 내 컴퓨터(localhost·127.0.0.1·::1)인지. 글자 앞부분이 아니라 실제 주소로 판단한다."""
+    host = urlsplit(url).hostname
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host or "").is_loopback
+    except ValueError:  # 이름(예: core.example.com)은 loopback으로 보지 않는다
+        return False
+
+
 def is_safe_server(server):
-    """장치 토큰을 보내도 되는 주소인지. https는 괜찮고, http는 내 컴퓨터(localhost·127.0.0.1·::1)일 때만."""
+    """장치 토큰을 보내도 되는 주소인지. https는 괜찮고, http는 내 컴퓨터일 때만."""
     parts = urlsplit(server)
     if not parts.hostname:
         return False
     if parts.scheme == "https":
         return True
-    if parts.scheme != "http":
-        return False
-    if parts.hostname == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(parts.hostname).is_loopback  # 글자 앞부분이 아니라 실제 주소로 판단한다
-    except ValueError:  # 이름(예: core.example.com)은 loopback으로 보지 않는다
-        return False
+    return parts.scheme == "http" and is_loopback(server)
 
 
 # ---------- 번호 확인 (verifier): 같은 모양 verify(body) 두 개 ----------
@@ -118,11 +122,17 @@ class HttpVerifier:
         self.url = server + "/api/access/verify"
         self.headers = {"Authorization": f"Bearer {token}"}  # 장치 토큰을 같이 보낸다
         self.retries = retries
+        # 내 컴퓨터로 보낼 때는 프록시(HTTP_PROXY 설정)를 거치지 않는다. 토큰·번호가 밖으로 새지 않게
+        self.proxies = {"http": None, "https": None} if is_loopback(self.url) else None
 
     def verify(self, body):
         for attempt in range(1, self.retries + 1):  # attempt = 지금 몇 번째 시도인지 (1, 2)
             try:
-                r = requests.post(self.url, json=body, timeout=(CONNECT_TIMEOUT, TIMEOUT), headers=self.headers)  # 연결 1초, 답 2초 안에 안 오면 실패
+                r = requests.post(self.url, json=body, timeout=(CONNECT_TIMEOUT, TIMEOUT), headers=self.headers,
+                                  proxies=self.proxies, allow_redirects=False)  # 연결 1초, 답 2초 안에 안 오면 실패
+                if 300 <= r.status_code < 400:  # 다른 주소로 넘기라는 답(리디렉션)은 따라가지 않는다. 번호가 http로 샐 수 있어서
+                    print(f"서버가 다른 주소로 넘김 ({r.status_code}), 따라가지 않음")
+                    return None
                 if 400 <= r.status_code < 500:  # 4xx(토큰·형식 오류)는 다시 보내도 결과가 같아서 바로 거부한다
                     print(f"서버가 요청을 거부함 ({r.status_code}), 다시 보내지 않음")
                     return None

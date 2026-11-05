@@ -63,8 +63,10 @@ def run(monkeypatch):
         sent = []
         queue = list(responses or [])
 
-        def fake_post(url, json=None, timeout=None, headers=None):
+        def fake_post(url, json=None, timeout=None, headers=None, proxies=None, allow_redirects=True):
             sent.append((url, json))
+            assert allow_redirects is False  # 리디렉션은 따라가지 않는다
+            assert proxies == {"http": None, "https": None}  # 테스트 서버는 localhost라 프록시를 안 거친다
             assert headers == {"Authorization": "Bearer test-token"}  # 장치 토큰을 항상 같이 보낸다
             r = queue.pop(0) if queue else FakeResponse({})
             if isinstance(r, Exception):
@@ -215,6 +217,16 @@ def test_no_port_exits():
 ])
 def test_is_safe_server(server, ok):
     assert gateway.is_safe_server(server) is ok
+
+
+def test_redirect_is_denied(run):
+    written, sent = run([keypad_line("123456")], [FakeResponse({"result": "OPENED"}, status=307)])
+    assert written == [b"NO\n"] and len(sent) == 1  # 3xx는 열지 않고, 다시 보내지도 않는다
+
+
+def test_remote_server_uses_env_proxy():
+    assert gateway.HttpVerifier("https://dev-mspace.java21.net", "t").proxies is None  # 원격은 원래 설정 그대로
+    assert gateway.HttpVerifier("http://127.0.0.1:8080", "t").proxies == {"http": None, "https": None}
 
 
 def test_remote_http_server_exits():

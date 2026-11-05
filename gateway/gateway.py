@@ -23,7 +23,7 @@
 
 설치:  pip3 install pyserial requests
 실행:  DRY_RUN=1 python3 gateway.py
-       SERVER=http://서버주소:8080 DEVICE_TOKEN=<장치 토큰> python3 gateway.py
+       SERVER=https://<core 주소> DEVICE_TOKEN=<장치 토큰> python3 gateway.py  (원격은 https만)
 """
 from __future__ import annotations
 

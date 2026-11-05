@@ -86,7 +86,7 @@ flowchart LR
    DRY_RUN=1 python3 gateway/gateway.py              # 서버 없이 테스트: 123456#만 초록
    echo 'DEVICE_TOKEN=<받은 장치 토큰>' > .env   # 토큰은 .env에만 (저장소에 안 올라가요)
    set -a; . ./.env; set +a                          # .env 값을 불러오기
-   SERVER=http://<core 주소> python3 gateway/gateway.py
+   SERVER=https://<core 주소> python3 gateway/gateway.py   # 원격 core는 https로만 (토큰 보호)
    ```
    포트는 자동으로 찾아요. 못 찾으면 `PORT=/dev/ttyACM0`처럼 지정해요.
    서버에는 `Authorization: Bearer <장치 토큰>` 헤더로 보내요. 토큰이 없으면 DRY_RUN만 돼요.
@@ -150,6 +150,8 @@ echo ch341 | sudo tee /etc/modules-load.d/ch341.conf
 | `events.*` | core 형식 이벤트 (새 UUID eventId, 센서가 본 시각 observedAt) |
 | `net.*` | 와이파이 연결·자동 재연결, 인터넷 시계 |
 | `sender.*` | 큐에 모아 순서대로 전송. 5xx·연결 실패는 같은 eventId로 재시도(1→2→4…30초), 4xx·리디렉션은 버림 |
+
+큐는 32개(10초 신호 기준 약 5분)까지 모아요. 와이파이가 5분 넘게 끊기면 그 사이 기록은 오래된 것부터 일부 빠져요(정확도 측정 #13 때 참고). core는 다시 받은 시각부터 10·15분을 새로 재요.
 
 **ESP32 확장 (나중에 붙일 자리)**
 

@@ -11,6 +11,9 @@
 // 달린 센서만 1로 둔다. 재실(occupied)은 켜진 센서 중 하나라도 "있음"이면 있음 (FR-DEV-103)
 #define USE_RADAR  1   // LD2410C 레이더. 가만히 있는 사람도 감지
 #define USE_PIR    0   // PIR(SR501). 움직임만 감지. 레이더와 같이 달면 정확도 비교(이슈 #13)에 쓴다
+#if !USE_RADAR && !USE_PIR
+#error "USE_RADAR 또는 USE_PIR 중 하나는 1이어야 해요 (둘 다 0이면 늘 \"없음\"을 보내서 자동 퇴실될 수 있음)"
+#endif
 // 나중에 추가할 것: CO2(SCD40, FR-DEV-104), 키패드 체크인(FR-ACC-001). 자리는 README "ESP32 확장"에 적어 둠
 
 // ---------- 핀 ----------

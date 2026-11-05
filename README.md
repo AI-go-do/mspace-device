@@ -138,7 +138,7 @@ echo ch341 | sudo tee /etc/modules-load.d/ch341.conf
 **와이파이·서버 (준비되면)**
 1. `secrets.h.example`을 `secrets.h`로 복사해서 와이파이(2.4GHz), 서버 주소, 장치 토큰, 인증서 넣기. **GitHub에 안 올라가요**
 2. `config.h`에서 `DRY_RUN 0`
-3. 안전장치: 토큰이나 https 인증서가 없으면 보내지 않아요. 원격 `http://`도 막아요(맥 로컬 시험만 `ALLOW_HTTP_FOR_LOCAL_TEST 1`)
+3. 안전장치: 토큰이나 https 인증서가 없으면 보내지 않아요. 원격 `http://`도 막아요(맥 로컬 시험만 `ALLOW_HTTP_FOR_LOCAL_TEST 1`, 이때도 사설 주소 192.168.x.x·10.x·172.16~31.x나 `.local`만 허용)
 
 **파일 (역할별)**
 

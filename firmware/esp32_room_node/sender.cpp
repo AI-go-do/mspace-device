@@ -31,6 +31,26 @@ static void popFront() {
 }
 
 // ---------- 서버 설정 확인 ----------
+// http 시험을 허용할 주소인가: 사설망 IP(10.x, 172.16~31.x, 192.168.x)나 .local 이름만.
+// "http://192.168.evil.com"처럼 앞부분만 같은 이름은 막도록 호스트 부분을 통째로 확인한다
+static bool isLocalHost(const String& url) {
+  String host = url.substring(7);  // "http://" 뒤
+  int end = host.length();
+  const char stops[] = {'/', ':', '?', '#'};
+  for (char c : stops) {
+    int i = host.indexOf(c);
+    if (i >= 0 && i < end) end = i;
+  }
+  host = host.substring(0, end);
+  if (host.indexOf('@') >= 0) return false;  // user@host 꼴은 받지 않는다
+  if (host.endsWith(".local") && host.length() > 6) return true;
+  int a, b, c, d;
+  char extra;
+  if (sscanf(host.c_str(), "%d.%d.%d.%d%c", &a, &b, &c, &d, &extra) != 4) return false;
+  if (a < 0 || a > 255 || b < 0 || b > 255 || c < 0 || c > 255 || d < 0 || d > 255) return false;
+  return a == 10 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168);
+}
+
 enum Mode { MODE_DRY_RUN, MODE_HTTPS, MODE_HTTP_LOCAL, MODE_BLOCKED };
 static Mode mode = MODE_DRY_RUN;
 
@@ -51,7 +71,9 @@ void begin() {
       mode = MODE_HTTPS;
     }
   } else if (url.startsWith("http://")) {
-    if (ALLOW_HTTP_FOR_LOCAL_TEST) {
+    if (ALLOW_HTTP_FOR_LOCAL_TEST && !isLocalHost(url)) {
+      Serial.println("[전송] 막힘: http 시험은 같은 와이파이의 사설 주소(192.168.x.x 등)나 .local만 돼요");
+    } else if (ALLOW_HTTP_FOR_LOCAL_TEST) {
       Serial.println("[전송] 주의: http로 보내요 (맥 로컬 시험용). 시험이 끝나면 ALLOW_HTTP_FOR_LOCAL_TEST 0으로");
       mode = MODE_HTTP_LOCAL;
     } else {

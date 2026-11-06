@@ -182,6 +182,7 @@ class RoomWatcher:
         self.check_objects = check_objects
         self.counts = deque(maxlen=SMOOTH_FRAMES)
         self.sent_people = None      # 마지막으로 보낸 사람 수
+        self.sent_occupied = None    # 마지막으로 보낸 재실 (사람 수 + PIR)
         self.sent_at = None          # 마지막으로 보낸 시각
         self.had_people = False      # 정리 확인 전에 사람이 있었는지
         self.empty_since = None      # 0명이 된 시각
@@ -196,9 +197,11 @@ class RoomWatcher:
         people = sorted(self.counts)[len(self.counts) // 2]  # 가운데 값
 
         event = None
-        if people != self.sent_people or self.sent_at is None or now - self.sent_at >= BEAT_SEC:
+        occupied = people > 0 or bool(pir)
+        if (people != self.sent_people or occupied != self.sent_occupied  # PIR만 바뀌어도 바로 보낸다
+                or self.sent_at is None or now - self.sent_at >= BEAT_SEC):
             event = self.event(people, pir, now_iso)
-            self.sent_people, self.sent_at = people, now
+            self.sent_people, self.sent_occupied, self.sent_at = people, occupied, now
 
         check = None
         if people > 0:
@@ -295,15 +298,17 @@ class FallWatcher:
                 self.alerted = True
                 return self.result("FALL_SUSPECTED", now, now_iso)
             return None
-        if self.anchor is not None and not lying:  # 못 찾음: 잠깐이면 기다린다 (YOLO는 누운 사람을 가끔 놓친다)
+        moved_at = None
+        if self.anchor is not None:  # 못 찾았거나 자리가 바뀜: 잠깐이면 기다린다 (YOLO 상자는 가끔 놓치거나 흔들린다)
             if self.missing_since is None:
                 self.missing_since = now
             if now - self.missing_since < MISS_SEC:
                 return None
+            moved_at = self.missing_since
         self.missing_since = None
         cleared = self.result("FALL_CLEARED", now, now_iso) if self.alerted else None
         self.anchor = max(lying, key=lambda d: d.score).box if lying else None
-        self.since = now if lying else None
+        self.since = (moved_at if moved_at is not None else now) if lying else None  # 새 자리는 처음 옮긴 때부터 센다
         self.alerted = False
         return cleared
 
@@ -380,11 +385,11 @@ def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path
             print(f"방 안 카메라 {watcher.room_id}번 방: 사진을 못 읽어요 (USB 연결 확인)")
             last_warn = started
         if ok:
-            on_frame()
             try:
                 dets = detector.detect(frame)
                 del frame  # 사진은 바로 버린다
                 event, check = watcher.update(dets, clock(), pir_now())
+                on_frame()  # 찾기까지 성공한 장만 "카메라 살아 있음"으로 친다
                 if event:
                     print(f"인원 {watcher.room_id}번 방: {event['sources']['people']}명")
                     push(event)

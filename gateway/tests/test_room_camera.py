@@ -462,3 +462,37 @@ def test_run_room_camera_warns_on_read_failure_and_log_error(tmp_path, capsys):
     assert seen == [1, 1]
     assert any(e["sources"].get("alert") == "FALL_SUSPECTED" for e in pushed)  # 기록 실패해도 core엔 감
     assert "기록 파일에 못 썼어요" in out
+
+
+def test_fall_box_jitter_keeps_alert():
+    """상자가 한 장만 흔들려도 알림이 풀리거나 타이머가 다시 시작하지 않는다."""
+    from room_camera import FallWatcher
+    f = FallWatcher(1, hold_sec=15)
+    f.update([lying()], 0)
+    assert f.update([lying(x=400)], 5) is None      # 한 장 흔들림
+    assert f.update([lying()], 6) is None
+    assert f.update([lying()], 15)["status"] == "FALL_SUSPECTED"
+    assert f.update([lying(x=400)], 16) is None     # 알린 뒤 흔들려도 해제 안 함
+    assert f.update([lying()], 17) is None
+
+
+def test_pir_change_sends_right_away():
+    w = RoomWatcher(1, check_objects=False)
+    assert w.update([], 0, pir=0)[0]["occupied"] is False
+    assert w.update([], 1, pir=0)[0] is None
+    event = w.update([], 2, pir=1)[0]               # 사람 수는 0 그대로, PIR만 바뀜
+    assert event is not None and event["occupied"] is True
+
+
+def test_failed_detection_does_not_count_as_alive():
+    class Broken:
+        finds_objects = False
+
+        def detect(self, frame):
+            raise RuntimeError("모델 오류")
+
+    seen = []
+    with pytest.raises(StopIteration):
+        run_room_camera(RoomWatcher(1), FakeCam(3), Broken(), lambda e: None,
+                        clock=iter(range(100)).__next__, sleep=lambda s: None, on_frame=lambda: seen.append(1))
+    assert seen == []

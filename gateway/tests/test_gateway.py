@@ -261,6 +261,15 @@ def test_load_config_baseline_file(monkeypatch):
     assert gateway.load_config({"BASELINE_FILE": "off"}).baseline_file is None
 
 
+def test_load_config_desk_area(monkeypatch, capsys):
+    monkeypatch.setattr(gateway, "find_port", lambda: None)
+    assert gateway.load_config({}).desk_area is None
+    assert gateway.load_config({"DESK_AREA": "0.25, 0.22,0.64,0.83"}).desk_area == (0.25, 0.22, 0.64, 0.83)
+    for bad in ["0.5,0.5,0.4,0.9", "a,b,c,d", "0.1,0.2,0.3", "0,0,1.5,1"]:
+        assert gateway.load_config({"DESK_AREA": bad}).desk_area is None
+    assert "책상 확대는 꺼요" in capsys.readouterr().out
+
+
 def test_load_config_reads_os_environ(monkeypatch):
     monkeypatch.setenv("DRY_RUN", "1")
     monkeypatch.setattr(gateway, "find_port", lambda: None)

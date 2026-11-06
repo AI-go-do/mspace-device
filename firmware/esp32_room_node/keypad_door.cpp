@@ -3,7 +3,7 @@
 #include "keypad_door.h"
 #include <Keypad.h>
 #include <Ticker.h>
-#include "access.h"
+#include "checkin.h"
 
 namespace door {
 
@@ -44,7 +44,7 @@ void begin() {
 static void check(const String& c) {
   if (ledPin >= 0) { digitalWrite(ledPin, LOW); ledPin = -1; }
   blinker.attach_ms(BLINK_MS, toggleOk);  // 깜빡임 시작
-  access::Result r = access::verify(c);   // 답이 올 때까지 기다린다 (그동안 깜빡임은 계속)
+  checkin::Result r = checkin::verify(c);   // 답이 올 때까지 기다린다 (그동안 깜빡임은 계속)
   blinker.detach();
   digitalWrite(PIN_LED_OK, LOW);
   if (r.opened) {

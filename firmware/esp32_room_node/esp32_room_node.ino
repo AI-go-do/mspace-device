@@ -16,7 +16,7 @@
 //   net.*           와이파이 + 인터넷 시계
 //   server.*        서버 설정 확인(토큰, https 인증서) + POST 한 번
 //   sender.*        재실 이벤트 큐 + 전송 (재시도) / DRY_RUN 출력
-//   access.*        키패드 번호를 core에 확인 (USE_KEYPAD)
+//   checkin.*       키패드 번호를 core에 확인 (USE_KEYPAD)
 //   keypad_door.*   키패드 읽기 + LED (USE_KEYPAD)
 //
 // 배선: docs/wiring-esp32.png (레이더 VCC->VIN, GND->GND, OUT->D27). 키패드·LED 핀은 config.h

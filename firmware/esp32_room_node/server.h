@@ -1,4 +1,4 @@
-// core 서버로 POST 하기 (재실 전송 sender, 키패드 확인 access가 같이 쓴다)
+// core 서버로 POST 하기 (재실 전송 sender, 키패드 확인 checkin이 같이 쓴다)
 // - 시작할 때 설정을 한 번 확인한다: 토큰, https 인증서, 원격 http 막기
 // - 통과하지 못하면 BLOCKED. 이때는 아무것도 보내지 않는다 (토큰 보호)
 #pragma once

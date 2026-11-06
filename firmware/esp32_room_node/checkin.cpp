@@ -1,11 +1,11 @@
 #include "config.h"
 #if USE_KEYPAD
-#include "access.h"
+#include "checkin.h"
 #include "events.h"
 #include "net.h"
 #include "server.h"
 
-namespace access {
+namespace checkin {
 
 // 응답 JSON에서 "key":"값"의 값을 꺼낸다. 없으면 빈 글자.
 // 응답이 {"result":"OPENED"} 처럼 짧고 정해진 모양이라 라이브러리 없이 찾는다
@@ -56,5 +56,5 @@ Result verify(const String& code) {
   return denied("서버 응답 없음");
 }
 
-}  // namespace access
+}  // namespace checkin
 #endif  // USE_KEYPAD

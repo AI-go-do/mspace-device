@@ -242,15 +242,14 @@ def test_start_room_camera(monkeypatch):
     monkeypatch.setattr(room_camera, "make_detector", lambda path: Det())
     monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
 
-    def fake_run(watcher, cam, detector, push, pir_now, fall=None, on_frame=None):
+    def fake_run(watcher, cam, detector, push, pir_now, on_frame=None):
         gateway.LAST_PIR[3] = (1, gateway.time.monotonic())
         on_frame()
-        called.update(room=watcher.room_id, cam=cam, check=watcher.check_objects, pir=pir_now(),
-                      fall=fall.hold_sec)
+        called.update(room=watcher.room_id, cam=cam, check=watcher.check_objects, pir=pir_now())
 
     monkeypatch.setattr(room_camera, "run_room_camera", fake_run)
     gateway.start_room_camera(gateway.Config(room_camera="1", room_camera_room=3), None).join(timeout=1)
-    assert called == {"room": 3, "cam": "cam", "check": False, "pir": 1, "fall": 15}
+    assert called == {"room": 3, "cam": "cam", "check": False, "pir": 1}
     assert gateway.camera_alive(3)
 
 
@@ -323,56 +322,6 @@ def lying(x=100, y=300):
     return Detection("person", 0.9, (x, y, 200, 80))  # 가로가 넓은 상자 = 누운 자세
 
 
-def test_fall_alert_after_hold_and_clear():
-    from room_camera import FallWatcher, fall_message
-    f = FallWatcher(1, hold_sec=15)
-    assert f.update([person()], 0) is None          # 서 있으면 아무 일 없음
-    assert f.update([lying()], 1) is None           # 누움 시작
-    assert f.update([lying(x=105)], 10) is None     # 거의 그 자리, 아직 15초 안 됨
-    alert = f.update([lying(x=102)], 16, now_iso="t")
-    assert alert == {"roomId": 1, "status": "FALL_SUSPECTED", "lyingSec": 15, "checkedAt": "t"}
-    assert "쓰러짐 의심" in fall_message(alert)
-    assert f.update([lying()], 20) is None          # 한 번만 알림
-    assert f.update([person()], 25) is None         # 일어나도 3초는 기다린다 (한 장 놓침과 구별)
-    cleared = f.update([person()], 28)              # 3초 넘게 안 누워 있으면 해제
-    assert cleared["status"] == "FALL_CLEARED" and "해제" in fall_message(cleared)
-    assert f.update([], 29) is None
-
-
-def test_fall_moving_person_resets():
-    from room_camera import FallWatcher
-    f = FallWatcher(1, hold_sec=15)
-    f.update([lying(x=0)], 0)
-    assert f.update([lying(x=400)], 10) is None     # 다른 자리로 움직이면 다시 셈
-    assert f.update([lying(x=400)], 20) is None     # 새 자리 기준 10초
-    assert f.update([lying(x=400)], 26)["status"] == "FALL_SUSPECTED"
-
-
-def test_run_room_camera_sends_fall_alert(tmp_path):
-    from room_camera import FallWatcher
-
-    class LyingDetector:
-        finds_objects = True
-
-        def detect(self, frame):
-            return [lying()]
-
-    pushed = []
-    clock = iter(range(0, 1000, 10))
-    log = tmp_path / "log.jsonl"
-    with pytest.raises(StopIteration):
-        run_room_camera(RoomWatcher(1), FakeCam(6), LyingDetector(), pushed.append, pir_now=lambda: None,
-                        log_path=log, clock=lambda: next(clock), sleep=lambda s: None, fall=FallWatcher(1, 15))
-    alerts = [e for e in pushed if e["sources"].get("alert")]
-    assert alerts and alerts[0]["sources"]["alert"] == "FALL_SUSPECTED" and alerts[0]["occupied"] is True
-    assert "FALL_SUSPECTED" in log.read_text(encoding="utf-8")
-
-
-def test_load_config_fall_sec():
-    assert gateway.load_config({"FALL_SEC": "0"}).fall_sec == 0
-    assert gateway.load_config({"FALL_SEC": "x"}).fall_sec == 15
-
-
 def test_main_runs_cameras_without_uno(monkeypatch, capsys):
     """우노가 없어도 카메라를 켰으면 끄지 않고 카메라만 돌린다. QR 답은 화면에 보여 준다."""
     started = []
@@ -399,18 +348,6 @@ def test_main_without_uno_or_camera_stops():
         gateway.main(gateway.Config(port=None, dry_run=True))
 
 
-def test_fall_one_missed_frame_keeps_timer():
-    """YOLO가 누운 사람을 한 장 놓쳐도 타이머가 처음부터 다시 시작하지 않는다."""
-    from room_camera import FallWatcher
-    f = FallWatcher(1, hold_sec=15)
-    f.update([lying()], 0)
-    assert f.update([], 8) is None                  # 한 장 놓침
-    assert f.update([lying()], 9) is None
-    assert f.update([lying()], 15)["status"] == "FALL_SUSPECTED"
-    assert f.update([], 16) is None                 # 알린 뒤 한 장 놓쳐도 해제하지 않음
-    assert f.update([lying()], 17) is None          # 다시 보여도 또 알리지 않음
-
-
 def test_camera_alive_and_fresh_pir_expire():
     gateway.CAMERA_ROOMS[1] = 100.0
     gateway.LAST_PIR[1] = (1, 100.0)
@@ -434,46 +371,33 @@ def test_dead_camera_lets_uno_send_again():
 
 
 def test_run_room_camera_warns_on_read_failure_and_log_error(tmp_path, capsys):
-    from room_camera import FallWatcher
-
     class Cam:
-        frames = [(False, None), (False, None), (True, "f"), (True, "f")]
+        frames = [(False, None), (False, None)] + [(True, "f")] * 7
 
         def read(self):
             if not self.frames:
                 raise StopIteration
             return self.frames.pop(0)
 
-    class LyingDetector:
+    class Det:
         finds_objects = True
+        calls = 0
 
         def detect(self, frame):
-            return [lying()]
+            Det.calls += 1
+            return [Detection("person", 0.9, (0, 0, 50, 100))] if Det.calls == 1 else []
 
-    pushed, seen = [], []
-    clock = iter(range(0, 1000, 10))
+    seen = []
+    clock = iter(range(0, 1000, 20))
     with pytest.raises(StopIteration):
-        run_room_camera(RoomWatcher(1), Cam(), LyingDetector(), pushed.append,
+        run_room_camera(RoomWatcher(1), Cam(), Det(), lambda e: None,
                         log_path=tmp_path,  # 폴더라서 쓰기 실패
-                        clock=lambda: next(clock), sleep=lambda s: None, fall=FallWatcher(1, 5),
+                        clock=lambda: next(clock), sleep=lambda s: None,
                         on_frame=lambda: seen.append(1), warn_every=100)
     out = capsys.readouterr().out
     assert out.count("사진을 못 읽어요") == 1       # 매 장마다 찍지 않음
-    assert seen == [1, 1]
-    assert any(e["sources"].get("alert") == "FALL_SUSPECTED" for e in pushed)  # 기록 실패해도 core엔 감
-    assert "기록 파일에 못 썼어요" in out
-
-
-def test_fall_box_jitter_keeps_alert():
-    """상자가 한 장만 흔들려도 알림이 풀리거나 타이머가 다시 시작하지 않는다."""
-    from room_camera import FallWatcher
-    f = FallWatcher(1, hold_sec=15)
-    f.update([lying()], 0)
-    assert f.update([lying(x=400)], 5) is None      # 한 장 흔들림
-    assert f.update([lying()], 6) is None
-    assert f.update([lying()], 15)["status"] == "FALL_SUSPECTED"
-    assert f.update([lying(x=400)], 16) is None     # 알린 뒤 흔들려도 해제 안 함
-    assert f.update([lying()], 17) is None
+    assert len(seen) == 7
+    assert "정리 확인 1번 방" in out and "기록 파일에 못 썼어요" in out  # 기록 실패해도 카메라는 계속
 
 
 def test_pir_change_sends_right_away():

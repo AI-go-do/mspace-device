@@ -76,7 +76,6 @@ class Config:
     room_camera: str | None = None         # 방 안 웹캠 (인원 세기·정리 확인). 비우면 끔
     room_camera_room: int = 1              # 방 안 웹캠이 있는 방 번호
     yolo_model: str | None = None          # YOLO ONNX 모델 파일. 없으면 사람만 세는 기본 방식(HOG)
-    fall_sec: int = 15                     # 누운 채 이만큼 안 움직이면 쓰러짐 의심 알림. 0이면 끔
 
 
 def find_port():
@@ -108,7 +107,6 @@ def load_config(env=None):
         room_camera_room=(int(env["ROOM_CAMERA_ROOM"]) if _is_number(env.get("ROOM_CAMERA_ROOM", ""))
                           else Config.room_camera_room),
         yolo_model=env.get("YOLO_MODEL") or None,
-        fall_sec=int(env["FALL_SEC"]) if _is_number(env.get("FALL_SEC", "")) else Config.fall_sec,
     )
 
 
@@ -460,17 +458,16 @@ def camera_push(config, sensors):
 
 
 def start_room_camera(config, sensors):
-    """방 안 웹캠 인원 세기·정리 확인·쓰러짐 감지를 뒤에서(스레드) 켠다."""
+    """방 안 웹캠 인원 세기·정리 확인을 뒤에서(스레드) 켠다."""
     import room_camera  # 켤 때만 불러온다 (OpenCV는 젯슨에만 있으면 됨)
     room = config.room_camera_room
     CAMERA_ROOMS[room] = time.monotonic()  # 켤 때 한 번 잡고, 이후 사진을 읽을 때마다 새로 적는다
     detector = room_camera.make_detector(config.yolo_model)
     watcher = room_camera.RoomWatcher(room, check_objects=detector.finds_objects)
-    fall = room_camera.FallWatcher(room, config.fall_sec) if config.fall_sec else None
     cam = room_camera.open_camera(config.room_camera)
     t = threading.Thread(target=room_camera.run_room_camera,
                          args=(watcher, cam, detector, camera_push(config, sensors), lambda: fresh_pir(room)),
-                         kwargs={"fall": fall, "on_frame": lambda: CAMERA_ROOMS.__setitem__(room, time.monotonic())},
+                         kwargs={"on_frame": lambda: CAMERA_ROOMS.__setitem__(room, time.monotonic())},
                          daemon=True)
     t.start()
     return t

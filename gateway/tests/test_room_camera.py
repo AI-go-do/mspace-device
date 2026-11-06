@@ -242,13 +242,14 @@ def test_start_room_camera(monkeypatch):
     monkeypatch.setattr(room_camera, "make_detector", lambda path: Det())
     monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
 
-    def fake_run(watcher, cam, detector, push, pir_now):
+    def fake_run(watcher, cam, detector, push, pir_now, fall=None):
         gateway.LAST_PIR[3] = 1
-        called.update(room=watcher.room_id, cam=cam, check=watcher.check_objects, pir=pir_now())
+        called.update(room=watcher.room_id, cam=cam, check=watcher.check_objects, pir=pir_now(),
+                      fall=fall.hold_sec)
 
     monkeypatch.setattr(room_camera, "run_room_camera", fake_run)
     gateway.start_room_camera(gateway.Config(room_camera="1", room_camera_room=3), None).join(timeout=1)
-    assert called == {"room": 3, "cam": "cam", "check": False, "pir": 1}
+    assert called == {"room": 3, "cam": "cam", "check": False, "pir": 1, "fall": 15}
     assert 3 in gateway.CAMERA_ROOMS
 
 
@@ -313,3 +314,84 @@ def test_yolo_detector_uses_onnxruntime(monkeypatch):
     det = YoloDetector("m.onnx")
     found = det.detect(np.zeros((640, 640, 3)))
     assert [d.label for d in found] == ["person"]
+
+
+# ---- 이상 탐지 (쓰러짐 의심) ----
+
+def lying(x=100, y=300):
+    return Detection("person", 0.9, (x, y, 200, 80))  # 가로가 넓은 상자 = 누운 자세
+
+
+def test_fall_alert_after_hold_and_clear():
+    from room_camera import FallWatcher, fall_message
+    f = FallWatcher(1, hold_sec=15)
+    assert f.update([person()], 0) is None          # 서 있으면 아무 일 없음
+    assert f.update([lying()], 1) is None           # 누움 시작
+    assert f.update([lying(x=105)], 10) is None     # 거의 그 자리, 아직 15초 안 됨
+    alert = f.update([lying(x=102)], 16, now_iso="t")
+    assert alert == {"roomId": 1, "status": "FALL_SUSPECTED", "lyingSec": 15, "checkedAt": "t"}
+    assert "쓰러짐 의심" in fall_message(alert)
+    assert f.update([lying()], 20) is None          # 한 번만 알림
+    cleared = f.update([person()], 25)              # 일어나면 해제
+    assert cleared["status"] == "FALL_CLEARED" and "해제" in fall_message(cleared)
+    assert f.update([], 26) is None
+
+
+def test_fall_moving_person_resets():
+    from room_camera import FallWatcher
+    f = FallWatcher(1, hold_sec=15)
+    f.update([lying(x=0)], 0)
+    assert f.update([lying(x=400)], 10) is None     # 다른 자리로 움직이면 다시 셈
+    assert f.update([lying(x=400)], 20) is None     # 새 자리 기준 10초
+    assert f.update([lying(x=400)], 26)["status"] == "FALL_SUSPECTED"
+
+
+def test_run_room_camera_sends_fall_alert(tmp_path):
+    from room_camera import FallWatcher
+
+    class LyingDetector:
+        finds_objects = True
+
+        def detect(self, frame):
+            return [lying()]
+
+    pushed = []
+    clock = iter(range(0, 1000, 10))
+    log = tmp_path / "log.jsonl"
+    with pytest.raises(StopIteration):
+        run_room_camera(RoomWatcher(1), FakeCam(6), LyingDetector(), pushed.append, pir_now=lambda: None,
+                        log_path=log, clock=lambda: next(clock), sleep=lambda s: None, fall=FallWatcher(1, 15))
+    alerts = [e for e in pushed if e["sources"].get("alert")]
+    assert alerts and alerts[0]["sources"]["alert"] == "FALL_SUSPECTED" and alerts[0]["occupied"] is True
+    assert "FALL_SUSPECTED" in log.read_text(encoding="utf-8")
+
+
+def test_load_config_fall_sec():
+    assert gateway.load_config({"FALL_SEC": "0"}).fall_sec == 0
+    assert gateway.load_config({"FALL_SEC": "x"}).fall_sec == 15
+
+
+def test_main_runs_cameras_without_uno(monkeypatch, capsys):
+    """우노가 없어도 카메라를 켰으면 끄지 않고 카메라만 돌린다. QR 답은 화면에 보여 준다."""
+    started = []
+
+    def fake_qr(config, verifier, on_reply):
+        on_reply(b"OK\n")
+        on_reply(b"NO\n")
+
+    monkeypatch.setattr(gateway, "start_qr", fake_qr)
+    monkeypatch.setattr(gateway, "start_room_camera", lambda config, sensors: started.append("room"))
+
+    def stop(s):
+        raise StopIteration
+
+    monkeypatch.setattr(gateway.time, "sleep", stop)
+    with pytest.raises(StopIteration):
+        gateway.main(gateway.Config(port=None, dry_run=True, qr_camera="0", room_camera="2"))
+    out = capsys.readouterr().out
+    assert started == ["room"] and "우노 없음" in out and "초록(열림)" in out and "빨강(거부)" in out
+
+
+def test_main_without_uno_or_camera_stops():
+    with pytest.raises(SystemExit):
+        gateway.main(gateway.Config(port=None, dry_run=True))

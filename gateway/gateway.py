@@ -76,6 +76,7 @@ class Config:
     room_camera: str | None = None         # 방 안 웹캠 (인원 세기·정리 확인). 비우면 끔
     room_camera_room: int = 1              # 방 안 웹캠이 있는 방 번호
     yolo_model: str | None = None          # YOLO ONNX 모델 파일. 없으면 사람만 세는 기본 방식(HOG)
+    fall_sec: int = 15                     # 누운 채 이만큼 안 움직이면 쓰러짐 의심 알림. 0이면 끔
 
 
 def find_port():
@@ -107,6 +108,7 @@ def load_config(env=None):
         room_camera_room=(int(env["ROOM_CAMERA_ROOM"]) if _is_number(env.get("ROOM_CAMERA_ROOM", ""))
                           else Config.room_camera_room),
         yolo_model=env.get("YOLO_MODEL") or None,
+        fall_sec=int(env["FALL_SEC"]) if _is_number(env.get("FALL_SEC", "")) else Config.fall_sec,
     )
 
 
@@ -388,13 +390,14 @@ def handle_line(line, verifier, sensors=None):
 
 def main(config=None):
     config = config or load_config()
-    if not config.port:
+    cameras_only = not config.port and bool(config.qr_camera or config.room_camera)
+    if not config.port and not cameras_only:
         raise SystemExit("우노를 못 찾았어요. USB 연결을 확인하거나 PORT=/dev/ttyACM0 처럼 지정하세요.")
     if not config.dry_run and not config.device_token:
         raise SystemExit("DEVICE_TOKEN이 없어요. .env에 넣고 불러오거나, 서버 없이 테스트하려면 DRY_RUN=1 로 실행하세요.")
     if not config.dry_run and not is_safe_server(config.server):
         raise SystemExit("원격 서버는 https://로만 연결해요 (장치 토큰이 실리므로). http://는 localhost 테스트에서만 써요.")
-    print("연결:", config.port, "| 서버:", "DRY_RUN" if config.dry_run else config.server,
+    print("연결:", config.port or "우노 없음 (카메라만)", "| 서버:", "DRY_RUN" if config.dry_run else config.server,
           "| 재실 전송:", "켬" if config.send_sensors and not config.dry_run else "끔",
           "| QR 입실:", f"켬 (카메라 {config.qr_camera}, {config.qr_room_id}번 방)" if config.qr_camera else "끔",
           "| 인원 세기:", f"켬 (카메라 {config.room_camera}, {config.room_camera_room}번 방)" if config.room_camera else "끔")
@@ -402,11 +405,16 @@ def main(config=None):
     sensors = None
     if config.send_sensors and not config.dry_run:
         sensors = SensorSender(config.server, config.device_token).start()
-    ser = serial.Serial(config.port, 115200, timeout=1)  # ser = 우노와 연결된 시리얼 통로. 115200은 우노 코드와 같은 속도
-    time.sleep(2)  # 우노는 시리얼 연결 시 재부팅되므로 켜질 때까지 기다린다
+    ser = None
+    if not cameras_only:
+        ser = serial.Serial(config.port, 115200, timeout=1)  # ser = 우노와 연결된 시리얼 통로. 115200은 우노 코드와 같은 속도
+        time.sleep(2)  # 우노는 시리얼 연결 시 재부팅되므로 켜질 때까지 기다린다
     write_lock = threading.Lock()  # 키패드 답과 QR 답이 동시에 우노로 가도 줄이 섞이지 않게
 
     def reply_to_uno(reply):
+        if ser is None:  # 우노 없이 카메라만 시험할 때는 LED 대신 화면에
+            print("우노 LED 대신:", "초록(열림)" if reply == b"OK\n" else "빨강(거부)")
+            return
         with write_lock:
             ser.write(reply)  # 우노에 결과를 돌려줘서 LED를 켜게 한다
 
@@ -415,6 +423,8 @@ def main(config=None):
     if config.room_camera:
         start_room_camera(config, sensors)
 
+    while ser is None:  # 우노가 없으면 카메라 스레드만 돌게 두고 기다린다 (Ctrl+C로 끝)
+        time.sleep(1)
     while True:
         line = ser.readline().decode(errors="ignore")  # line = 우노가 보낸 한 줄 (글자로 변환, 깨진 글자는 무시)
         reply = handle_line(line, verifier, sensors)
@@ -434,16 +444,17 @@ def camera_push(config, sensors):
 
 
 def start_room_camera(config, sensors):
-    """방 안 웹캠 인원 세기·정리 확인을 뒤에서(스레드) 켠다."""
+    """방 안 웹캠 인원 세기·정리 확인·쓰러짐 감지를 뒤에서(스레드) 켠다."""
     import room_camera  # 켤 때만 불러온다 (OpenCV는 젯슨에만 있으면 됨)
     room = config.room_camera_room
     CAMERA_ROOMS.add(room)
     detector = room_camera.make_detector(config.yolo_model)
     watcher = room_camera.RoomWatcher(room, check_objects=detector.finds_objects)
+    fall = room_camera.FallWatcher(room, config.fall_sec) if config.fall_sec else None
     cam = room_camera.open_camera(config.room_camera)
     t = threading.Thread(target=room_camera.run_room_camera,
                          args=(watcher, cam, detector, camera_push(config, sensors), lambda: LAST_PIR.get(room)),
-                         daemon=True)
+                         kwargs={"fall": fall}, daemon=True)
     t.start()
     return t
 

@@ -139,6 +139,8 @@ ROOM_CAMERA=2 YOLO_MODEL=gateway/yolov8n.onnx SEND_SENSORS=1 ~/mspace-venv/bin/p
 - 방 번호는 `ROOM_CAMERA_ROOM`(기본 1), 카메라 번호는 `ROOM_CAMERA`. 웹캠 하나에 번호가 여러 개 잡히니 `v4l2-ctl --list-devices`로 확인해요 (11/6 젯슨 B: C920=0 문 앞, BRIO=2 방 안)
 - 모델이 없으면 OpenCV 기본 사람 찾기(HOG)로 사람 수만 세요. 정리 확인은 꺼져요
 - **사진·영상은 저장하지도 보내지도 않아요.** 한 장 보고 바로 지우고, 숫자와 물건 이름만 남겨요
+- **쓰러짐 감지(이상 탐지)**: 사람 상자가 세로보다 가로가 넓으면(누운 자세) 그 자리를 기억하고, 거의 안 움직인 채 `FALL_SEC`(기본 15초, 0이면 끔)가 지나면 `⚠ 이상 탐지`를 띄워요. core에 알림 API가 없어서 재실 이벤트 `sources.alert = "FALL_SUSPECTED"`로 남기고, 일어나면 `FALL_CLEARED`. `room_checks.jsonl`에도 기록. 카메라를 위에서 비스듬히 달면 서 있는 사람도 넓게 보일 수 있어서 `LYING_RATIO`(room_camera.py)를 설치 각도에 맞춰요
+- **우노 없이 카메라만**: 우노가 안 꽂혀 있어도 `QR_CAMERA`나 `ROOM_CAMERA`를 켜면 카메라만 돌아가요. QR 결과는 LED 대신 화면에 "초록(열림)/빨강(거부)"로 나와요
 
 ### 젯슨에서 올리기 (맥 IDE가 안 될 때)
 

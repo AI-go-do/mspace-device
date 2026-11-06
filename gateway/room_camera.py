@@ -58,6 +58,9 @@ BEAT_SEC = 10          # 바뀌지 않아도 10초마다 보낸다 (core는 1분
 SMOOTH_FRAMES = 5      # 최근 5번 센 값의 가운데 값을 쓴다 (한 번 놓치거나 잘못 세서 숫자가 튀지 않게)
 EMPTY_CHECK_SEC = 30   # 모두 나가고 30초 뒤에 정리 확인 (문 닫고 나가는 시간)
 SAME_PLACE_IOU = 0.3   # 깨끗할 때 본 물건과 이만큼 겹치면 "원래 있던 것"으로 본다
+FALL_SEC = 15          # 누운 자세로 이만큼 거의 안 움직이면 "쓰러짐 의심" (시연용 값, FALL_SEC로 바꿈)
+LYING_RATIO = 1.2      # 사람 상자가 가로/세로 이보다 넓으면 누운 자세로 본다
+STILL_IOU = 0.5        # 처음 누운 자리와 이만큼 겹치면 "안 움직임"
 
 
 @dataclass(frozen=True)
@@ -223,6 +226,14 @@ class RoomWatcher:
             "observedAt": now_iso or datetime.now(KST).isoformat(timespec="seconds"),
         }
 
+    def alert_event(self, alert, pir=None):
+        """이상 탐지를 바로 core에 남긴다. core에 알림 API가 없어서 재실 이벤트의 sources에 실어 보낸다
+        (core는 sources를 그대로 기록). 쓰러짐 의심이면 사람이 있는 것이므로 occupied는 true."""
+        people = self.sent_people or 0
+        body = self.event(max(people, 1) if alert["status"] == "FALL_SUSPECTED" else people, pir, alert["checkedAt"])
+        body["sources"]["alert"] = alert["status"]
+        return body
+
     def objects(self, dets):
         return [d for d in dets if d.label in TRASH or d.label in BELONGINGS]
 
@@ -247,6 +258,59 @@ class RoomWatcher:
             "leftItems": left,
             "checkedAt": now_iso or datetime.now(KST).isoformat(timespec="seconds"),
         }
+
+
+class FallWatcher:
+    """이상 탐지: 사람이 누운 자세로 FALL_SEC 넘게 거의 안 움직이면 한 번 알린다 (8차 회의 멘토 "쓰러짐 감지").
+
+    사람 상자가 세로보다 가로가 넓으면 누운 자세로 본다. 처음 누운 자리를 기준으로 잡고,
+    그 자리에서 크게 벗어나지 않은 채 FALL_SEC가 지나면 FALL_SUSPECTED, 다시 일어나거나 사라지면
+    FALL_CLEARED를 돌려준다. 카메라를 위에서 비스듬히 달면 서 있는 사람도 넓게 보일 수 있어서
+    LYING_RATIO는 설치 각도에 맞게 바꾼다. 사진은 쓰지 않고 상자 크기만 본다.
+    """
+
+    def __init__(self, room_id, hold_sec=FALL_SEC):
+        self.room_id = room_id
+        self.hold_sec = hold_sec
+        self.anchor = None   # 처음 누운 자리 (x, y, w, h)
+        self.since = None    # 그때 시각
+        self.alerted = False
+
+    @staticmethod
+    def lying(dets):
+        return [d for d in dets if d.label == "person" and d.box[2] > LYING_RATIO * d.box[3]]
+
+    def update(self, dets, now, now_iso=None):
+        """한 번 찾은 결과를 넣는다. 알릴 일이 생기면 결과(dict), 아니면 None."""
+        lying = self.lying(dets)
+        still = None
+        if self.anchor is not None and lying:
+            best = max(lying, key=lambda d: iou(d.box, self.anchor))
+            still = best if iou(best.box, self.anchor) >= STILL_IOU else None
+        if still is not None:
+            if not self.alerted and now - self.since >= self.hold_sec:
+                self.alerted = True
+                return self.result("FALL_SUSPECTED", now, now_iso)
+            return None
+        cleared = self.result("FALL_CLEARED", now, now_iso) if self.alerted else None
+        self.anchor = max(lying, key=lambda d: d.score).box if lying else None
+        self.since = now if lying else None
+        self.alerted = False
+        return cleared
+
+    def result(self, status, now, now_iso):
+        return {
+            "roomId": self.room_id,
+            "status": status,
+            "lyingSec": int(now - self.since),
+            "checkedAt": now_iso or datetime.now(KST).isoformat(timespec="seconds"),
+        }
+
+
+def fall_message(alert):
+    if alert["status"] == "FALL_SUSPECTED":
+        return f"⚠ 이상 탐지 {alert['roomId']}번 방: 사람이 {alert['lyingSec']}초 넘게 누운 채 안 움직여요 (쓰러짐 의심)"
+    return f"이상 탐지 {alert['roomId']}번 방: 다시 움직임 (해제)"
 
 
 def check_message(check):
@@ -278,8 +342,13 @@ def make_detector(model_path):
     return HogPersonDetector()
 
 
+def write_log(log_path, record):
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path="room_checks.jsonl",
-                    every=1.0, clock=time.monotonic, sleep=time.sleep):
+                    every=1.0, clock=time.monotonic, sleep=time.sleep, fall=None):
     """카메라에서 1초마다 한 장씩 세서 watcher에 넣는다. 사진은 저장하지 않는다."""
     print(f"방 안 카메라 켜짐: {watcher.room_id}번 방")
     while True:
@@ -295,8 +364,12 @@ def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path
                     push(event)
                 if check:
                     print(check_message(check))
-                    with open(log_path, "a", encoding="utf-8") as f:
-                        f.write(json.dumps(check, ensure_ascii=False) + "\n")
+                    write_log(log_path, check)
+                alert = fall.update(dets, clock()) if fall else None
+                if alert:
+                    print(fall_message(alert))
+                    write_log(log_path, alert)
+                    push(watcher.alert_event(alert, pir_now()))
             except Exception as e:  # 한 장에서 오류가 나도 카메라 스레드는 계속 돈다
                 print("방 안 카메라 처리 오류(계속 돌아요):", repr(e))
         sleep(max(0.0, every - (clock() - started)))

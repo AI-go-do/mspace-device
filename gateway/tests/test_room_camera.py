@@ -242,7 +242,7 @@ def test_start_room_camera(monkeypatch):
     monkeypatch.setattr(room_camera, "make_detector", lambda path: Det())
     monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
 
-    def fake_run(watcher, cam, detector, push, pir_now, on_frame=None):
+    def fake_run(watcher, cam, detector, push, pir_now, on_frame=None, preview=None):
         gateway.LAST_PIR[3] = (1, gateway.time.monotonic())
         on_frame()
         called.update(room=watcher.room_id, cam=cam, check=watcher.check_objects, pir=pir_now())
@@ -420,3 +420,16 @@ def test_failed_detection_does_not_count_as_alive():
         run_room_camera(RoomWatcher(1), FakeCam(3), Broken(), lambda e: None,
                         clock=iter(range(100)).__next__, sleep=lambda s: None, on_frame=lambda: seen.append(1))
     assert seen == []
+
+
+def test_run_room_camera_feeds_preview():
+    got = []
+
+    class P:
+        def update(self, frame, dets, people):
+            got.append(people)
+
+    with pytest.raises(StopIteration):
+        run_room_camera(RoomWatcher(1), FakeCam(2), FakeDetector(), lambda e: None,
+                        clock=iter(range(100)).__next__, sleep=lambda s: None, preview=P())
+    assert got  # 읽은 장마다 화면 보기에 넘김

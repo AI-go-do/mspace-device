@@ -132,6 +132,8 @@ ROOM_CAMERA=2 YOLO_MODEL=gateway/yolov8n.onnx SEND_SENSORS=1 ~/mspace-venv/bin/p
 # 서버 없이 화면 출력만: DRY_RUN=1 ROOM_CAMERA=1 YOLO_MODEL=gateway/yolov8n.onnx python3 gateway/gateway.py
 ```
 
+**카메라 화면 보기 (설치·시연 확인용, 기본 꺼짐):** 실행 명령 앞에 `PREVIEW_PORT=8080`을 붙이면 브라우저에서 `http://<젯슨 주소>:8080`(예: Tailscale IP)으로 카메라가 보는 화면을 볼 수 있어요. 사람은 초록, 물건은 주황 상자로 그리고 사람 수를 표시해요. 마지막 한 장만 메모리에 두고 저장·전송은 하지 않아요.
+
 - 인원 수: 1초마다 사람 수를 세고, 최근 5번의 가운데 값을 써요(한 번 잘못 센 건 무시). 바뀌면 바로, 아니면 10초마다 기존 재실 API(`kind: OCCUPANCY`)로 보내요. `sources`에 `"people": 2`가 들어가서 **core를 안 바꿔도** 돼요
 - 그 방은 카메라가 재실을 대신 보내요. 우노 PIR 값은 버리지 않고 `occupied`(사람 수 > 0 **또는** PIR)와 `sources.pir`에 합쳐요
 - 정리 확인: 사람이 있다가 다 나가고 30초가 지나면 한 번 봐요. 처음 본 빈 방과 비교해서 새로 생긴 컵·병 같은 쓰레기는 `NEEDS_CLEANING`, 노트북·가방·폰 같은 두고 간 물건은 `LEFT_ITEMS`, 없으면 `CLEAN`이에요

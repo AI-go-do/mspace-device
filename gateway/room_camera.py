@@ -296,7 +296,7 @@ def safe_log(log_path, record):
 
 
 def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path="room_checks.jsonl",
-                    every=1.0, clock=time.monotonic, sleep=time.sleep, on_frame=lambda: None,
+                    every=1.0, clock=time.monotonic, sleep=time.sleep, on_frame=lambda: None, preview=None,
                     warn_every=10.0):
     """카메라에서 1초마다 한 장씩 세서 watcher에 넣는다. 사진은 저장하지 않는다.
 
@@ -313,6 +313,8 @@ def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path
         if ok:
             try:
                 dets = detector.detect(frame)
+                if preview is not None:  # 화면 보기를 켰을 때만 상자를 그려 메모리에 한 장 둔다
+                    preview.update(frame, dets, watcher.people(dets))
                 del frame  # 사진은 바로 버린다
                 event, check = watcher.update(dets, clock(), pir_now())
                 on_frame()  # 찾기까지 성공한 장만 "카메라 살아 있음"으로 친다

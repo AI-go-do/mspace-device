@@ -94,6 +94,79 @@ flowchart LR
    서버에는 `Authorization: Bearer <장치 토큰>` 헤더로 보내요. 토큰이 없으면 DRY_RUN만 돼요.
    `http://`는 내 컴퓨터에 띄운 core 테스트에서만 써요. 원격 주소에 `http://`를 쓰면 게이트웨이가 시작하지 않아요(토큰 보호).
 
+### QR 입실 (문 앞 웹캠, 시연용)
+
+8차 회의(11/6)에서 시연을 **카메라 + QR**로 바꿨어요. 키패드는 "1차 시도"로 그대로 두고, 같은 서버 확인(`/api/access/verify`)을 QR로도 해요.
+
+```bash
+ls /dev/video*                                    # 웹캠 번호 확인 (보통 0)
+set -a; . ./.env; set +a
+QR_CAMERA=0 SEND_SENSORS=1 python3 gateway/gateway.py          # 진짜 서버
+DRY_RUN=1 QR_CAMERA=0 python3 gateway/gateway.py               # 서버 없이: 123456 QR만 초록
+```
+
+- 흐름: 폰에 QR 띄우기 → 문 앞 웹캠에 비추기 → 젯슨이 읽어 core에 확인 → 우노 LED 초록/빨강 (키패드와 같은 LED)
+- QR 안의 글자: 입실 번호 6자리(`123456`) 또는 방까지 넣은 `MSPACE:1:123456`. 방 번호는 `QR_ROOM_ID`(기본 1). 다른 방 QR은 서버에 묻지 않고 거부
+- 지금은 예약 때 받은 6자리 번호를 QR로 만들어 비춰요 (QR 만들기 사이트나 앱). 나중에 웹 입실 화면이 QR을 바로 띄우고, core가 "30초마다 바뀌는 코드"를 주면 `qr_door.py`의 `parse_qr()`만 바꾸면 돼요
+- 같은 QR을 계속 비추면 5초 동안은 다시 묻지 않아요
+- **사진·영상은 저장하지도 보내지도 않아요.** 읽은 글자만 써요
+- OpenCV(`cv2`)는 젯슨에 기본으로 깔려 있어요. 없다고 나오면 `sudo apt install python3-opencv`
+
+### 방 안 카메라 (인원 세기 · 정리 확인, 시연용)
+
+방 안을 비추는 두 번째 웹캠으로 **몇 명 있는지** 세고, 사람이 다 나가면 **방이 깨끗한지** 확인해요.
+
+```bash
+# 처음 한 번: 사람·물건 찾는 모델 받기 (yolov8s.onnx, 약 45MB)
+# 작은 n(12MB)은 빠르지만 위에서 내려다본 노트북·폰을 자주 놓쳐서 s를 써요
+pip3 install ultralytics && yolo export model=yolov8s.pt format=onnx opset=12
+mv yolov8s.onnx gateway/
+
+# 젯슨 기본 OpenCV(4.6)는 YOLOv8 모델을 못 읽어서 onnxruntime을 같이 써요 (처음 한 번)
+sudo apt install -y python3-opencv python3-numpy python3-venv
+python3 -m venv --system-site-packages ~/mspace-venv     # apt로 깐 OpenCV·serial은 그대로 씀
+~/mspace-venv/bin/pip install onnxruntime
+
+set -a; . ./.env; set +a
+ROOM_CAMERA=2 YOLO_MODEL=gateway/yolov8s.onnx SEND_SENSORS=1 ~/mspace-venv/bin/python gateway/gateway.py
+# 문 앞 QR과 같이: QR_CAMERA=0 ROOM_CAMERA=1 ...
+# 서버 없이 화면 출력만: DRY_RUN=1 ROOM_CAMERA=1 YOLO_MODEL=gateway/yolov8s.onnx python3 gateway/gateway.py
+```
+
+**카메라 화면 보기 (설치·시연 확인용, 기본 꺼짐):** 실행 명령 앞에 `PREVIEW_PORT=8090 PREVIEW_HOST=$(tailscale ip -4)`를 붙이면 팀 Tailscale 안의 브라우저에서 `http://<젯슨 Tailscale IP>:8090`으로 카메라가 보는 화면을 볼 수 있어요. `PREVIEW_HOST`를 안 주면 젯슨 안(127.0.0.1)에서만 열려요. `PREVIEW_HOST=tailscale`이라고 써도 Tailscale 주소를 알아서 찾아요. 인증이 없어서 학교 와이파이 같은 열린 네트워크(0.0.0.0)에는 열지 않아요. 사람은 초록, 물건은 주황 상자로 그리고 사람 수를 표시해요. 젯슨 B는 8080을 다른 서비스가 쓰고 있어서 8090을 써요. 마지막 한 장만 메모리에 두고 저장·전송은 하지 않아요.
+
+- 인원 수: 1초마다 사람 수를 세고, 최근 5번의 가운데 값을 써요(한 번 잘못 센 건 무시). 바뀌면 바로, 아니면 10초마다 기존 재실 API(`kind: OCCUPANCY`)로 보내요. `sources`에 `"people": 2`가 들어가서 **core를 안 바꿔도** 돼요
+- 그 방은 카메라가 재실을 대신 보내요. 우노 PIR 값은 버리지 않고 `occupied`(사람 수 > 0 **또는** PIR)와 `sources.pir`에 합쳐요
+- 정리 확인은 두 가지 방식이에요
+  - **퇴실하면 확인** (`SEND_SENSORS=1`로 서버에 보낼 때): 10초마다 서버에 방 예약 상태(`GET /api/rooms/{id}/current`)를 묻고, 방금 끝난 예약(`lastEnded`)이 바뀌면 방이 10초 비었을 때 확인해요. 다 같이 화장실에 가도 예약이 안 끝났으니 확인하지 않아요. 결과는 `POST /api/rooms/{id}/tidy-checks`로 보내요 (치울 것 있으면 `NEEDS_CLEANING` → 서버가 자동 신고, 가방·휴대폰·노트북은 `leftItems` → 예약자 알림). 퇴실 뒤 10분 안에 방이 비지 않으면 그 예약은 건너뛰어요
+  - **연습 모드** (`DRY_RUN=1`): 서버 없이, 사람이 있다가 다 나가고 30초가 지나면 확인하고 화면·기록 파일에만 남겨요
+- 판정: 처음 본 빈 방과 종류별 개수로 비교해서(자리는 안 봐서 조금 옮겨도 괜찮아요) 늘어난 컵·병 같은 쓰레기는 `NEEDS_CLEANING`, 노트북·가방·폰 같은 두고 간 물건은 `LEFT_ITEMS`, 없으면 `CLEAN`이에요
+- 방 비품: `ROOM_ITEMS=remote:1` 처럼 주면 그 개수까지는 있어도(책상 위) 없어도(바구니 안) 괜찮다고 봐요. 여러 개는 `remote:1,book:3`
+- 깨끗한 방 기준: 기준이 없으면 켠 뒤 처음 0명일 때 저장하고 `깨끗한 방 기준 저장 1번 방: 물건 N개`를 띄워요. `room_baseline.json`에 적어 두어서 **껐다 켜도 남아요** (켤 때 `저장된 깨끗한 방 기준 불러옴`). 다시 찍으려면 `rm room_baseline.json` 하고 다시 켜요. 파일 없이 메모리에만 두려면 `BASELINE_FILE=off`. 기준이 없을 때 퇴실하면 결과 대신 그때 모습을 기준으로 저장해요
+- 기준 저장·정리 확인 때만 화면을 4조각으로 나눠 자세히 봐요(멀리 있는 폰 같은 작은 물건). 그 한 번만 5배 느리고 평소 인원 세기 속도는 그대로예요
+- 깨끗한 방 찍는 법: 물건을 다 치우고 `rm room_baseline.json`, 사람이 카메라 밖으로 나간 뒤 프로그램을 켜요 (자동 실행이면 `sudo systemctl restart mspace-gateway`) → 위 문구가 뜨면 들어와도 돼요
+- 결과는 화면에 출력하고 `room_checks.jsonl`에도 한 줄씩 남겨요 (사진 없이 글자만)
+- 방 번호는 `ROOM_CAMERA_ROOM`(기본 1), 카메라 번호는 `ROOM_CAMERA`. 웹캠 하나에 번호가 여러 개 잡히니 `v4l2-ctl --list-devices`로 확인해요 (11/6 젯슨 B: C920=0 문 앞, BRIO=2 방 안)
+- 모델이 없으면 OpenCV 기본 사람 찾기(HOG)로 사람 수만 세요. 정리 확인은 꺼져요
+- **사진·영상은 저장하지도 보내지도 않아요.** 한 장 보고 바로 지우고, 숫자와 물건 이름만 남겨요
+- **우노 없이 카메라만**: 우노가 안 꽂혀 있어도 `QR_CAMERA`나 `ROOM_CAMERA`를 켜면 카메라만 돌아가요. QR 결과는 LED 대신 화면에 "초록(열림)/빨강(거부)"로 나와요
+
+### 젯슨 켜지면 자동 실행 (systemd)
+
+SSH가 끊기거나 젯슨을 껐다 켜도 게이트웨이가 알아서 다시 켜져요. 처음 한 번만:
+
+```bash
+cd ~/mspace-device
+bash deploy/install-service.sh        # gateway.env를 만들고(없으면) 서비스로 켬. sudo 비밀번호를 물어요
+nano gateway.env                      # 설정 확인 (카메라 번호, DRY_RUN 등). 고쳤으면 아래 restart
+```
+
+- 화면 출력은 전처럼 `tail -f gateway.log`로 봐요
+- 설정 바꾼 뒤: `sudo systemctl restart mspace-gateway` / 끄기: `sudo systemctl stop mspace-gateway` / 상태: `systemctl status mspace-gateway`
+- 꺼지면 5초 뒤 다시 켜요. 자동 실행을 아예 없애려면 `bash deploy/install-service.sh remove`
+- 설정은 `gateway.env`, 토큰은 `.env`에 두고 둘 다 저장소에 안 올라가요. `gateway.env`에선 `$(tailscale ip -4)`를 못 써서 `PREVIEW_HOST=tailscale`로 쓰면 Tailscale 주소를 알아서 찾아요 (켜질 때 최대 1분 기다림)
+- 손으로 켜서 시험할 땐 먼저 `sudo systemctl stop mspace-gateway` (카메라를 둘이 같이 못 써요)
+
 ### 젯슨에서 올리기 (맥 IDE가 안 될 때)
 
 ```bash
@@ -196,6 +269,8 @@ echo ch341 | sudo tee /etc/modules-load.d/ch341.conf
 | `handle_line()` + `HANDLERS` | 한 줄을 받아 `sensorType`별 처리기로 보냄 (`keypad`, `occupancy`) |
 | `handle_occupancy()` | 우노 재실 줄을 core 형식(`kind: OCCUPANCY`, `occupied`, `sources`, `observedAt`)으로 바꿈 |
 | `main()` | 위 부품을 조립하고 시리얼을 계속 읽음 |
+| `qr_door.py` | 문 앞 웹캠 QR 입실 (`QR_CAMERA`). `QrDoor`가 QR 글자 → 같은 확인기 → OK/NO, `run_camera()`가 카메라에서 QR을 찾음 |
+| `room_camera.py` | 방 안 웹캠 (`ROOM_CAMERA`). `RoomWatcher`가 사람 수 → 재실 이벤트, 빈 방이 되면 정리 확인. `YoloDetector`(모델 있을 때) / `HogPersonDetector`(없을 때) |
 
 ### 테스트
 

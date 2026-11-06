@@ -7,3 +7,8 @@ coverage.xml
 .coverage
 .pytest_cache/
 firmware/esp32_room_node/secrets.h
+*.onnx
+room_checks.jsonl
+room_baseline.json*
+gateway.env
+gateway.log

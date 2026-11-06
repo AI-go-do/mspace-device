@@ -43,7 +43,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
@@ -78,6 +78,7 @@ class Config:
     preview_port: int | None = None        # 방 안 카메라 화면을 브라우저로 보기 (예: 8090). 없으면 끔
     preview_host: str = "127.0.0.1"        # 화면 보기를 열 주소. 맥에서 보려면 Tailscale IP (전체 공개 0.0.0.0은 피함)
     yolo_model: str | None = None          # YOLO ONNX 모델 파일. 없으면 사람만 세는 기본 방식(HOG)
+    room_items: dict = field(default_factory=dict)  # 방 비품 {"remote": 1}: 그 개수까지는 있어도 없어도 괜찮음
 
 
 def find_port():
@@ -111,7 +112,18 @@ def load_config(env=None):
         yolo_model=env.get("YOLO_MODEL") or None,
         preview_port=int(env["PREVIEW_PORT"]) if _is_number(env.get("PREVIEW_PORT", "")) else None,
         preview_host=env.get("PREVIEW_HOST") or Config.preview_host,
+        room_items=parse_room_items(env.get("ROOM_ITEMS", "")),
     )
+
+
+def parse_room_items(text):
+    """ROOM_ITEMS="remote:1,book:3" → {"remote": 1, "book": 3}. 이상한 조각은 건너뛴다."""
+    items = {}
+    for part in text.split(","):
+        label, _, n = part.strip().partition(":")
+        if label.strip() and _is_number(n.strip()):
+            items[label.strip()] = int(n.strip())
+    return items
 
 
 def is_loopback(url):
@@ -479,7 +491,7 @@ def start_room_camera(config, sensors):
     room = config.room_camera_room
     CAMERA_ROOMS[room] = time.monotonic()  # 켤 때 한 번 잡고, 이후 사진을 읽을 때마다 새로 적는다
     detector = room_camera.make_detector(config.yolo_model)
-    watcher = room_camera.RoomWatcher(room, check_objects=detector.finds_objects)
+    watcher = room_camera.RoomWatcher(room, check_objects=detector.finds_objects, room_items=config.room_items)
     cam = room_camera.open_camera(config.room_camera)
     t = threading.Thread(target=room_camera.run_room_camera,
                          args=(watcher, cam, detector, camera_push(config, sensors), lambda: fresh_pir(room)),

@@ -9,7 +9,9 @@
        sources  = {"camera": true, "people": 2, "pir": ...}  ← core는 sources를 그대로 기록만 한다
      그래서 core를 바꾸지 않고도 "몇 명"이 서버에 남는다.
   2. 정리 확인: 사람이 있다가 모두 나가고 30초가 지나면, 빈 방에서 물건(컵·병·노트북·가방 …)을 찾는다.
-     처음 빈 방(깨끗한 상태)에서 본 물건과 비교해서 "새로 생긴 물건"만 남은 물건으로 본다.
+     처음 빈 방(깨끗한 상태)에서 본 물건과 종류별 개수로 비교해서 "늘어난 물건"만 남은 물건으로 본다.
+     자리는 보지 않는다 (리모컨을 조금 옮겨도 잘못 잡지 않게). 방 비품(ROOM_ITEMS, 예: remote:1)은
+     그 개수까지 있어도 없어도 괜찮다고 본다 (바구니에 넣어 안 보이거나 책상에 나와 있어도 됨).
      기준을 저장하면 "깨끗한 방 기준 저장"을 알리고, 기준이 없으면 결과 대신 지금 모습을 기준으로 저장한다.
      기준·정리 확인 때만 화면을 4조각으로 나눠 자세히 본다(멀리 있는 작은 물건). 평소 인원 세기는 한 장 그대로.
      결과는 화면과 room_checks.jsonl(글자만)에 남긴다. core에 받을 곳이 생기면 그쪽으로 보낸다.
@@ -59,7 +61,6 @@ KOREAN = {"bottle": "병", "cup": "컵", "wine glass": "잔", "bowl": "그릇", 
 BEAT_SEC = 10          # 바뀌지 않아도 10초마다 보낸다 (core는 1분 안 오면 끊김)
 SMOOTH_FRAMES = 5      # 최근 5번 센 값의 가운데 값을 쓴다 (한 번 놓치거나 잘못 세서 숫자가 튀지 않게)
 EMPTY_CHECK_SEC = 30   # 모두 나가고 30초 뒤에 정리 확인 (문 닫고 나가는 시간)
-SAME_PLACE_IOU = 0.3   # 깨끗할 때 본 물건과 이만큼 겹치면 "원래 있던 것"으로 본다
 
 
 @dataclass(frozen=True)
@@ -239,8 +240,9 @@ def describe(items):
 class RoomWatcher:
     """찾은 목록을 받아서 (1) core에 보낼 재실 이벤트 (2) 정리 확인 결과를 만든다."""
 
-    def __init__(self, room_id, check_objects=True, now=None):
+    def __init__(self, room_id, check_objects=True, now=None, room_items=None):
         self.room_id = room_id
+        self.room_items = dict(room_items or {})  # 방 비품: {"remote": 1} = 리모컨 0~1개는 괜찮음
         self.check_objects = check_objects
         self.counts = deque(maxlen=SMOOTH_FRAMES)
         self.sent_people = None      # 마지막으로 보낸 사람 수
@@ -248,7 +250,7 @@ class RoomWatcher:
         self.sent_at = None          # 마지막으로 보낸 시각
         self.had_people = False      # 정리 확인 전에 사람이 있었는지
         self.empty_since = None      # 0명이 된 시각
-        self.baseline = None         # 깨끗한 빈 방에서 본 물건 (처음 빈 방 또는 정리 확인 뒤)
+        self.baseline = None         # 깨끗한 빈 방에서 본 물건 종류별 개수 (처음 빈 방 또는 깨끗한 정리 확인 뒤)
 
     def people(self, dets):
         return sum(1 for d in dets if d.label == "person")
@@ -305,10 +307,8 @@ class RoomWatcher:
         }
 
     def save_baseline(self, dets, now_iso, reason=None):
-        self.baseline = self.objects(dets)
-        items = {}
-        for d in self.baseline:
-            items[d.label] = items.get(d.label, 0) + 1
+        items = self.count(dets)
+        self.baseline = dict(items)
         note = {
             "roomId": self.room_id,
             "status": "BASELINE_SAVED",
@@ -322,20 +322,27 @@ class RoomWatcher:
     def objects(self, dets):
         return [d for d in dets if d.label in TRASH or d.label in BELONGINGS]
 
+    def count(self, dets):
+        """정리 확인에 쓰는 물건만 종류별로 센다. {"cup": 2, "remote": 1}"""
+        items = {}
+        for d in self.objects(dets):
+            items[d.label] = items.get(d.label, 0) + 1
+        return items
+
     def check(self, dets, now_iso):
-        """빈 방에서 깨끗할 때 없던 물건만 골라 결과를 만든다."""
+        """깨끗할 때보다 늘어난 물건만 골라 결과를 만든다 (종류별 개수, 자리는 보지 않음)."""
         if not self.check_objects:
             return None
-        base = self.baseline or []
-        new = [d for d in self.objects(dets)
-               if not any(b.label == d.label and iou(b.box, d.box) >= SAME_PLACE_IOU for b in base)]
+        base = self.baseline or {}
+        now_items = self.count(dets)
         trash, left = {}, {}
-        for d in new:
-            bucket = trash if d.label in TRASH else left
-            bucket[d.label] = bucket.get(d.label, 0) + 1
+        for label, n in now_items.items():
+            extra = n - max(base.get(label, 0), self.room_items.get(label, 0))  # 방 비품은 그 개수까지 괜찮음
+            if extra > 0:
+                (trash if label in TRASH else left)[label] = extra
         status = "LEFT_ITEMS" if left else "NEEDS_CLEANING" if trash else "CLEAN"
-        if status == "CLEAN":
-            self.baseline = self.objects(dets)  # 깨끗하면 지금 모습을 새 기준으로
+        if status == "CLEAN":  # 깨끗하면 기준을 넓혀 둔다 (줄어든 건 기준에서 빼지 않음: 다시 나와도 괜찮게)
+            self.baseline = {k: max(base.get(k, 0), now_items.get(k, 0)) for k in set(base) | set(now_items)}
         return {
             "roomId": self.room_id,
             "status": status,

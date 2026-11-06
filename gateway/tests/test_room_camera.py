@@ -262,6 +262,37 @@ def test_cut_by_tile_ignores_real_screen_edges():
     assert not cut_by_tile((0, 0, 16, 16), 0, 0, 1056, 594, 1920, 1080)
 
 
+def test_moved_item_is_not_new():
+    """리모컨을 다른 자리로 옮겨도 개수가 같으면 원래 있던 것."""
+    w = RoomWatcher(1)
+    w.update([thing("remote", 10, 10)], now=0)  # 기준: 리모컨 1
+    for t in range(1, 6):
+        w.update([person()], now=t)
+    checks = [w.update([thing("remote", 900, 600)], now=6 + i)[1] for i in range(EMPTY_CHECK_SEC + 5)]
+    assert [c["status"] for c in checks if c] == ["CLEAN"]
+
+
+def test_room_items_zero_or_up_to_n_is_fine():
+    """방 비품 리모컨 1개: 바구니에 넣어 안 보여도(0), 책상에 나와 있어도(1) 괜찮고, 2개면 1개만 잡는다."""
+    for seen, expected in [([], "CLEAN"), ([thing("remote")], "CLEAN"),
+                           ([thing("remote"), thing("remote", 600, 600)], "LEFT_ITEMS")]:
+        w = RoomWatcher(1, room_items={"remote": 1})
+        w.update([], now=0)  # 기준: 리모컨이 바구니 안이라 안 보임
+        for t in range(1, 6):
+            w.update([person()], now=t)
+        checks = [c for c in (w.update(seen, now=6 + i)[1] for i in range(EMPTY_CHECK_SEC + 5)) if c]
+        assert [c["status"] for c in checks] == [expected]
+        if expected == "LEFT_ITEMS":
+            assert checks[0]["leftItems"] == {"remote": 1}
+
+
+def test_parse_room_items():
+    assert gateway.parse_room_items("remote:1, book:3") == {"remote": 1, "book": 3}
+    assert gateway.parse_room_items("remote, :2, cup:x, ") == {}
+    assert gateway.load_config({"ROOM_ITEMS": "remote:1"}).room_items == {"remote": 1}
+    assert gateway.load_config({}).room_items == {}
+
+
 def test_check_only_once_per_visit_and_off_without_model():
     w = RoomWatcher(1)
     check = run_visit(w, [thing("cup")])

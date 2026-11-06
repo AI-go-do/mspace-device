@@ -208,8 +208,10 @@ class SensorSender:
     - 키패드 응답이 늦어지지 않게 별도 스레드에서 보낸다
     """
 
-    def __init__(self, server, token):
-        self.url = server + "/api/sensor-events"
+    def __init__(self, server, token, path="/api/sensor-events", drop=SENSOR_DROP, name="센서 전송"):
+        self.url = server + path
+        self.drop = drop
+        self.name = name
         self.headers = {"Authorization": f"Bearer {token}"}
         self.queue = deque(maxlen=SENSOR_QUEUE_MAX)  # 꽉 차면 append가 가장 오래된 것을 밀어낸다
         self.lock = threading.Lock()
@@ -233,10 +235,10 @@ class SensorSender:
             status = r.status_code
         except requests.RequestException as e:
             status = None
-            print(f"[센서 전송] 연결 실패, 다시 보내요: {e.__class__.__name__}")
-        if status is not None and (200 <= status < 300 or status in SENSOR_DROP):
-            if status in SENSOR_DROP:
-                print(f"[센서 전송] 서버가 이 이벤트를 거부함({status}). 형식 문제라 이것만 버려요")
+            print(f"[{self.name}] 연결 실패, 다시 보내요: {e.__class__.__name__}")
+        if status is not None and (200 <= status < 300 or status in self.drop):
+            if status in self.drop:
+                print(f"[{self.name}] 서버가 이것을 거부함({status}). 다시 보내도 같아서 이것만 버려요")
             with self.lock:
                 if self.queue and self.queue[0] is body:
                     self.queue.popleft()
@@ -244,7 +246,7 @@ class SensorSender:
             return 0
         if status is not None:
             hint = {401: "토큰 확인", 403: "토큰·방 번호 확인", 404: "서버에 센서 API가 아직 없음"}.get(status, "서버 문제")
-            print(f"[센서 전송] 막힘({status}, {hint}). {self.backoff}초 뒤 다시, 대기 {len(self.queue)}개")
+            print(f"[{self.name}] 막힘({status}, {hint}). {self.backoff}초 뒤 다시, 대기 {len(self.queue)}개")
         wait = self.backoff
         self.backoff = min(self.backoff * 2, RETRY_MAX)
         return wait
@@ -262,6 +264,63 @@ class SensorSender:
         threading.Thread(target=self.run_forever, daemon=True).start()
         return self
 
+
+
+# ---------- 퇴실 알기 (정리 확인을 예약이 끝났을 때만 하려고) ----------
+
+POLL_SEC = 10  # 10초마다 서버에 "지금 이 방 예약 상태"를 묻는다 (core #81 GET /api/rooms/{id}/current)
+TIDY_DROP = SENSOR_DROP | {404}  # 404 = 다른 방 예약이거나 서버에 아직 API가 없음 → 다시 보내도 같다
+
+
+class CheckoutPoller:
+    """서버에 방의 예약 상태를 물어서, 방금 끝난 예약(lastEnded)이 바뀌면 on_checkout(예약 번호)을 부른다.
+
+    켠 직후 처음 본 lastEnded는 이미 지난 일이라 기억만 하고 부르지 않는다.
+    서버에 못 닿으면 기다렸다 다시 묻는다 (그동안 정리 확인은 미뤄질 뿐 틀리지 않는다).
+    """
+
+    def __init__(self, server, token, room, on_checkout, every=POLL_SEC, get=None):
+        self.url = f"{server}/api/rooms/{room}/current"
+        self.headers = {"Authorization": f"Bearer {token}"}
+        self.on_checkout = on_checkout
+        self.every = every
+        self.get = get or requests.get
+        self.known = False   # 처음 한 번 읽었는지
+        self.last = None     # 마지막으로 본 끝난 예약 번호
+        self.failing = False
+
+    def poll_once(self):
+        try:
+            r = self.get(self.url, headers=self.headers, timeout=(CONNECT_TIMEOUT, TIMEOUT), allow_redirects=False)
+            if r.status_code != 200:
+                raise ValueError(f"응답 {r.status_code}")
+            ended = (r.json().get("lastEnded") or {}).get("reservationId")
+        except (requests.RequestException, ValueError) as e:
+            if not self.failing:  # 끊길 때 한 번만 알린다
+                print(f"[퇴실 확인] 서버에 예약 상태를 못 물어요, 다시 시도해요: {e}")
+            self.failing = True
+            return None
+        if self.failing:
+            print("[퇴실 확인] 서버 연결 다시 됨")
+        self.failing = False
+        if not self.known:
+            self.known, self.last = True, ended
+            return None
+        if ended is not None and ended != self.last:
+            self.last = ended
+            print(f"[퇴실 확인] 예약 {ended} 퇴실 → 방이 비면 정리 확인")
+            self.on_checkout(ended)
+            return ended
+        return None
+
+    def run_forever(self):
+        while True:
+            self.poll_once()
+            time.sleep(self.every)
+
+    def start(self):
+        threading.Thread(target=self.run_forever, daemon=True).start()
+        return self
 
 
 def make_verifier(config):
@@ -491,12 +550,25 @@ def start_room_camera(config, sensors):
     room = config.room_camera_room
     CAMERA_ROOMS[room] = time.monotonic()  # 켤 때 한 번 잡고, 이후 사진을 읽을 때마다 새로 적는다
     detector = room_camera.make_detector(config.yolo_model)
-    watcher = room_camera.RoomWatcher(room, check_objects=detector.finds_objects, room_items=config.room_items)
+    on_checkout = sensors is not None  # 서버로 보내는 중이면 "퇴실하면 확인", 아니면(연습) "30초 빈 방"
+    watcher = room_camera.RoomWatcher(room, check_objects=detector.finds_objects, room_items=config.room_items,
+                                      on_checkout=on_checkout)
     cam = room_camera.open_camera(config.room_camera)
+    send_check = None
+    if on_checkout:
+        tidy = SensorSender(config.server, config.device_token, path=f"/api/rooms/{room}/tidy-checks",
+                            drop=TIDY_DROP, name="정리 확인 전송").start()
+        send_check = tidy.push
+        CheckoutPoller(config.server, config.device_token, room,
+                       lambda rid: watcher.request_check(rid, time.monotonic())).start()
+        print("정리 확인: 퇴실하면 확인 (서버 예약 상태를 10초마다 확인)")
+    else:
+        print("정리 확인: 연습 모드 (모두 나가고 30초 뒤 확인, 서버로 안 보냄)")
     t = threading.Thread(target=room_camera.run_room_camera,
                          args=(watcher, cam, detector, camera_push(config, sensors), lambda: fresh_pir(room)),
                          kwargs={"preview": start_preview(config.preview_port, config.preview_host),
-                                 "on_frame": lambda: CAMERA_ROOMS.__setitem__(room, time.monotonic())},
+                                 "on_frame": lambda: CAMERA_ROOMS.__setitem__(room, time.monotonic()),
+                                 "send_check": send_check},
                          daemon=True)
     t.start()
     return t

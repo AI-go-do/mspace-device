@@ -1,5 +1,6 @@
 """room_camera.py 테스트. 카메라·OpenCV·모델 없이 찾은 목록을 직접 넣는다."""
 import json
+import os
 
 import numpy as np
 import pytest
@@ -7,7 +8,7 @@ import pytest
 import gateway
 import room_camera
 from room_camera import (BEAT_SEC, EMPTY_CHECK_SEC, Detection, RoomWatcher, check_message, iou, nms,
-                         parse_yolo, run_room_camera, tile_boxes, detect_tiled, cut_by_tile)
+                         parse_yolo, run_room_camera, tile_boxes, detect_tiled, cut_by_tile, tidy_body)
 
 
 def person(x=0):
@@ -293,6 +294,88 @@ def test_parse_room_items():
     assert gateway.load_config({}).room_items == {}
 
 
+def visit_then_checkout(w, after, checkout_at=None, t0=0):
+    """기준(빈 방) → 사람 5초 → 나감. checkout_at초에 서버가 퇴실을 알려 줌. 결과 목록을 돌려준다."""
+    out = []
+    w.update([], now=t0)  # 기준
+    t = t0 + 1
+    for _ in range(5):
+        w.update([person()], now=t)
+        t += 1
+    for i in range(200):
+        if checkout_at is not None and i == checkout_at:
+            w.request_check(77, t)
+        c = w.update(after, now=t)[1]
+        if c:
+            out.append(c)
+        t += 1
+    return out
+
+
+def test_checkout_mode_waits_for_server_not_30_seconds():
+    """퇴실 모드: 다 같이 나가도(화장실) 서버가 퇴실이라 하기 전엔 확인하지 않는다."""
+    w = RoomWatcher(1, on_checkout=True)
+    assert visit_then_checkout(w, [thing("cup")]) == []  # 200초 동안 비어 있어도 확인하지 않음
+
+
+def test_checkout_mode_checks_after_settle_and_tags_reservation():
+    w = RoomWatcher(1, on_checkout=True)
+    checks = visit_then_checkout(w, [thing("cup"), thing("cell phone", 600, 600)], checkout_at=50)
+    result = checks
+    assert len(result) == 1 and result[0]["reservationId"] == 77
+    assert result[0]["trash"] == {"cup": 1} and result[0]["leftItems"] == {"cell phone": 1}
+
+
+def test_checkout_mode_waits_until_room_is_empty():
+    """퇴실 알림이 와도 사람(또는 PIR)이 있으면 비고 10초 뒤에 확인한다."""
+    w = RoomWatcher(1, on_checkout=True)
+    w.update([], now=0)
+    w.request_check(5, 1)
+    assert w.update([person()], now=1)[1] is None
+    assert all(w.update([], now=2 + i, pir=1)[1] is None for i in range(20))  # PIR 있음
+    got = [w.update([], now=30 + i)[1] for i in range(15)]
+    assert [g["reservationId"] for g in got if g] == [5]
+
+
+def test_checkout_pending_expires_after_10_minutes(capsys):
+    w = RoomWatcher(1, on_checkout=True)
+    w.update([], now=0)
+    w.request_check(5, 1)
+    for t in range(1, 700, 10):
+        w.update([person()], now=t)  # 다음 예약 사람이 계속 있음
+    assert w.pending is None and "건너뜀" in capsys.readouterr().out
+
+
+def test_tidy_body_matches_server_format():
+    check = {"roomId": 1, "status": "LEFT_ITEMS", "trash": {"cup": 2}, "reservationId": 9,
+             "leftItems": {"laptop": 1, "cell phone": 1, "backpack": 1}, "checkedAt": "2026-11-06T17:00:00+09:00"}
+    body = tidy_body(check, "camera-1", event_id="e1")
+    assert body == {"eventId": "e1", "reservationId": 9, "deviceId": "camera-1", "result": "NEEDS_CLEANING",
+                    "items": ["backpack", "cell phone", "cup", "cup", "laptop"], "leftItems": ["BAG", "PHONE"],
+                    "observedAt": "2026-11-06T17:00:00+09:00"}
+    clean = tidy_body({**check, "trash": {}, "leftItems": {"laptop": 1}}, "camera-1")
+    assert clean["result"] == "CLEAN" and clean["leftItems"] == [] and clean["items"] == ["laptop"]
+
+
+def test_run_room_camera_sends_only_reservation_checks(monkeypatch):
+    sent = []
+
+    class W(RoomWatcher):
+        n = 0
+
+        def update(self, dets, now, pir=None, now_iso=None, detail=None):
+            W.n += 1
+            if W.n == 1:
+                return None, {"roomId": 1, "status": "BASELINE_SAVED", "objects": {}, "checkedAt": "t"}
+            return None, {"roomId": 1, "status": "CLEAN", "trash": {}, "leftItems": {}, "checkedAt": "t",
+                          "reservationId": 3}
+
+    with pytest.raises(StopIteration):
+        run_room_camera(W(1), FakeCam(4), FakeDetector(), lambda e: None, log_path=os.devnull,
+                        sleep=lambda s: None, send_check=sent.append)
+    assert [b["reservationId"] for b in sent] == [3] and sent[0]["result"] == "CLEAN"
+
+
 def test_check_only_once_per_visit_and_off_without_model():
     w = RoomWatcher(1)
     check = run_visit(w, [thing("cup")])
@@ -397,15 +480,38 @@ def test_start_room_camera(monkeypatch):
     monkeypatch.setattr(room_camera, "make_detector", lambda path: Det())
     monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
 
-    def fake_run(watcher, cam, detector, push, pir_now, on_frame=None, preview=None):
+    def fake_run(watcher, cam, detector, push, pir_now, on_frame=None, preview=None, send_check=None):
         gateway.LAST_PIR[3] = (1, gateway.time.monotonic())
         on_frame()
-        called.update(room=watcher.room_id, cam=cam, check=watcher.check_objects, pir=pir_now())
+        called.update(room=watcher.room_id, cam=cam, check=watcher.check_objects, pir=pir_now(),
+                      checkout=watcher.on_checkout, send=send_check)
 
     monkeypatch.setattr(room_camera, "run_room_camera", fake_run)
     gateway.start_room_camera(gateway.Config(room_camera="1", room_camera_room=3), None).join(timeout=1)
-    assert called == {"room": 3, "cam": "cam", "check": False, "pir": 1}
+    assert called == {"room": 3, "cam": "cam", "check": False, "pir": 1, "checkout": False, "send": None}
     assert gateway.camera_alive(3)
+
+
+def test_start_room_camera_uses_checkout_mode_when_sending(monkeypatch):
+    """서버로 보내는 중(sensors 있음)이면 퇴실 모드 + 예약 상태 묻기 + 결과 전송을 켠다."""
+    called, polled = {}, []
+
+    class Det:
+        finds_objects = True
+
+    monkeypatch.setattr(room_camera, "make_detector", lambda path: Det())
+    monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
+    monkeypatch.setattr(gateway.SensorSender, "start", lambda self: self)
+    monkeypatch.setattr(gateway.CheckoutPoller, "start", lambda self: polled.append(self.url) or self)
+
+    def fake_run(watcher, cam, detector, push, pir_now, on_frame=None, preview=None, send_check=None):
+        called.update(checkout=watcher.on_checkout, send=send_check is not None)
+
+    monkeypatch.setattr(room_camera, "run_room_camera", fake_run)
+    cfg = gateway.Config(room_camera="1", room_camera_room=2, server="https://x.example", device_token="t")
+    gateway.start_room_camera(cfg, object()).join(timeout=1)
+    assert called == {"checkout": True, "send": True}
+    assert polled == ["https://x.example/api/rooms/2/current"]
 
 
 def test_main_starts_room_camera(monkeypatch):
@@ -601,3 +707,58 @@ def test_preview_error_does_not_stop_counting():
                         clock=iter(range(100)).__next__, sleep=lambda s: None, preview=Broken(),
                         on_frame=lambda: seen.append(1))
     assert pushed and seen  # 화면 보기가 망가져도 인원 이벤트와 살아 있음 표시는 계속
+
+
+# ---- 퇴실 알기 (서버 예약 상태) ----
+
+class FakeResp:
+    def __init__(self, status, body=None):
+        self.status_code = status
+        self.body = body
+
+    def json(self):
+        return self.body
+
+
+def test_checkout_poller_fires_only_when_last_ended_changes(capsys):
+    answers = [FakeResp(200, {"lastEnded": {"reservationId": 4}}),   # 켜기 전에 끝난 예약: 기억만
+               FakeResp(200, {"lastEnded": {"reservationId": 4}}),
+               FakeResp(200, {"current": {"reservationId": 5}, "lastEnded": {"reservationId": 4}}),
+               FakeResp(200, {"lastEnded": {"reservationId": 5}}),   # 5번 퇴실!
+               FakeResp(200, {"lastEnded": None})]
+    fired, seen = [], []
+
+    def get(url, **kw):
+        seen.append((url, kw["headers"]["Authorization"], kw["allow_redirects"]))
+        return answers.pop(0)
+
+    p = gateway.CheckoutPoller("https://x", "tok", 2, fired.append, get=get)
+    for _ in range(5):
+        p.poll_once()
+    assert fired == [5]
+    assert seen[0] == ("https://x/api/rooms/2/current", "Bearer tok", False)
+
+
+def test_checkout_poller_survives_errors_and_warns_once(capsys):
+    def boom(url, **kw):
+        raise gateway.requests.ConnectionError("끊김")
+
+    answers = iter([FakeResp(401), FakeResp(200, {"lastEnded": {"reservationId": 1}}),
+                    FakeResp(200, {"lastEnded": {"reservationId": 2}})])
+    fired = []
+    p = gateway.CheckoutPoller("https://x", "t", 1, fired.append, get=boom)
+    p.poll_once()
+    p.poll_once()
+    p.get = lambda url, **kw: next(answers)
+    p.poll_once()  # 401
+    p.poll_once()  # 처음 성공: 기억만
+    p.poll_once()
+    out = capsys.readouterr().out
+    assert out.count("못 물어요") == 1 and "다시 됨" in out
+    assert fired == [2]
+
+
+def test_tidy_sender_drops_404_and_409():
+    s = gateway.SensorSender("https://x", "t", path="/api/rooms/1/tidy-checks", drop=gateway.TIDY_DROP)
+    assert s.url == "https://x/api/rooms/1/tidy-checks"
+    assert 404 in s.drop and 409 in s.drop and 404 not in gateway.SENSOR_DROP

@@ -8,13 +8,14 @@
        occupied = 사람 1명 이상 (또는 우노 PIR이 있음)  ← "하나라도 있음이면 있음" (FR-DEV-103)
        sources  = {"camera": true, "people": 2, "pir": ...}  ← core는 sources를 그대로 기록만 한다
      그래서 core를 바꾸지 않고도 "몇 명"이 서버에 남는다.
-  2. 정리 확인: 사람이 있다가 모두 나가고 30초가 지나면, 빈 방에서 물건(컵·병·노트북·가방 …)을 찾는다.
+  2. 정리 확인: 서버가 "예약이 끝났다"고 하면(퇴실 모드) 또는 연습 모드에서 모두 나가고 30초가 지나면,
+     빈 방에서 물건(컵·병·노트북·가방 …)을 찾는다. 퇴실 모드 결과는 core POST /api/rooms/{id}/tidy-checks로 보낸다.
      처음 빈 방(깨끗한 상태)에서 본 물건과 종류별 개수로 비교해서 "늘어난 물건"만 남은 물건으로 본다.
      자리는 보지 않는다 (리모컨을 조금 옮겨도 잘못 잡지 않게). 방 비품(ROOM_ITEMS, 예: remote:1)은
      그 개수까지 있어도 없어도 괜찮다고 본다 (바구니에 넣어 안 보이거나 책상에 나와 있어도 됨).
      기준을 저장하면 "깨끗한 방 기준 저장"을 알리고, 기준이 없으면 결과 대신 지금 모습을 기준으로 저장한다.
      기준·정리 확인 때만 화면을 4조각으로 나눠 자세히 본다(멀리 있는 작은 물건). 평소 인원 세기는 한 장 그대로.
-     결과는 화면과 room_checks.jsonl(글자만)에 남긴다. core에 받을 곳이 생기면 그쪽으로 보낸다.
+     결과는 화면과 room_checks.jsonl(글자만)에도 남긴다.
 
 개인정보
   사진·영상은 저장하지도, 보내지도 않는다. 프레임은 메모리에서 세고 바로 버린다. 남는 건 숫자와 물건 이름뿐.
@@ -60,7 +61,9 @@ KOREAN = {"bottle": "병", "cup": "컵", "wine glass": "잔", "bowl": "그릇", 
 
 BEAT_SEC = 10          # 바뀌지 않아도 10초마다 보낸다 (core는 1분 안 오면 끊김)
 SMOOTH_FRAMES = 5      # 최근 5번 센 값의 가운데 값을 쓴다 (한 번 놓치거나 잘못 세서 숫자가 튀지 않게)
-EMPTY_CHECK_SEC = 30   # 모두 나가고 30초 뒤에 정리 확인 (문 닫고 나가는 시간)
+EMPTY_CHECK_SEC = 30   # (연습 모드) 모두 나가고 30초 뒤에 정리 확인 (문 닫고 나가는 시간)
+SETTLE_SEC = 10        # (퇴실 모드) 퇴실 뒤 방이 10초 비어 있으면 확인 (나가는 사람이 찍히지 않게)
+PENDING_MAX_SEC = 600  # (퇴실 모드) 퇴실 뒤 10분 안에 방이 비지 않으면 그 예약 확인은 포기 (다음 사람 물건을 탓하지 않게)
 
 
 @dataclass(frozen=True)
@@ -240,8 +243,11 @@ def describe(items):
 class RoomWatcher:
     """찾은 목록을 받아서 (1) core에 보낼 재실 이벤트 (2) 정리 확인 결과를 만든다."""
 
-    def __init__(self, room_id, check_objects=True, now=None, room_items=None):
+    def __init__(self, room_id, check_objects=True, now=None, room_items=None, on_checkout=False):
         self.room_id = room_id
+        # on_checkout: 서버가 "예약이 끝났다"고 알려 줄 때만 확인한다 (request_check). 아니면 30초 빈 방 (연습 모드)
+        self.on_checkout = on_checkout
+        self.pending = None          # (예약 번호, 알게 된 시각): 퇴실했는데 아직 확인 못 한 예약
         self.room_items = dict(room_items or {})  # 방 비품: {"remote": 1} = 리모컨 0~1개는 괜찮음
         self.check_objects = check_objects
         self.counts = deque(maxlen=SMOOTH_FRAMES)
@@ -282,6 +288,8 @@ class RoomWatcher:
                 self.empty_since = now
             if self.baseline is None and not self.had_people and self.check_objects:
                 check = self.save_baseline(detail() if detail else dets, now_iso)  # 처음 켰을 때 빈 방 = 깨끗한 기준
+            elif self.on_checkout:
+                check = self.checkout_check(dets, now, now_iso, detail)
             elif self.had_people and now - self.empty_since >= EMPTY_CHECK_SEC:
                 seen = detail() if detail and self.check_objects else dets
                 if self.baseline is None and self.check_objects:
@@ -290,7 +298,29 @@ class RoomWatcher:
                 else:
                     check = self.check(seen, now_iso)
                 self.had_people = False
+        if self.on_checkout and self.pending and now - self.pending[1] >= PENDING_MAX_SEC:
+            print(f"정리 확인 {self.room_id}번 방: 예약 {self.pending[0]} 퇴실 뒤 10분 동안 방이 비지 않아 건너뜀")
+            self.pending = None
         return event, check
+
+    def request_check(self, reservation_id, now):
+        """서버에서 예약이 끝났다는 걸 알았을 때 부른다. 방이 비면(사람 0, PIR 없음) 확인한다."""
+        self.pending = (reservation_id, now)
+
+    def checkout_check(self, dets, now, now_iso, detail):
+        if self.pending is None or now - self.empty_since < SETTLE_SEC:
+            return None
+        reservation_id, _ = self.pending
+        self.pending = None
+        self.had_people = False
+        if not self.check_objects:
+            return None
+        seen = detail() if detail else dets
+        if self.baseline is None:
+            return self.save_baseline(seen, now_iso, reason="기준이 없어 지금 모습을 기준으로 저장")
+        check = self.check(seen, now_iso)
+        check["reservationId"] = reservation_id
+        return check
 
     def event(self, people, pir, now_iso):
         sources = {"camera": True, "people": people}
@@ -353,6 +383,31 @@ class RoomWatcher:
 
 
 
+# 서버(core #81, docs api 6-3)가 받는 "두고 간 귀중품". 여기 없는 물건(노트북 등)은 items에만 넣는다
+SERVER_LEFT_ITEMS = {"backpack": "BAG", "handbag": "BAG", "suitcase": "BAG", "cell phone": "PHONE"}
+MAX_SERVER_ITEMS = 20
+
+
+def tidy_body(check, device_id, event_id=None):
+    """정리 확인 결과를 서버 POST /api/rooms/{roomId}/tidy-checks 형식으로 바꾼다.
+
+    장치 결과 3가지 → 서버 2가지: 치울 것이 있으면 NEEDS_CLEANING(자동 신고), 아니면 CLEAN.
+    두고 간 물건은 따로 leftItems (가방·휴대폰만 서버가 받는다).
+    """
+    found = {**check["leftItems"], **check["trash"]}
+    items = [label for label, n in sorted(found.items()) for _ in range(n)][:MAX_SERVER_ITEMS]
+    left = sorted({SERVER_LEFT_ITEMS[k] for k in check["leftItems"] if k in SERVER_LEFT_ITEMS})
+    return {
+        "eventId": event_id or str(uuid.uuid4()),
+        "reservationId": check["reservationId"],
+        "deviceId": device_id,
+        "result": "NEEDS_CLEANING" if check["trash"] else "CLEAN",
+        "items": items,
+        "leftItems": left,
+        "observedAt": check["checkedAt"],
+    }
+
+
 def check_message(check):
     if check["status"] == "BASELINE_SAVED":
         n = sum(check["objects"].values())
@@ -402,10 +457,11 @@ def safe_log(log_path, record):
 
 def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path="room_checks.jsonl",
                     every=1.0, clock=time.monotonic, sleep=time.sleep, on_frame=lambda: None, preview=None,
-                    warn_every=10.0):
+                    warn_every=10.0, send_check=None):
     """카메라에서 1초마다 한 장씩 세서 watcher에 넣는다. 사진은 저장하지 않는다.
 
     on_frame: 사진을 잘 읽을 때마다 부른다 (게이트웨이가 카메라가 살아 있는지 본다).
+    send_check: 퇴실 모드에서 예약에 붙은 정리 확인 결과를 서버로 보낸다 (tidy_body 형식).
     """
     print(f"방 안 카메라 켜짐: {watcher.room_id}번 방")
     last_warn = None
@@ -434,6 +490,8 @@ def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path
                 if check:
                     print(check_message(check))
                     safe_log(log_path, check)
+                    if send_check is not None and "reservationId" in check:
+                        send_check(tidy_body(check, f"camera-{watcher.room_id}"))
             except Exception as e:  # 한 장에서 오류가 나도 카메라 스레드는 계속 돈다
                 print("방 안 카메라 처리 오류(계속 돌아요):", repr(e))
         sleep(max(0.0, every - (clock() - started)))

@@ -59,3 +59,12 @@ def test_preview_off_by_default(monkeypatch):
     started = []
     monkeypatch.setattr(preview.Preview, "start", lambda self: started.append(self.port) or self)
     assert gateway.start_preview(8080).port == 8080 and started == [8080]
+
+
+def test_preview_port_in_use_does_not_stop_camera(monkeypatch, capsys):
+    def busy(self):
+        raise OSError("Address already in use")
+
+    monkeypatch.setattr(preview.Preview, "start", busy)
+    assert gateway.start_preview(8080) is None
+    assert "다른 번호로" in capsys.readouterr().out

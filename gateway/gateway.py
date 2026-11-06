@@ -464,7 +464,11 @@ def start_preview(port):
     if not port:
         return None
     import preview
-    return preview.Preview(port).start()
+    try:
+        return preview.Preview(port).start()
+    except OSError as e:  # 다른 프로그램이 이미 그 번호를 씀: 화면 보기만 끄고 카메라는 계속
+        print(f"화면 보기를 못 켰어요 (포트 {port}: {e}). PREVIEW_PORT를 다른 번호로 바꿔 보세요 (예: 8090)")
+        return None
 
 
 def start_room_camera(config, sensors):

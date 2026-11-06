@@ -262,3 +262,21 @@ def test_main_starts_room_camera(monkeypatch):
     with pytest.raises(StopIteration):
         gateway.main(gateway.Config(port="/dev/fake", dry_run=True, room_camera="1"))
     assert started == ["1"]
+
+
+def test_run_room_camera_keeps_going_after_error(tmp_path):
+    class Flaky(FakeDetector):
+        calls = 0
+
+        def detect(self, frame):
+            Flaky.calls += 1
+            if Flaky.calls == 1:
+                raise RuntimeError("모델 오류")
+            return super().detect(frame)
+
+    pushed = []
+    clock = iter(range(1000))
+    with pytest.raises(StopIteration):
+        run_room_camera(RoomWatcher(2), FakeCam(6), Flaky(), pushed.append, pir_now=lambda: 0,
+                        log_path=tmp_path / "log.jsonl", clock=lambda: next(clock), sleep=lambda s: None)
+    assert Flaky.calls >= 2 and pushed  # 첫 장 오류 뒤에도 계속 셈

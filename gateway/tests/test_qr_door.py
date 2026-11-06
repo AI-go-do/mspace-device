@@ -140,3 +140,21 @@ def test_main_starts_qr_and_replies_go_to_uno(monkeypatch):
         gateway.main(gateway.Config(port="/dev/fake", dry_run=True, qr_camera="0"))
     assert started == {"camera": "0"}
     assert ser.written == [b"OK\n"]
+
+
+def test_run_camera_keeps_going_after_error(monkeypatch):
+    class Boom(FakeDetector):
+        calls = 0
+
+        def detectAndDecode(self, frame):
+            Boom.calls += 1
+            if Boom.calls == 1:
+                raise RuntimeError("깨진 사진")
+            return super().detectAndDecode(frame)
+
+    replies = []
+    door = QrDoor(FakeVerifier({"result": "OPENED"}), 1)
+    cam = FakeCam([(True, "x"), (True, "123456")])
+    with pytest.raises(StopIteration):
+        run_camera(door, 0, replies.append, frames=(cam, Boom()))
+    assert replies == [b"OK\n"]  # 첫 장 오류 뒤에도 다음 QR을 처리함

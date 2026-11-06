@@ -268,14 +268,17 @@ def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path
         started = clock()
         ok, frame = cam.read()
         if ok:
-            dets = detector.detect(frame)
-            del frame  # 사진은 바로 버린다
-            event, check = watcher.update(dets, clock(), pir_now())
-            if event:
-                print(f"인원 {watcher.room_id}번 방: {event['sources']['people']}명")
-                push(event)
-            if check:
-                print(check_message(check))
-                with open(log_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(check, ensure_ascii=False) + "\n")
+            try:
+                dets = detector.detect(frame)
+                del frame  # 사진은 바로 버린다
+                event, check = watcher.update(dets, clock(), pir_now())
+                if event:
+                    print(f"인원 {watcher.room_id}번 방: {event['sources']['people']}명")
+                    push(event)
+                if check:
+                    print(check_message(check))
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(check, ensure_ascii=False) + "\n")
+            except Exception as e:  # 한 장에서 오류가 나도 카메라 스레드는 계속 돈다
+                print("방 안 카메라 처리 오류(계속 돌아요):", repr(e))
         sleep(max(0.0, every - (clock() - started)))

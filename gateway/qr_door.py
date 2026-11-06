@@ -91,7 +91,10 @@ def run_camera(door, device, on_reply, frames=None):
         if not ok:
             time.sleep(0.5)  # 카메라가 잠깐 끊겨도 멈추지 않는다
             continue
-        text, _, _ = detector.detectAndDecode(frame)
-        reply = door.handle(text)
-        if reply:
-            on_reply(reply)
+        try:
+            text, _, _ = detector.detectAndDecode(frame)
+            reply = door.handle(text)
+            if reply:
+                on_reply(reply)
+        except Exception as e:  # 한 장에서 오류가 나도 QR 스레드는 계속 돈다
+            print("QR 처리 오류(계속 돌아요):", repr(e))

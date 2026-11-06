@@ -22,6 +22,7 @@ SEND_SENSORS=1이면 core POST /api/sensor-events로 보낸다 (FR-DEV-101). 키
   handle_line()           : 우노가 보낸 한 줄을 받아 우노에 돌려줄 답(OK/NO)을 만든다
   main()                  : 위 부품을 조립해서 시리얼을 계속 읽는다
   qr_door.py (QR_CAMERA)  : 문 앞 웹캠으로 QR 입실. 같은 확인기로 묻고 결과를 우노 LED로 보낸다
+  room_camera.py (ROOM_CAMERA) : 방 안 웹캠으로 인원 세기 + 퇴실 뒤 정리 확인. 사진은 저장·전송 안 함
 
 설치:  pip3 install pyserial requests
 실행:  DRY_RUN=1 python3 gateway.py
@@ -29,6 +30,7 @@ SEND_SENSORS=1이면 core POST /api/sensor-events로 보낸다 (FR-DEV-101). 키
        (http://는 localhost 테스트에서만. 토큰이 실리므로 원격 서버는 https)
        재실 센서도 보내려면 앞에 SEND_SENSORS=1 을 붙인다 (core에 /api/sensor-events가 올라간 뒤)
        QR 입실도 켜려면 QR_CAMERA=0 (웹캠 번호)을 붙인다. 방 번호는 QR_ROOM_ID (기본 1)
+       인원 세기를 켜려면 ROOM_CAMERA=1 (방 안 웹캠 번호), YOLO_MODEL=yolov8n.onnx. 방 번호는 ROOM_CAMERA_ROOM (기본 1)
 """
 from __future__ import annotations
 
@@ -71,6 +73,9 @@ class Config:
     send_sensors: bool = False             # True면 재실 이벤트도 core로 보낸다 (core에 센서 API가 올라간 뒤 켠다)
     qr_camera: str | None = None           # QR 입실용 웹캠 (0, 1 또는 /dev/video0). 비우면 QR 끔
     qr_room_id: int = 1                    # QR 입실을 받는 방 번호
+    room_camera: str | None = None         # 방 안 웹캠 (인원 세기·정리 확인). 비우면 끔
+    room_camera_room: int = 1              # 방 안 웹캠이 있는 방 번호
+    yolo_model: str | None = None          # YOLO ONNX 모델 파일. 없으면 사람만 세는 기본 방식(HOG)
 
 
 def find_port():
@@ -93,6 +98,10 @@ def load_config(env=None):
         send_sensors=env.get("SEND_SENSORS") == "1",
         qr_camera=env.get("QR_CAMERA") or None,
         qr_room_id=int(env["QR_ROOM_ID"]) if env.get("QR_ROOM_ID", "").isdigit() else Config.qr_room_id,
+        room_camera=env.get("ROOM_CAMERA") or None,
+        room_camera_room=(int(env["ROOM_CAMERA_ROOM"]) if env.get("ROOM_CAMERA_ROOM", "").isdigit()
+                          else Config.room_camera_room),
+        yolo_model=env.get("YOLO_MODEL") or None,
     )
 
 
@@ -327,12 +336,20 @@ def handle_occupancy(event, verifier, sensors=None):
         return None
     body = occupancy_body(event)
     state = "있음" if body["occupied"] else "없음"
+    LAST_PIR[body["roomId"]] = event["pir"]  # 방 안 카메라가 있으면 카메라 이벤트에 같이 싣는다
+    if body["roomId"] in CAMERA_ROOMS:  # 이 방은 카메라가 PIR까지 합쳐서 보낸다 (두 장치가 번갈아 다른 값을 보내지 않게)
+        print(f"재실 {body['roomId']}번 방 PIR: {state} (카메라 이벤트에 합쳐 보냄)")
+        return None
     print(f"재실 {body['roomId']}번 방: {state} (pir={event['pir']}, 조도={event['light']})")
     if isinstance(verifier, DryRunVerifier):  # 연습 모드에서는 core에 보낼 모양을 그대로 보여 준다
         print("[DRY_RUN] POST /api/sensor-events", json.dumps(body, ensure_ascii=False))
     elif sensors is not None:
         sensors.push(body)
     return None
+
+
+LAST_PIR = {}        # 방 번호 → 우노 PIR 마지막 값 (0/1)
+CAMERA_ROOMS = set()  # 방 안 카메라가 재실을 맡은 방 번호
 
 
 # sensorType별 처리기 표. 새 센서 줄은 여기에 한 줄씩 추가한다
@@ -374,7 +391,8 @@ def main(config=None):
         raise SystemExit("원격 서버는 https://로만 연결해요 (장치 토큰이 실리므로). http://는 localhost 테스트에서만 써요.")
     print("연결:", config.port, "| 서버:", "DRY_RUN" if config.dry_run else config.server,
           "| 재실 전송:", "켬" if config.send_sensors and not config.dry_run else "끔",
-          "| QR 입실:", f"켬 (카메라 {config.qr_camera}, {config.qr_room_id}번 방)" if config.qr_camera else "끔")
+          "| QR 입실:", f"켬 (카메라 {config.qr_camera}, {config.qr_room_id}번 방)" if config.qr_camera else "끔",
+          "| 인원 세기:", f"켬 (카메라 {config.room_camera}, {config.room_camera_room}번 방)" if config.room_camera else "끔")
     verifier = make_verifier(config)
     sensors = None
     if config.send_sensors and not config.dry_run:
@@ -389,12 +407,40 @@ def main(config=None):
 
     if config.qr_camera:
         start_qr(config, verifier, reply_to_uno)
+    if config.room_camera:
+        start_room_camera(config, sensors)
 
     while True:
         line = ser.readline().decode(errors="ignore")  # line = 우노가 보낸 한 줄 (글자로 변환, 깨진 글자는 무시)
         reply = handle_line(line, verifier, sensors)
         if reply:
             reply_to_uno(reply)
+
+
+def camera_push(config, sensors):
+    """방 안 카메라 이벤트를 어디로 보낼지 정한다: DRY_RUN이면 화면, SEND_SENSORS면 core, 아니면 화면만."""
+    def push(body):
+        if sensors is not None:
+            sensors.push(body)
+        else:
+            prefix = "[DRY_RUN]" if config.dry_run else "[보내지 않음, SEND_SENSORS=1로 켜기]"
+            print(prefix, "POST /api/sensor-events", json.dumps(body, ensure_ascii=False))
+    return push
+
+
+def start_room_camera(config, sensors):
+    """방 안 웹캠 인원 세기·정리 확인을 뒤에서(스레드) 켠다."""
+    import room_camera  # 켤 때만 불러온다 (OpenCV는 젯슨에만 있으면 됨)
+    room = config.room_camera_room
+    CAMERA_ROOMS.add(room)
+    detector = room_camera.make_detector(config.yolo_model)
+    watcher = room_camera.RoomWatcher(room, check_objects=detector.finds_objects)
+    cam = room_camera.open_camera(config.room_camera)
+    t = threading.Thread(target=room_camera.run_room_camera,
+                         args=(watcher, cam, detector, camera_push(config, sensors), lambda: LAST_PIR.get(room)),
+                         daemon=True)
+    t.start()
+    return t
 
 
 def start_qr(config, verifier, on_reply):

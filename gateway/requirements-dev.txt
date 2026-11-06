@@ -2,3 +2,4 @@
 -r requirements.txt
 pytest
 pytest-cov
+numpy  # room_camera.parse_yolo 테스트용 (젯슨에는 OpenCV와 함께 깔려 있음)

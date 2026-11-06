@@ -112,6 +112,29 @@ DRY_RUN=1 QR_CAMERA=0 python3 gateway/gateway.py               # 서버 없이: 
 - **사진·영상은 저장하지도 보내지도 않아요.** 읽은 글자만 써요
 - OpenCV(`cv2`)는 젯슨에 기본으로 깔려 있어요. 없다고 나오면 `sudo apt install python3-opencv`
 
+### 방 안 카메라 (인원 세기 · 정리 확인, 시연용)
+
+방 안을 비추는 두 번째 웹캠으로 **몇 명 있는지** 세고, 사람이 다 나가면 **방이 깨끗한지** 확인해요.
+
+```bash
+# 처음 한 번: 사람·물건 찾는 모델 받기 (yolov8n.onnx, 약 12MB)
+pip3 install ultralytics && yolo export model=yolov8n.pt format=onnx
+mv yolov8n.onnx gateway/
+
+set -a; . ./.env; set +a
+ROOM_CAMERA=1 YOLO_MODEL=gateway/yolov8n.onnx SEND_SENSORS=1 python3 gateway/gateway.py
+# 문 앞 QR과 같이: QR_CAMERA=0 ROOM_CAMERA=1 ...
+# 서버 없이 화면 출력만: DRY_RUN=1 ROOM_CAMERA=1 YOLO_MODEL=gateway/yolov8n.onnx python3 gateway/gateway.py
+```
+
+- 인원 수: 1초마다 사람 수를 세고, 최근 5번의 가운데 값을 써요(한 번 잘못 센 건 무시). 바뀌면 바로, 아니면 10초마다 기존 재실 API(`kind: OCCUPANCY`)로 보내요. `sources`에 `"people": 2`가 들어가서 **core를 안 바꿔도** 돼요
+- 그 방은 카메라가 재실을 대신 보내요. 우노 PIR 값은 버리지 않고 `occupied`(사람 수 > 0 **또는** PIR)와 `sources.pir`에 합쳐요
+- 정리 확인: 사람이 있다가 다 나가고 30초가 지나면 한 번 봐요. 처음 본 빈 방과 비교해서 새로 생긴 컵·병 같은 쓰레기는 `NEEDS_CLEANING`, 노트북·가방·폰 같은 두고 간 물건은 `LEFT_ITEMS`, 없으면 `CLEAN`이에요
+- 결과는 화면에 출력하고 `room_checks.jsonl`에 한 줄씩 남겨요. core에 결과 받는 API가 생기면 거기로 보내면 돼요
+- 방 번호는 `ROOM_CAMERA_ROOM`(기본 1), 카메라 번호는 `ROOM_CAMERA`(보통 1, 문 앞이 0)
+- 모델이 없으면 OpenCV 기본 사람 찾기(HOG)로 사람 수만 세요. 정리 확인은 꺼져요
+- **사진·영상은 저장하지도 보내지도 않아요.** 한 장 보고 바로 지우고, 숫자와 물건 이름만 남겨요
+
 ### 젯슨에서 올리기 (맥 IDE가 안 될 때)
 
 ```bash
@@ -197,6 +220,7 @@ echo ch341 | sudo tee /etc/modules-load.d/ch341.conf
 | `handle_occupancy()` | 우노 재실 줄을 core 형식(`kind: OCCUPANCY`, `occupied`, `sources`, `observedAt`)으로 바꿈 |
 | `main()` | 위 부품을 조립하고 시리얼을 계속 읽음 |
 | `qr_door.py` | 문 앞 웹캠 QR 입실 (`QR_CAMERA`). `QrDoor`가 QR 글자 → 같은 확인기 → OK/NO, `run_camera()`가 카메라에서 QR을 찾음 |
+| `room_camera.py` | 방 안 웹캠 (`ROOM_CAMERA`). `RoomWatcher`가 사람 수 → 재실 이벤트, 빈 방이 되면 정리 확인. `YoloDetector`(모델 있을 때) / `HogPersonDetector`(없을 때) |
 
 ### 테스트
 

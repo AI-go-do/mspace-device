@@ -1,0 +1,24 @@
+# 젯슨이 켜지면 게이트웨이를 자동으로 켜는 systemd 서비스.
+# 직접 고치지 말고 deploy/install-service.sh 로 설치한다 (@USER@, @REPO@, @PYTHON@을 채워 줌).
+[Unit]
+Description=M-SPACE gateway (keypad, QR, room camera)
+Wants=network-online.target tailscaled.service
+After=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@REPO@
+# 설정은 gateway.env, 토큰은 .env (둘 다 저장소에 안 올라감). 앞의 - 는 "파일이 없어도 괜찮음"
+EnvironmentFile=-@REPO@/gateway.env
+EnvironmentFile=-@REPO@/.env
+ExecStart=@PYTHON@ -u gateway/gateway.py
+# 꺼지면(카메라·USB가 잠깐 빠져도) 5초 뒤 다시 켠다
+Restart=always
+RestartSec=5
+# 화면 출력은 그동안처럼 gateway.log에 이어 쓴다: tail -f gateway.log
+StandardOutput=append:@REPO@/gateway.log
+StandardError=append:@REPO@/gateway.log
+
+[Install]
+WantedBy=multi-user.target

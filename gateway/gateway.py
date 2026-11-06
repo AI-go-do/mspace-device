@@ -22,6 +22,7 @@ SEND_SENSORS=1이면 core POST /api/sensor-events로 보낸다 (FR-DEV-101). 키
   handle_line()           : 우노가 보낸 한 줄을 받아 우노에 돌려줄 답(OK/NO)을 만든다
   main()                  : 위 부품을 조립해서 시리얼을 계속 읽는다
   qr_door.py (QR_CAMERA)  : 문 앞 웹캠으로 QR 입실. 같은 확인기로 묻고 결과를 우노 LED로 보낸다
+  room_camera.py (ROOM_CAMERA) : 방 안 웹캠으로 인원 세기 + 퇴실 뒤 정리 확인. 사진은 저장·전송 안 함
 
 설치:  pip3 install pyserial requests
 실행:  DRY_RUN=1 python3 gateway.py
@@ -29,6 +30,7 @@ SEND_SENSORS=1이면 core POST /api/sensor-events로 보낸다 (FR-DEV-101). 키
        (http://는 localhost 테스트에서만. 토큰이 실리므로 원격 서버는 https)
        재실 센서도 보내려면 앞에 SEND_SENSORS=1 을 붙인다 (core에 /api/sensor-events가 올라간 뒤)
        QR 입실도 켜려면 QR_CAMERA=0 (웹캠 번호)을 붙인다. 방 번호는 QR_ROOM_ID (기본 1)
+       인원 세기를 켜려면 ROOM_CAMERA=1 (방 안 웹캠 번호), YOLO_MODEL=yolov8n.onnx. 방 번호는 ROOM_CAMERA_ROOM (기본 1)
 """
 from __future__ import annotations
 
@@ -37,11 +39,12 @@ import ipaddress
 import json
 import os
 import re
+import subprocess
 import threading
 import time
 import uuid
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
@@ -71,6 +74,13 @@ class Config:
     send_sensors: bool = False             # True면 재실 이벤트도 core로 보낸다 (core에 센서 API가 올라간 뒤 켠다)
     qr_camera: str | None = None           # QR 입실용 웹캠 (0, 1 또는 /dev/video0). 비우면 QR 끔
     qr_room_id: int = 1                    # QR 입실을 받는 방 번호
+    room_camera: str | None = None         # 방 안 웹캠 (인원 세기·정리 확인). 비우면 끔
+    room_camera_room: int = 1              # 방 안 웹캠이 있는 방 번호
+    preview_port: int | None = None        # 방 안 카메라 화면을 브라우저로 보기 (예: 8090). 없으면 끔
+    preview_host: str = "127.0.0.1"        # 화면 보기를 열 주소. 맥에서 보려면 Tailscale IP (전체 공개 0.0.0.0은 피함)
+    yolo_model: str | None = None          # YOLO ONNX 모델 파일. 없으면 사람만 세는 기본 방식(HOG)
+    room_items: dict = field(default_factory=dict)  # 방 비품 {"remote": 1}: 그 개수까지는 있어도 없어도 괜찮음
+    baseline_file: str | None = "room_baseline.json"  # 깨끗한 방 기준을 적어 두는 파일. BASELINE_FILE=off면 메모리에만
 
 
 def find_port():
@@ -80,6 +90,11 @@ def find_port():
         if found:
             return found[0]
     return None
+
+
+def _is_number(text):
+    """0-9로만 된 글자인지 (², ١ 같은 숫자 모양 글자는 int()가 못 바꿔서 뺀다)."""
+    return text.isascii() and text.isdigit()
 
 
 def load_config(env=None):
@@ -92,8 +107,27 @@ def load_config(env=None):
         port=env.get("PORT") or find_port(),
         send_sensors=env.get("SEND_SENSORS") == "1",
         qr_camera=env.get("QR_CAMERA") or None,
-        qr_room_id=int(env["QR_ROOM_ID"]) if env.get("QR_ROOM_ID", "").isdigit() else Config.qr_room_id,
+        qr_room_id=int(env["QR_ROOM_ID"]) if _is_number(env.get("QR_ROOM_ID", "")) else Config.qr_room_id,
+        room_camera=env.get("ROOM_CAMERA") or None,
+        room_camera_room=(int(env["ROOM_CAMERA_ROOM"]) if _is_number(env.get("ROOM_CAMERA_ROOM", ""))
+                          else Config.room_camera_room),
+        yolo_model=env.get("YOLO_MODEL") or None,
+        preview_port=int(env["PREVIEW_PORT"]) if _is_number(env.get("PREVIEW_PORT", "")) else None,
+        preview_host=env.get("PREVIEW_HOST") or Config.preview_host,
+        room_items=parse_room_items(env.get("ROOM_ITEMS", "")),
+        baseline_file=(None if env.get("BASELINE_FILE") == "off"
+                       else env.get("BASELINE_FILE") or Config.baseline_file),
     )
+
+
+def parse_room_items(text):
+    """ROOM_ITEMS="remote:1,book:3" → {"remote": 1, "book": 3}. 이상한 조각은 건너뛴다."""
+    items = {}
+    for part in text.split(","):
+        label, _, n = part.strip().partition(":")
+        if label.strip() and _is_number(n.strip()):
+            items[label.strip()] = int(n.strip())
+    return items
 
 
 def is_loopback(url):
@@ -178,8 +212,10 @@ class SensorSender:
     - 키패드 응답이 늦어지지 않게 별도 스레드에서 보낸다
     """
 
-    def __init__(self, server, token):
-        self.url = server + "/api/sensor-events"
+    def __init__(self, server, token, path="/api/sensor-events", drop=SENSOR_DROP, name="센서 전송"):
+        self.url = server + path
+        self.drop = drop
+        self.name = name
         self.headers = {"Authorization": f"Bearer {token}"}
         self.queue = deque(maxlen=SENSOR_QUEUE_MAX)  # 꽉 차면 append가 가장 오래된 것을 밀어낸다
         self.lock = threading.Lock()
@@ -203,10 +239,10 @@ class SensorSender:
             status = r.status_code
         except requests.RequestException as e:
             status = None
-            print(f"[센서 전송] 연결 실패, 다시 보내요: {e.__class__.__name__}")
-        if status is not None and (200 <= status < 300 or status in SENSOR_DROP):
-            if status in SENSOR_DROP:
-                print(f"[센서 전송] 서버가 이 이벤트를 거부함({status}). 형식 문제라 이것만 버려요")
+            print(f"[{self.name}] 연결 실패, 다시 보내요: {e.__class__.__name__}")
+        if status is not None and (200 <= status < 300 or status in self.drop):
+            if status in self.drop:
+                print(f"[{self.name}] 서버가 이것을 거부함({status}). 다시 보내도 같아서 이것만 버려요")
             with self.lock:
                 if self.queue and self.queue[0] is body:
                     self.queue.popleft()
@@ -214,7 +250,7 @@ class SensorSender:
             return 0
         if status is not None:
             hint = {401: "토큰 확인", 403: "토큰·방 번호 확인", 404: "서버에 센서 API가 아직 없음"}.get(status, "서버 문제")
-            print(f"[센서 전송] 막힘({status}, {hint}). {self.backoff}초 뒤 다시, 대기 {len(self.queue)}개")
+            print(f"[{self.name}] 막힘({status}, {hint}). {self.backoff}초 뒤 다시, 대기 {len(self.queue)}개")
         wait = self.backoff
         self.backoff = min(self.backoff * 2, RETRY_MAX)
         return wait
@@ -232,6 +268,63 @@ class SensorSender:
         threading.Thread(target=self.run_forever, daemon=True).start()
         return self
 
+
+
+# ---------- 퇴실 알기 (정리 확인을 예약이 끝났을 때만 하려고) ----------
+
+POLL_SEC = 10  # 10초마다 서버에 "지금 이 방 예약 상태"를 묻는다 (core #81 GET /api/rooms/{id}/current)
+TIDY_DROP = SENSOR_DROP | {404}  # 404 = 다른 방 예약이거나 서버에 아직 API가 없음 → 다시 보내도 같다
+
+
+class CheckoutPoller:
+    """서버에 방의 예약 상태를 물어서, 방금 끝난 예약(lastEnded)이 바뀌면 on_checkout(예약 번호)을 부른다.
+
+    켠 직후 처음 본 lastEnded는 이미 지난 일이라 기억만 하고 부르지 않는다.
+    서버에 못 닿으면 기다렸다 다시 묻는다 (그동안 정리 확인은 미뤄질 뿐 틀리지 않는다).
+    """
+
+    def __init__(self, server, token, room, on_checkout, every=POLL_SEC, get=None):
+        self.url = f"{server}/api/rooms/{room}/current"
+        self.headers = {"Authorization": f"Bearer {token}"}
+        self.on_checkout = on_checkout
+        self.every = every
+        self.get = get or requests.get
+        self.known = False   # 처음 한 번 읽었는지
+        self.last = None     # 마지막으로 본 끝난 예약 번호
+        self.failing = False
+
+    def poll_once(self):
+        try:
+            r = self.get(self.url, headers=self.headers, timeout=(CONNECT_TIMEOUT, TIMEOUT), allow_redirects=False)
+            if r.status_code != 200:
+                raise ValueError(f"응답 {r.status_code}")
+            ended = (r.json().get("lastEnded") or {}).get("reservationId")
+        except (requests.RequestException, ValueError) as e:
+            if not self.failing:  # 끊길 때 한 번만 알린다
+                print(f"[퇴실 확인] 서버에 예약 상태를 못 물어요, 다시 시도해요: {e}")
+            self.failing = True
+            return None
+        if self.failing:
+            print("[퇴실 확인] 서버 연결 다시 됨")
+        self.failing = False
+        if not self.known:
+            self.known, self.last = True, ended
+            return None
+        if ended is not None and ended != self.last:
+            self.last = ended
+            print(f"[퇴실 확인] 예약 {ended} 퇴실 → 방이 비면 정리 확인")
+            self.on_checkout(ended)
+            return ended
+        return None
+
+    def run_forever(self):
+        while True:
+            self.poll_once()
+            time.sleep(self.every)
+
+    def start(self):
+        threading.Thread(target=self.run_forever, daemon=True).start()
+        return self
 
 
 def make_verifier(config):
@@ -327,12 +420,36 @@ def handle_occupancy(event, verifier, sensors=None):
         return None
     body = occupancy_body(event)
     state = "있음" if body["occupied"] else "없음"
+    LAST_PIR[body["roomId"]] = (event["pir"], time.monotonic())  # 방 안 카메라가 있으면 카메라 이벤트에 같이 싣는다
+    if camera_alive(body["roomId"]):  # 이 방은 카메라가 PIR까지 합쳐서 보낸다 (두 장치가 번갈아 다른 값을 보내지 않게)
+        print(f"재실 {body['roomId']}번 방 PIR: {state} (카메라 이벤트에 합쳐 보냄)")
+        return None
     print(f"재실 {body['roomId']}번 방: {state} (pir={event['pir']}, 조도={event['light']})")
     if isinstance(verifier, DryRunVerifier):  # 연습 모드에서는 core에 보낼 모양을 그대로 보여 준다
         print("[DRY_RUN] POST /api/sensor-events", json.dumps(body, ensure_ascii=False))
     elif sensors is not None:
         sensors.push(body)
     return None
+
+
+LAST_PIR = {}      # 방 번호 → (우노 PIR 마지막 값 0/1, 받은 시각)
+CAMERA_ROOMS = {}  # 방 번호 → 방 안 카메라가 마지막으로 사진을 잘 읽은 시각
+PIR_FRESH_SEC = 30     # 우노 PIR이 이보다 오래되면 안 쓴다 (우노가 멈췄는데 "있음"으로 고정되지 않게)
+CAMERA_FRESH_SEC = 30  # 카메라가 이보다 오래 사진을 못 읽으면 우노가 다시 재실을 보낸다 (core 끊김 판정 1분보다 짧게)
+
+
+def camera_alive(room, now=None):
+    """이 방의 카메라가 요즘 사진을 잘 읽고 있으면 True (그동안은 카메라가 PIR까지 합쳐 보낸다)."""
+    seen = CAMERA_ROOMS.get(room)
+    return seen is not None and (time.monotonic() if now is None else now) - seen < CAMERA_FRESH_SEC
+
+
+def fresh_pir(room, now=None):
+    """우노 PIR 마지막 값. PIR_FRESH_SEC 넘게 새 값이 없으면 None."""
+    got = LAST_PIR.get(room)
+    if got is None or (time.monotonic() if now is None else now) - got[1] >= PIR_FRESH_SEC:
+        return None
+    return got[0]
 
 
 # sensorType별 처리기 표. 새 센서 줄은 여기에 한 줄씩 추가한다
@@ -366,30 +483,41 @@ def handle_line(line, verifier, sensors=None):
 
 def main(config=None):
     config = config or load_config()
-    if not config.port:
+    cameras_only = not config.port and bool(config.qr_camera or config.room_camera)
+    if not config.port and not cameras_only:
         raise SystemExit("우노를 못 찾았어요. USB 연결을 확인하거나 PORT=/dev/ttyACM0 처럼 지정하세요.")
     if not config.dry_run and not config.device_token:
         raise SystemExit("DEVICE_TOKEN이 없어요. .env에 넣고 불러오거나, 서버 없이 테스트하려면 DRY_RUN=1 로 실행하세요.")
     if not config.dry_run and not is_safe_server(config.server):
         raise SystemExit("원격 서버는 https://로만 연결해요 (장치 토큰이 실리므로). http://는 localhost 테스트에서만 써요.")
-    print("연결:", config.port, "| 서버:", "DRY_RUN" if config.dry_run else config.server,
+    print("연결:", config.port or "우노 없음 (카메라만)", "| 서버:", "DRY_RUN" if config.dry_run else config.server,
           "| 재실 전송:", "켬" if config.send_sensors and not config.dry_run else "끔",
-          "| QR 입실:", f"켬 (카메라 {config.qr_camera}, {config.qr_room_id}번 방)" if config.qr_camera else "끔")
+          "| QR 입실:", f"켬 (카메라 {config.qr_camera}, {config.qr_room_id}번 방)" if config.qr_camera else "끔",
+          "| 인원 세기:", f"켬 (카메라 {config.room_camera}, {config.room_camera_room}번 방)" if config.room_camera else "끔")
     verifier = make_verifier(config)
     sensors = None
     if config.send_sensors and not config.dry_run:
         sensors = SensorSender(config.server, config.device_token).start()
-    ser = serial.Serial(config.port, 115200, timeout=1)  # ser = 우노와 연결된 시리얼 통로. 115200은 우노 코드와 같은 속도
-    time.sleep(2)  # 우노는 시리얼 연결 시 재부팅되므로 켜질 때까지 기다린다
+    ser = None
+    if not cameras_only:
+        ser = serial.Serial(config.port, 115200, timeout=1)  # ser = 우노와 연결된 시리얼 통로. 115200은 우노 코드와 같은 속도
+        time.sleep(2)  # 우노는 시리얼 연결 시 재부팅되므로 켜질 때까지 기다린다
     write_lock = threading.Lock()  # 키패드 답과 QR 답이 동시에 우노로 가도 줄이 섞이지 않게
 
     def reply_to_uno(reply):
+        if ser is None:  # 우노 없이 카메라만 시험할 때는 LED 대신 화면에
+            print("우노 LED 대신:", "초록(열림)" if reply == b"OK\n" else "빨강(거부)")
+            return
         with write_lock:
             ser.write(reply)  # 우노에 결과를 돌려줘서 LED를 켜게 한다
 
     if config.qr_camera:
         start_qr(config, verifier, reply_to_uno)
+    if config.room_camera:
+        start_room_camera(config, sensors)
 
+    while ser is None:  # 우노가 없으면 카메라 스레드만 돌게 두고 기다린다 (Ctrl+C로 끝)
+        time.sleep(1)
     while True:
         line = ser.readline().decode(errors="ignore")  # line = 우노가 보낸 한 줄 (글자로 변환, 깨진 글자는 무시)
         reply = handle_line(line, verifier, sensors)
@@ -397,11 +525,88 @@ def main(config=None):
             reply_to_uno(reply)
 
 
+def camera_push(config, sensors):
+    """방 안 카메라 이벤트를 어디로 보낼지 정한다: DRY_RUN이면 화면, SEND_SENSORS면 core, 아니면 화면만."""
+    def push(body):
+        if sensors is not None:
+            sensors.push(body)
+        else:
+            prefix = "[DRY_RUN]" if config.dry_run else "[보내지 않음, SEND_SENSORS=1로 켜기]"
+            print(prefix, "POST /api/sensor-events", json.dumps(body, ensure_ascii=False))
+    return push
+
+
+def tailscale_ip(run=subprocess.run, tries=12, wait=5.0, sleep=time.sleep):
+    """`tailscale ip -4`로 내 Tailscale 주소를 찾는다. 막 켜졌을 땐 Tailscale이 늦게 붙어서 몇 번 기다린다."""
+    for i in range(tries):
+        try:
+            out = run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=10)
+            ip = out.stdout.strip().splitlines()[0] if out.returncode == 0 and out.stdout.strip() else ""
+            if ip:
+                return ip
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if i < tries - 1:
+            sleep(wait)
+    return None
+
+
+def start_preview(port, host="127.0.0.1", find_tailscale=tailscale_ip):
+    """PREVIEW_PORT가 있으면 브라우저로 카메라 화면을 보는 작은 서버를 켠다.
+
+    PREVIEW_HOST=tailscale 이면 Tailscale 주소를 알아서 찾는다 (자동 실행 서비스에서 $(tailscale ip -4)를 못 써서).
+    """
+    if not port:
+        return None
+    if host == "tailscale":
+        found = find_tailscale()
+        if not found:
+            print("Tailscale 주소를 못 찾아서 화면 보기는 젯슨 안에서만 열어요 (127.0.0.1)")
+        host = found or "127.0.0.1"
+    import preview
+    try:
+        return preview.Preview(port, host=host).start()
+    except (OSError, OverflowError) as e:  # 번호가 겹치거나 범위 밖: 화면 보기만 끄고 카메라는 계속
+        print(f"화면 보기를 못 켰어요 (포트 {port}: {e}). PREVIEW_PORT를 다른 번호로 바꿔 보세요 (예: 8090)")
+        return None
+
+
+def start_room_camera(config, sensors):
+    """방 안 웹캠 인원 세기·정리 확인을 뒤에서(스레드) 켠다."""
+    import room_camera  # 켤 때만 불러온다 (OpenCV는 젯슨에만 있으면 됨)
+    room = config.room_camera_room
+    CAMERA_ROOMS[room] = time.monotonic()  # 켤 때 한 번 잡고, 이후 사진을 읽을 때마다 새로 적는다
+    detector = room_camera.make_detector(config.yolo_model)
+    on_checkout = sensors is not None  # 서버로 보내는 중이면 "퇴실하면 확인", 아니면(연습) "30초 빈 방"
+    watcher = room_camera.RoomWatcher(room, check_objects=detector.finds_objects, room_items=config.room_items,
+                                      on_checkout=on_checkout, baseline_path=config.baseline_file)
+    cam = room_camera.open_camera(config.room_camera)
+    send_check = None
+    if on_checkout:
+        tidy = SensorSender(config.server, config.device_token, path=f"/api/rooms/{room}/tidy-checks",
+                            drop=TIDY_DROP, name="정리 확인 전송").start()
+        send_check = tidy.push
+        CheckoutPoller(config.server, config.device_token, room,
+                       lambda rid: watcher.request_check(rid, time.monotonic())).start()
+        print("정리 확인: 퇴실하면 확인 (서버 예약 상태를 10초마다 확인)")
+    else:
+        print("정리 확인: 연습 모드 (모두 나가고 30초 뒤 확인, 서버로 안 보냄)")
+    t = threading.Thread(target=room_camera.run_room_camera,
+                         args=(watcher, cam, detector, camera_push(config, sensors), lambda: fresh_pir(room)),
+                         kwargs={"preview": start_preview(config.preview_port, config.preview_host),
+                                 "on_frame": lambda: CAMERA_ROOMS.__setitem__(room, time.monotonic()),
+                                 "send_check": send_check},
+                         daemon=True)
+    t.start()
+    return t
+
+
 def start_qr(config, verifier, on_reply):
     """문 앞 웹캠 QR 입실을 뒤에서(스레드) 켠다. 키패드와 같은 확인기, 같은 우노 LED를 쓴다."""
-    from qr_door import QrDoor, run_camera  # QR을 켤 때만 불러온다
-    door = QrDoor(verifier, config.qr_room_id)
-    t = threading.Thread(target=run_camera, args=(door, config.qr_camera, on_reply), daemon=True)
+    import qr_door  # QR을 켤 때만 불러온다
+    door = qr_door.QrDoor(verifier, config.qr_room_id)
+    frames = qr_door.open_camera(config.qr_camera)  # 스레드 전에 연다: 카메라가 없으면 바로 멈추고 알려줌
+    t = threading.Thread(target=qr_door.run_camera, args=(door, config.qr_camera, on_reply, frames), daemon=True)
     t.start()
     return t
 

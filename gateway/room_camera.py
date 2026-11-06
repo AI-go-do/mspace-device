@@ -1,0 +1,537 @@
+"""방 안 웹캠으로 인원 세기 + 퇴실 뒤 정리 확인 (젯슨)
+
+8차 회의(11/6) 멘토 의견: "받은 카메라로 몇 명인지 세 보라", "방이 깨끗한지(관리자 관점)".
+
+하는 일
+  1. 인원 세기: 1초마다 사람 수를 세서, 바뀌면 바로 + 바뀌지 않아도 10초마다 core에 보낸다.
+     지금 core 재실 API(POST /api/sensor-events, kind OCCUPANCY)를 그대로 쓴다.
+       occupied = 사람 1명 이상 (또는 우노 PIR이 있음)  ← "하나라도 있음이면 있음" (FR-DEV-103)
+       sources  = {"camera": true, "people": 2, "pir": ...}  ← core는 sources를 그대로 기록만 한다
+     그래서 core를 바꾸지 않고도 "몇 명"이 서버에 남는다.
+  2. 정리 확인: 서버가 "예약이 끝났다"고 하면(퇴실 모드) 또는 연습 모드에서 모두 나가고 30초가 지나면,
+     빈 방에서 물건(컵·병·노트북·가방 …)을 찾는다. 퇴실 모드 결과는 core POST /api/rooms/{id}/tidy-checks로 보낸다.
+     처음 빈 방(깨끗한 상태)에서 본 물건과 종류별 개수로 비교해서 "늘어난 물건"만 남은 물건으로 본다.
+     자리는 보지 않는다 (리모컨을 조금 옮겨도 잘못 잡지 않게). 방 비품(ROOM_ITEMS, 예: remote:1)은
+     그 개수까지 있어도 없어도 괜찮다고 본다 (바구니에 넣어 안 보이거나 책상에 나와 있어도 됨).
+     기준을 저장하면 "깨끗한 방 기준 저장"을 알리고, 기준이 없으면 결과 대신 지금 모습을 기준으로 저장한다.
+     기준·정리 확인 때만 화면을 4조각으로 나눠 자세히 본다(멀리 있는 작은 물건). 평소 인원 세기는 한 장 그대로.
+     결과는 화면과 room_checks.jsonl(글자만)에도 남긴다.
+
+개인정보
+  사진·영상은 저장하지도, 보내지도 않는다. 프레임은 메모리에서 세고 바로 버린다. 남는 건 숫자와 물건 이름뿐.
+
+모델
+  YOLO_MODEL=yolov8n.onnx 처럼 ONNX 모델 파일을 주면 사람 + 물건 80종을 찾는다 (OpenCV DNN, 젯슨 기본 설치).
+  모델이 없으면 OpenCV 기본 사람 찾기(HOG)로 사람만 센다. 정확도가 낮고, 정리 확인은 꺼진다.
+"""
+from __future__ import annotations
+
+import json
+import os
+import time
+import uuid
+from collections import deque
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+
+KST = timezone(timedelta(hours=9))
+
+# YOLO(COCO) 80종 이름. 모델 출력 번호 순서와 같아야 한다
+COCO_NAMES = [
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
+    "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
+    "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+    "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
+    "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+    "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+    "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard",
+    "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase",
+    "scissors", "teddy bear", "hair drier", "toothbrush",
+]
+
+# 정리 확인에서 볼 물건. 쓰레기(먹고 남긴 것)와 두고 간 물건으로 나눠서 알려 준다
+TRASH = {"bottle", "cup", "wine glass", "bowl", "fork", "knife", "spoon", "banana", "apple", "sandwich",
+         "orange", "pizza", "donut", "cake", "hot dog"}
+BELONGINGS = {"backpack", "handbag", "suitcase", "umbrella", "laptop", "cell phone", "book", "mouse",
+              "keyboard", "remote"}
+KOREAN = {"bottle": "병", "cup": "컵", "wine glass": "잔", "bowl": "그릇", "fork": "포크", "knife": "칼",
+          "spoon": "숟가락", "banana": "바나나", "apple": "사과", "sandwich": "샌드위치", "orange": "귤",
+          "pizza": "피자", "donut": "도넛", "cake": "케이크", "hot dog": "핫도그", "backpack": "가방",
+          "handbag": "손가방", "suitcase": "캐리어", "umbrella": "우산", "laptop": "노트북",
+          "cell phone": "휴대폰", "book": "책", "mouse": "마우스", "keyboard": "키보드", "remote": "리모컨"}
+
+BEAT_SEC = 10          # 바뀌지 않아도 10초마다 보낸다 (core는 1분 안 오면 끊김)
+SMOOTH_FRAMES = 5      # 최근 5번 센 값의 가운데 값을 쓴다 (한 번 놓치거나 잘못 세서 숫자가 튀지 않게)
+EMPTY_CHECK_SEC = 30   # (연습 모드) 모두 나가고 30초 뒤에 정리 확인 (문 닫고 나가는 시간)
+SETTLE_SEC = 10        # (퇴실 모드) 퇴실 뒤 방이 10초 비어 있으면 확인 (나가는 사람이 찍히지 않게)
+PENDING_MAX_SEC = 600  # (퇴실 모드) 퇴실 뒤 10분 안에 방이 비지 않으면 그 예약 확인은 포기 (다음 사람 물건을 탓하지 않게)
+
+
+@dataclass(frozen=True)
+class Detection:
+    label: str
+    score: float
+    box: tuple  # (x, y, w, h) 픽셀
+
+
+# ---------- 모델 출력 풀기 (OpenCV 없이 테스트할 수 있게 떼어 둠) ----------
+
+def iou(a, b):
+    """두 상자가 얼마나 겹치는지 (0~1)."""
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    w = max(0.0, min(ax + aw, bx + bw) - max(ax, bx))
+    h = max(0.0, min(ay + ah, by + bh) - max(ay, by))
+    inter = w * h
+    union = aw * ah + bw * bh - inter
+    return inter / union if union > 0 else 0.0
+
+
+PERSON_NMS = 0.6  # 사람끼리는 붙어 앉아 많이 겹치므로 더 많이 겹쳐야 같은 사람으로 본다
+
+
+def nms(dets, threshold=0.45, person_threshold=PERSON_NMS):
+    """같은 물건을 여러 상자로 잡은 걸 하나로 줄인다 (점수 높은 것만 남김).
+
+    사람은 옆 사람과 상자가 많이 겹쳐도 다른 사람일 수 있어서 기준을 더 느슨하게 둔다.
+    """
+    kept = []
+    for d in sorted(dets, key=lambda d: d.score, reverse=True):
+        limit = person_threshold if d.label == "person" else threshold
+        if all(k.label != d.label or iou(k.box, d.box) < limit for k in kept):
+            kept.append(d)
+    return kept
+
+
+PERSON_CONF = 0.4   # 사람은 이 점수 넘어야 센다 (잘못 세면 재실이 틀림)
+OBJECT_CONF = 0.3   # 물건은 조금 낮춰 작은 물건도 잡는다. 늘 있는 엉뚱한 것은 빈 방 기준과 비교할 때 빠짐
+
+
+def parse_yolo(output, scale_x, scale_y, conf=OBJECT_CONF, person_conf=PERSON_CONF):
+    """YOLOv8 ONNX 출력 (1, 84, N)을 Detection 목록으로 바꾼다.
+
+    84 = 상자 4개 값(가운데 x, 가운데 y, 너비, 높이) + 80종 점수. scale은 모델 입력(640) → 원래 화면 크기 비율.
+    점수 기준은 사람(person_conf)과 물건(conf)을 따로 둔다.
+    """
+    import numpy as np
+    rows = np.asarray(output)[0].T  # (N, 84)
+    scores = rows[:, 4:]
+    best = scores.argmax(axis=1)
+    best_score = scores[np.arange(len(rows)), best]
+    dets = []
+    for i in np.nonzero(best_score >= min(conf, person_conf))[0]:
+        label = COCO_NAMES[int(best[i])]
+        if best_score[i] < (person_conf if label == "person" else conf):
+            continue
+        cx, cy, w, h = rows[i, :4]
+        box = (float((cx - w / 2) * scale_x), float((cy - h / 2) * scale_y), float(w * scale_x), float(h * scale_y))
+        dets.append(Detection(label, float(best_score[i]), box))
+    return nms(dets)
+
+
+TILE_FRAC = 0.55  # 4조각 하나의 크기 (화면 가로·세로의 55%, 가운데가 조금씩 겹침)
+
+
+def tile_boxes(width, height, frac=TILE_FRAC):
+    """화면을 네 귀퉁이 조각으로 나눈 (x, y, w, h). 가운데가 겹쳐서 경계에 걸친 물건도 잘리지 않는다."""
+    tw, th = int(width * frac), int(height * frac)
+    return [(0, 0, tw, th), (width - tw, 0, tw, th), (0, height - th, tw, th), (width - tw, height - th, tw, th)]
+
+
+def detect_tiled(detect, frame):
+    """한 장 전체 + 4조각을 각각 찾아서 합친다. 조각은 덜 줄어들어서 멀리 있는 작은 물건이 보인다.
+
+    퇴실 뒤 정리 확인처럼 가끔 한 번만 쓴다 (한 장보다 5배 느림).
+    """
+    h, w = frame.shape[:2]
+    whole = list(detect(frame))
+    extra = []
+    for x, y, tw, th in tile_boxes(w, h):
+        for d in detect(frame[y:y + th, x:x + tw]):
+            bx, by, bw, bh = d.box
+            if cut_by_tile(d.box, x, y, tw, th, w, h):
+                continue  # 조각 경계에 잘린 큰 물건(반쪽 노트북 등)은 한 장 전체 결과를 믿는다
+            box = (bx + x, by + y, bw, bh)
+            if any(o.label == d.label and inside(box, o.box) for o in whole + extra):
+                continue  # 이미 찾은 같은 물건
+            extra.append(Detection(d.label, d.score, box))
+    return nms(whole + extra)
+
+
+def cut_by_tile(box, x, y, tw, th, width, height, margin=3):
+    """조각 안 상자가 화면 가장자리가 아닌 조각 경계에 닿았는지 (물건이 잘렸다는 뜻)."""
+    bx, by, bw, bh = box
+    return ((bx <= margin and x > 0) or (by <= margin and y > 0)
+            or (bx + bw >= tw - margin and x + tw < width) or (by + bh >= th - margin and y + th < height))
+
+
+def inside(a, b, ratio=0.5):
+    """a 상자가 b 상자 안에 절반 넘게 들어가 있는지."""
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    ix = max(0.0, min(ax + aw, bx + bw) - max(ax, bx))
+    iy = max(0.0, min(ay + ah, by + bh) - max(ay, by))
+    small = min(aw * ah, bw * bh)
+    return small > 0 and ix * iy / small >= ratio
+
+
+# ---------- 찾는 기계 두 가지 (같은 detect(frame) 모양) ----------
+
+class YoloDetector:
+    """YOLOv8 ONNX 모델로 사람 + 물건 80종을 찾는다.
+
+    onnxruntime이 있으면 그걸로 돌린다(젯슨 기본 OpenCV 4.6은 YOLOv8 모델을 못 읽음).
+    없으면 OpenCV DNN(4.7 이상)으로 돌린다. 앞처리(크기 맞추기)는 둘 다 OpenCV로 한다.
+    """
+    finds_objects = True
+
+    def __init__(self, model_path, size=640):
+        import cv2
+        self.cv2 = cv2
+        self.size = size
+        self.session = self.net = None
+        try:
+            import onnxruntime as ort
+            providers = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider")
+                         if p in ort.get_available_providers()]
+            self.session = ort.InferenceSession(model_path, providers=providers)
+            self.input_name = self.session.get_inputs()[0].name
+            print("인원 세기: onnxruntime", providers[0])
+        except ImportError:
+            self.net = cv2.dnn.readNetFromONNX(model_path)
+            try:  # 젯슨 GPU(CUDA)를 쓸 수 있으면 쓴다. 안 되면 CPU
+                self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
+                self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
+            except Exception:  # noqa: BLE001 - OpenCV 빌드마다 다름
+                pass
+            print("인원 세기: OpenCV DNN", cv2.__version__)
+
+    def detect(self, frame):
+        h, w = frame.shape[:2]
+        blob = self.cv2.dnn.blobFromImage(frame, 1 / 255.0, (self.size, self.size), swapRB=True)
+        if self.session is not None:
+            output = self.session.run(None, {self.input_name: blob})[0]
+        else:
+            self.net.setInput(blob)
+            output = self.net.forward()
+        return parse_yolo(output, w / self.size, h / self.size)
+
+    def detect_detailed(self, frame):
+        return detect_tiled(self.detect, frame)
+
+
+class HogPersonDetector:
+    """모델 파일이 없을 때 쓰는 OpenCV 기본 사람 찾기. 서 있는 사람에 맞춰져 있어 앉은 사람은 놓칠 수 있다."""
+    finds_objects = False
+
+    def __init__(self):
+        import cv2
+        self.hog = cv2.HOGDescriptor()
+        self.hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+
+    def detect(self, frame):
+        boxes, weights = self.hog.detectMultiScale(frame, winStride=(8, 8))
+        return [Detection("person", float(s), tuple(float(v) for v in b)) for b, s in zip(boxes, weights)]
+
+
+# ---------- 판단 (카메라·모델 없이 테스트할 수 있게 떼어 둠) ----------
+
+def describe(items):
+    """{"cup": 2, "laptop": 1} → "컵 2, 노트북 1"."""
+    return ", ".join(f"{KOREAN.get(k, k)} {n}" for k, n in sorted(items.items()))
+
+
+class RoomWatcher:
+    """찾은 목록을 받아서 (1) core에 보낼 재실 이벤트 (2) 정리 확인 결과를 만든다."""
+
+    def __init__(self, room_id, check_objects=True, now=None, room_items=None, on_checkout=False,
+                 baseline_path=None):
+        self.room_id = room_id
+        self.baseline_path = baseline_path  # 기준을 파일에 적어 두면 껐다 켜도 남는다. None이면 메모리에만
+        # on_checkout: 서버가 "예약이 끝났다"고 알려 줄 때만 확인한다 (request_check). 아니면 30초 빈 방 (연습 모드)
+        self.on_checkout = on_checkout
+        self.pending = None          # (예약 번호, 알게 된 시각): 퇴실했는데 아직 확인 못 한 예약
+        self.room_items = dict(room_items or {})  # 방 비품: {"remote": 1} = 리모컨 0~1개는 괜찮음
+        self.check_objects = check_objects
+        self.counts = deque(maxlen=SMOOTH_FRAMES)
+        self.sent_people = None      # 마지막으로 보낸 사람 수
+        self.sent_occupied = None    # 마지막으로 보낸 재실 (사람 수 + PIR)
+        self.sent_at = None          # 마지막으로 보낸 시각
+        self.had_people = False      # 정리 확인 전에 사람이 있었는지
+        self.empty_since = None      # 0명이 된 시각
+        self.baseline = None         # 깨끗한 빈 방에서 본 물건 종류별 개수 (처음 빈 방 또는 깨끗한 정리 확인 뒤)
+        self.load_baseline()
+
+    def load_baseline(self):
+        """저장해 둔 기준 파일이 있으면 읽는다. 없거나 깨졌거나 다른 방 것이면 새로 찍는다."""
+        if not self.baseline_path or not os.path.exists(self.baseline_path):
+            return
+        try:
+            with open(self.baseline_path, encoding="utf-8") as f:
+                saved = json.load(f)
+            objects = saved["objects"]
+            if saved.get("roomId") != self.room_id or not isinstance(objects, dict):
+                print(f"기준 파일이 {self.room_id}번 방 것이 아니라 새로 찍어요: {self.baseline_path}")
+                return
+            self.baseline = {str(k): int(v) for k, v in objects.items()}
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            print(f"기준 파일을 못 읽어서 새로 찍어요 ({self.baseline_path}: {e})")
+            return
+        print(f"저장된 깨끗한 방 기준 불러옴 {self.room_id}번 방: 물건 {sum(self.baseline.values())}개"
+              f"{' (' + describe(self.baseline) + ')' if self.baseline else ''} ({saved.get('savedAt', '시각 모름')})")
+
+    def write_baseline(self, now_iso):
+        """기준을 파일에 적는다. 임시 파일에 쓰고 바꿔치기해서, 쓰다가 꺼져도 파일이 깨지지 않게 한다."""
+        if not self.baseline_path:
+            return
+        record = {"roomId": self.room_id, "objects": self.baseline,
+                  "savedAt": now_iso or datetime.now(KST).isoformat(timespec="seconds")}
+        tmp = self.baseline_path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(record, f, ensure_ascii=False)
+            os.replace(tmp, self.baseline_path)
+        except OSError as e:  # 못 써도 카메라는 계속 (메모리엔 있음)
+            print(f"기준 파일을 못 썼어요 ({self.baseline_path}: {e}). 다시 켜면 기준을 새로 찍어요")
+
+    def people(self, dets):
+        return sum(1 for d in dets if d.label == "person")
+
+    def update(self, dets, now, pir=None, now_iso=None, detail=None):
+        """한 번 센 결과를 넣는다. 보낼 재실 이벤트(dict)와 정리 확인 결과(dict)를 (event, check)로 돌려준다.
+
+        detail: 기준 저장·정리 확인 때만 부르는 "자세히 찾기"(4조각). 없으면 dets를 그대로 쓴다.
+        check는 정리 확인 결과이거나, 깨끗한 방 기준을 저장했다는 알림(status BASELINE_SAVED)이다.
+        """
+        self.counts.append(self.people(dets))
+        people = sorted(self.counts)[len(self.counts) // 2]  # 가운데 값
+
+        event = None
+        occupied = people > 0 or bool(pir)
+        if (people != self.sent_people or occupied != self.sent_occupied  # PIR만 바뀌어도 바로 보낸다
+                or self.sent_at is None or now - self.sent_at >= BEAT_SEC):
+            event = self.event(people, pir, now_iso)
+            self.sent_people, self.sent_occupied, self.sent_at = people, occupied, now
+
+        check = None
+        if people > 0:
+            self.had_people, self.empty_since = True, None
+        elif pir:
+            # 카메라엔 안 보여도 PIR이 움직임을 느끼면(마지막 움직임 뒤 2분) 아직 누가 있을 수 있다
+            self.empty_since = None
+        else:
+            if self.empty_since is None:
+                self.empty_since = now
+            if self.baseline is None and not self.had_people and self.check_objects:
+                check = self.save_baseline(detail() if detail else dets, now_iso)  # 처음 켰을 때 빈 방 = 깨끗한 기준
+            elif self.on_checkout:
+                check = self.checkout_check(dets, now, now_iso, detail)
+            elif self.had_people and now - self.empty_since >= EMPTY_CHECK_SEC:
+                seen = detail() if detail and self.check_objects else dets
+                if self.baseline is None and self.check_objects:
+                    # 기준 없이 비교하면 전부 "새 물건"이 된다. 결과를 내지 않고 지금 모습을 기준으로 삼는다
+                    check = self.save_baseline(seen, now_iso, reason="기준이 없어 지금 모습을 기준으로 저장")
+                else:
+                    check = self.check(seen, now_iso)
+                self.had_people = False
+        if self.on_checkout and self.pending and now - self.pending[1] >= PENDING_MAX_SEC:
+            print(f"정리 확인 {self.room_id}번 방: 예약 {self.pending[0]} 퇴실 뒤 10분 동안 방이 비지 않아 건너뜀")
+            self.pending = None
+        return event, check
+
+    def request_check(self, reservation_id, now):
+        """서버에서 예약이 끝났다는 걸 알았을 때 부른다. 방이 비면(사람 0, PIR 없음) 확인한다."""
+        self.pending = (reservation_id, now)
+
+    def checkout_check(self, dets, now, now_iso, detail):
+        if self.pending is None or now - self.empty_since < SETTLE_SEC:
+            return None
+        reservation_id, _ = self.pending
+        self.pending = None
+        self.had_people = False
+        if not self.check_objects:
+            return None
+        seen = detail() if detail else dets
+        if self.baseline is None:
+            return self.save_baseline(seen, now_iso, reason="기준이 없어 지금 모습을 기준으로 저장")
+        check = self.check(seen, now_iso)
+        check["reservationId"] = reservation_id
+        return check
+
+    def event(self, people, pir, now_iso):
+        sources = {"camera": True, "people": people}
+        if pir is not None:
+            sources["pir"] = bool(pir)
+        return {
+            "eventId": str(uuid.uuid4()),
+            "roomId": self.room_id,
+            "deviceId": f"camera-{self.room_id}",
+            "kind": "OCCUPANCY",
+            "occupied": people > 0 or bool(pir),  # 하나라도 있음이면 있음
+            "sources": sources,
+            "observedAt": now_iso or datetime.now(KST).isoformat(timespec="seconds"),
+        }
+
+    def save_baseline(self, dets, now_iso, reason=None):
+        items = self.count(dets)
+        self.baseline = dict(items)
+        self.write_baseline(now_iso)
+        note = {
+            "roomId": self.room_id,
+            "status": "BASELINE_SAVED",
+            "objects": items,
+            "checkedAt": now_iso or datetime.now(KST).isoformat(timespec="seconds"),
+        }
+        if reason:
+            note["reason"] = reason
+        return note
+
+    def objects(self, dets):
+        return [d for d in dets if d.label in TRASH or d.label in BELONGINGS]
+
+    def count(self, dets):
+        """정리 확인에 쓰는 물건만 종류별로 센다. {"cup": 2, "remote": 1}"""
+        items = {}
+        for d in self.objects(dets):
+            items[d.label] = items.get(d.label, 0) + 1
+        return items
+
+    def check(self, dets, now_iso):
+        """깨끗할 때보다 늘어난 물건만 골라 결과를 만든다 (종류별 개수, 자리는 보지 않음)."""
+        if not self.check_objects:
+            return None
+        base = self.baseline or {}
+        now_items = self.count(dets)
+        trash, left = {}, {}
+        for label, n in now_items.items():
+            extra = n - max(base.get(label, 0), self.room_items.get(label, 0))  # 방 비품은 그 개수까지 괜찮음
+            if extra > 0:
+                (trash if label in TRASH else left)[label] = extra
+        status = "LEFT_ITEMS" if left else "NEEDS_CLEANING" if trash else "CLEAN"
+        if status == "CLEAN":  # 깨끗하면 기준을 넓혀 둔다 (줄어든 건 기준에서 빼지 않음: 다시 나와도 괜찮게)
+            widened = {k: max(base.get(k, 0), now_items.get(k, 0)) for k in set(base) | set(now_items)}
+            if widened != base:
+                self.baseline = widened
+                self.write_baseline(now_iso)
+        return {
+            "roomId": self.room_id,
+            "status": status,
+            "trash": trash,
+            "leftItems": left,
+            "checkedAt": now_iso or datetime.now(KST).isoformat(timespec="seconds"),
+        }
+
+
+
+# 서버(core #81, docs api 6-3)가 받는 "두고 간 귀중품". 여기 없는 물건(책 등)은 items에만 넣는다
+SERVER_LEFT_ITEMS = {"backpack": "BAG", "handbag": "BAG", "suitcase": "BAG", "cell phone": "PHONE", "laptop": "LAPTOP"}
+MAX_SERVER_ITEMS = 20
+
+
+def tidy_body(check, device_id, event_id=None):
+    """정리 확인 결과를 서버 POST /api/rooms/{roomId}/tidy-checks 형식으로 바꾼다.
+
+    장치 결과 3가지 → 서버 2가지: 치울 것이 있으면 NEEDS_CLEANING(자동 신고), 아니면 CLEAN.
+    두고 간 물건은 따로 leftItems (가방·휴대폰·노트북만 서버가 받는다).
+    """
+    found = {**check["leftItems"], **check["trash"]}
+    items = [label for label, n in sorted(found.items()) for _ in range(n)][:MAX_SERVER_ITEMS]
+    left = sorted({SERVER_LEFT_ITEMS[k] for k in check["leftItems"] if k in SERVER_LEFT_ITEMS})
+    return {
+        "eventId": event_id or str(uuid.uuid4()),
+        "reservationId": check["reservationId"],
+        "deviceId": device_id,
+        "result": "NEEDS_CLEANING" if check["trash"] else "CLEAN",
+        "items": items,
+        "leftItems": left,
+        "observedAt": check["checkedAt"],
+    }
+
+
+def check_message(check):
+    if check["status"] == "BASELINE_SAVED":
+        n = sum(check["objects"].values())
+        listed = f" ({describe(check['objects'])})" if n else ""
+        why = f" - {check['reason']}" if check.get("reason") else ""
+        return f"깨끗한 방 기준 저장 {check['roomId']}번 방: 물건 {n}개{listed}{why}"
+    if check["status"] == "CLEAN":
+        return f"정리 확인 {check['roomId']}번 방: 깨끗함"
+    parts = []
+    if check["leftItems"]:
+        parts.append("두고 간 물건 " + describe(check["leftItems"]))
+    if check["trash"]:
+        parts.append("치울 것 " + describe(check["trash"]))
+    return f"정리 확인 {check['roomId']}번 방: " + " / ".join(parts)
+
+
+# ---------- 카메라 루프 ----------
+
+def open_camera(device):
+    import cv2
+    cam = cv2.VideoCapture(int(device) if str(device).isdigit() else device)
+    if not cam.isOpened():
+        raise SystemExit(f"방 안 웹캠({device})을 열 수 없어요. ls /dev/video* 로 번호를 확인하세요.")
+    return cam
+
+
+def make_detector(model_path):
+    if model_path:
+        print("인원 세기: YOLO 모델", model_path)
+        return YoloDetector(model_path)
+    print("인원 세기: 모델 파일이 없어 OpenCV 기본 사람 찾기(HOG)를 써요. 정리 확인은 꺼져요 (YOLO_MODEL 참고)")
+    return HogPersonDetector()
+
+
+def write_log(log_path, record):
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def safe_log(log_path, record):
+    """기록 파일에 못 써도(권한·디스크) 카메라는 계속 돈다."""
+    try:
+        write_log(log_path, record)
+    except OSError as e:
+        print("기록 파일에 못 썼어요(계속 돌아요):", log_path, repr(e))
+
+
+def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path="room_checks.jsonl",
+                    every=1.0, clock=time.monotonic, sleep=time.sleep, on_frame=lambda: None, preview=None,
+                    warn_every=10.0, send_check=None):
+    """카메라에서 1초마다 한 장씩 세서 watcher에 넣는다. 사진은 저장하지 않는다.
+
+    on_frame: 사진을 잘 읽을 때마다 부른다 (게이트웨이가 카메라가 살아 있는지 본다).
+    send_check: 퇴실 모드에서 예약에 붙은 정리 확인 결과를 서버로 보낸다 (tidy_body 형식).
+    """
+    print(f"방 안 카메라 켜짐: {watcher.room_id}번 방")
+    last_warn = None
+    while True:
+        started = clock()
+        ok, frame = cam.read()
+        if not ok and (last_warn is None or started - last_warn >= warn_every):
+            print(f"방 안 카메라 {watcher.room_id}번 방: 사진을 못 읽어요 (USB 연결 확인)")
+            last_warn = started
+        if ok:
+            try:
+                dets = detector.detect(frame)
+                if preview is not None:  # 화면 보기를 켰을 때만 상자를 그려 메모리에 한 장 둔다
+                    try:
+                        preview.update(frame, dets, watcher.people(dets))
+                    except Exception as e:  # 화면 보기 오류는 인원 세기를 막지 않는다
+                        print("화면 보기 오류(카메라는 계속 돌아요):", repr(e))
+                detailed = getattr(detector, "detect_detailed", None)
+                detail = (lambda: detailed(frame)) if detailed else None  # 기준·정리 확인 때만 불림
+                event, check = watcher.update(dets, clock(), pir_now(), detail=detail)
+                del frame, detail  # 사진은 바로 버린다
+                on_frame()  # 찾기까지 성공한 장만 "카메라 살아 있음"으로 친다
+                if event:
+                    print(f"인원 {watcher.room_id}번 방: {event['sources']['people']}명")
+                    push(event)
+                if check:
+                    print(check_message(check))
+                    safe_log(log_path, check)
+                    if send_check is not None and "reservationId" in check:
+                        send_check(tidy_body(check, f"camera-{watcher.room_id}"))
+            except Exception as e:  # 한 장에서 오류가 나도 카메라 스레드는 계속 돈다
+                print("방 안 카메라 처리 오류(계속 돌아요):", repr(e))
+        sleep(max(0.0, every - (clock() - started)))

@@ -113,13 +113,14 @@ def test_load_config_qr(monkeypatch):
 def test_start_qr_runs_in_background(monkeypatch):
     called = {}
 
-    def fake_run(door, device, on_reply):
-        called.update(room=door.room_id, device=device)
+    def fake_run(door, device, on_reply, frames):
+        called.update(room=door.room_id, device=device, frames=frames)
 
+    monkeypatch.setattr(qr_door, "open_camera", lambda d: "cam")
     monkeypatch.setattr(qr_door, "run_camera", fake_run)
     cfg = gateway.Config(qr_camera="1", qr_room_id=3)
     gateway.start_qr(cfg, FakeVerifier({}), lambda r: None).join(timeout=1)
-    assert called == {"room": 3, "device": "1"}
+    assert called == {"room": 3, "device": "1", "frames": "cam"}
 
 
 def test_main_starts_qr_and_replies_go_to_uno(monkeypatch):
@@ -140,3 +141,68 @@ def test_main_starts_qr_and_replies_go_to_uno(monkeypatch):
         gateway.main(gateway.Config(port="/dev/fake", dry_run=True, qr_camera="0"))
     assert started == {"camera": "0"}
     assert ser.written == [b"OK\n"]
+
+
+def test_run_camera_keeps_going_after_error(monkeypatch):
+    class Boom(FakeDetector):
+        calls = 0
+
+        def detectAndDecode(self, frame):
+            Boom.calls += 1
+            if Boom.calls == 1:
+                raise RuntimeError("깨진 사진")
+            return super().detectAndDecode(frame)
+
+    replies = []
+    door = QrDoor(FakeVerifier({"result": "OPENED"}), 1)
+    cam = FakeCam([(True, "x"), (True, "123456")])
+    with pytest.raises(StopIteration):
+        run_camera(door, 0, replies.append, frames=(cam, Boom()))
+    assert replies == [b"OK\n"]  # 첫 장 오류 뒤에도 다음 QR을 처리함
+
+
+def test_start_qr_stops_when_camera_missing(monkeypatch):
+    """카메라를 못 열면 스레드에서 조용히 죽지 않고 시작할 때 바로 멈춘다."""
+    def no_cam(device):
+        raise SystemExit("웹캠을 열 수 없어요")
+
+    monkeypatch.setattr(qr_door, "open_camera", no_cam)
+    with pytest.raises(SystemExit):
+        gateway.start_qr(gateway.Config(qr_camera="9"), FakeVerifier({}), lambda r: None)
+
+
+def test_parse_qr_only_ascii_digits():
+    assert parse_qr("١٢٣٤٥٦", 1) is None  # 아랍 숫자 모양은 받지 않음
+
+
+def test_load_config_ignores_odd_digits():
+    cfg = gateway.load_config({"QR_ROOM_ID": "²", "ROOM_CAMERA_ROOM": "²"})
+    assert cfg.qr_room_id == gateway.Config.qr_room_id
+    assert cfg.room_camera_room == gateway.Config.room_camera_room
+
+
+def test_reply_error_is_retried_not_dropped(monkeypatch, capsys):
+    monkeypatch.setattr(qr_door.time, "sleep", lambda s: None)
+    sent, fails = [], [1]
+
+    def flaky(reply):
+        if fails:
+            fails.pop()
+            raise OSError("시리얼 끊김")
+        sent.append(reply)
+
+    door = QrDoor(FakeVerifier({"result": "OPENED"}), 1)
+    with pytest.raises(StopIteration):
+        run_camera(door, 0, flaky, frames=(FakeCam([(True, "123456")]), FakeDetector()))
+    assert sent == [b"OK\n"]
+    assert "1/3" in capsys.readouterr().out
+
+
+def test_reply_gives_up_loudly(monkeypatch, capsys):
+    monkeypatch.setattr(qr_door.time, "sleep", lambda s: None)
+
+    def broken(reply):
+        raise OSError("없음")
+
+    assert qr_door.send_reply(broken, b"OK\n") is False
+    assert "끝내 못 보냈어요" in capsys.readouterr().out

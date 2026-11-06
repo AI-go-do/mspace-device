@@ -254,6 +254,13 @@ def test_load_config_defaults_and_port_override(monkeypatch):
     assert c.port == "/dev/ttyACM9"  # PORT를 정하면 자동으로 찾지 않는다
 
 
+def test_load_config_baseline_file(monkeypatch):
+    monkeypatch.setattr(gateway, "find_port", lambda: None)
+    assert gateway.load_config({}).baseline_file == "room_baseline.json"
+    assert gateway.load_config({"BASELINE_FILE": "/var/b.json"}).baseline_file == "/var/b.json"
+    assert gateway.load_config({"BASELINE_FILE": "off"}).baseline_file is None
+
+
 def test_load_config_reads_os_environ(monkeypatch):
     monkeypatch.setenv("DRY_RUN", "1")
     monkeypatch.setattr(gateway, "find_port", lambda: None)

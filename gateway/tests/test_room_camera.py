@@ -351,10 +351,10 @@ def test_tidy_body_matches_server_format():
              "leftItems": {"laptop": 1, "cell phone": 1, "backpack": 1}, "checkedAt": "2026-11-06T17:00:00+09:00"}
     body = tidy_body(check, "camera-1", event_id="e1")
     assert body == {"eventId": "e1", "reservationId": 9, "deviceId": "camera-1", "result": "NEEDS_CLEANING",
-                    "items": ["backpack", "cell phone", "cup", "cup", "laptop"], "leftItems": ["BAG", "PHONE"],
-                    "observedAt": "2026-11-06T17:00:00+09:00"}
-    clean = tidy_body({**check, "trash": {}, "leftItems": {"laptop": 1}}, "camera-1")
-    assert clean["result"] == "CLEAN" and clean["leftItems"] == [] and clean["items"] == ["laptop"]
+                    "items": ["backpack", "cell phone", "cup", "cup", "laptop"],
+                    "leftItems": ["BAG", "LAPTOP", "PHONE"], "observedAt": "2026-11-06T17:00:00+09:00"}
+    clean = tidy_body({**check, "trash": {}, "leftItems": {"book": 1}}, "camera-1")
+    assert clean["result"] == "CLEAN" and clean["leftItems"] == [] and clean["items"] == ["book"]
 
 
 def test_run_room_camera_sends_only_reservation_checks(monkeypatch):
@@ -762,3 +762,51 @@ def test_tidy_sender_drops_404_and_409():
     s = gateway.SensorSender("https://x", "t", path="/api/rooms/1/tidy-checks", drop=gateway.TIDY_DROP)
     assert s.url == "https://x/api/rooms/1/tidy-checks"
     assert 404 in s.drop and 409 in s.drop and 404 not in gateway.SENSOR_DROP
+
+
+def test_baseline_survives_restart(tmp_path, capsys):
+    path = str(tmp_path / "base.json")
+    w = RoomWatcher(1, baseline_path=path)
+    w.update([thing("remote")], now=0, now_iso="2026-11-06T17:00:00+09:00")
+    with open(path) as f:
+        assert json.load(f) == {"roomId": 1, "objects": {"remote": 1}, "savedAt": "2026-11-06T17:00:00+09:00"}
+
+    again = RoomWatcher(1, baseline_path=path)  # 껐다 켬
+    assert again.baseline == {"remote": 1}
+    assert "저장된 깨끗한 방 기준 불러옴 1번 방: 물건 1개 (리모컨 1)" in capsys.readouterr().out
+    _, check = again.update([thing("remote")], now=0)
+    assert check is None  # 빈 방으로 켜도 기준을 다시 찍지 않는다
+    assert run_visit(again, [thing("remote"), thing("cup", 400, 400)], start=100)["trash"] == {"cup": 1}
+
+
+def test_clean_check_widens_baseline_file(tmp_path):
+    path = str(tmp_path / "base.json")
+    w = RoomWatcher(1, baseline_path=path, room_items={"remote": 1})
+    w.update([], now=0)  # 리모컨이 바구니에 있을 때 찍은 기준
+    assert run_visit(w, [thing("remote")], start=100)["status"] == "CLEAN"
+    with open(path) as f:
+        assert json.load(f)["objects"] == {"remote": 1}
+
+
+@pytest.mark.parametrize("content", ["{broken", '{"roomId": 2, "objects": {"cup": 1}}', '{"roomId": 1}',
+                                     '{"roomId": 1, "objects": ["cup"]}'])
+def test_bad_baseline_file_takes_new_one(tmp_path, capsys, content):
+    path = tmp_path / "base.json"
+    path.write_text(content)
+    w = RoomWatcher(1, baseline_path=str(path))
+    assert w.baseline is None and "새로 찍어요" in capsys.readouterr().out
+    w.update([thing("remote")], now=0)
+    assert json.loads(path.read_text())["objects"] == {"remote": 1}
+
+
+def test_baseline_write_failure_keeps_running(tmp_path, capsys):
+    w = RoomWatcher(1, baseline_path=str(tmp_path / "no-dir" / "base.json"))
+    _, note = w.update([thing("remote")], now=0)
+    assert note["status"] == "BASELINE_SAVED" and w.baseline == {"remote": 1}
+    assert "기준 파일을 못 썼어요" in capsys.readouterr().out
+
+
+def test_no_baseline_path_keeps_memory_only(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    RoomWatcher(1).update([thing("remote")], now=0)
+    assert list(tmp_path.iterdir()) == []

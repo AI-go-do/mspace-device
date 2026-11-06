@@ -83,3 +83,31 @@ def test_preview_port_in_use_does_not_stop_camera(monkeypatch, capsys):
     monkeypatch.setattr(preview.Preview, "start", busy)
     assert gateway.start_preview(8080) is None
     assert "다른 번호로" in capsys.readouterr().out
+
+
+def test_preview_host_tailscale_finds_ip(monkeypatch, capsys):
+    started = []
+    monkeypatch.setattr(preview.Preview, "start", lambda self: started.append(self.host) or self)
+    gateway.start_preview(8090, "tailscale", find_tailscale=lambda: "100.126.0.9")
+    gateway.start_preview(8090, "tailscale", find_tailscale=lambda: None)
+    assert started == ["100.126.0.9", "127.0.0.1"]
+    assert "Tailscale 주소를 못 찾아서" in capsys.readouterr().out
+
+
+def test_tailscale_ip_waits_until_ready():
+    class Out:
+        def __init__(self, code, text):
+            self.returncode, self.stdout = code, text
+
+    answers = [OSError("없음"), Out(1, ""), Out(0, "100.126.215.96\n")]
+
+    def run(*a, **k):
+        x = answers.pop(0)
+        if isinstance(x, Exception):
+            raise x
+        return x
+
+    slept = []
+    assert gateway.tailscale_ip(run=run, sleep=slept.append, wait=1) == "100.126.215.96"
+    assert slept == [1, 1]
+    assert gateway.tailscale_ip(run=lambda *a, **k: Out(1, ""), tries=2, sleep=slept.append) is None

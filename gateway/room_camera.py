@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from collections import deque
@@ -243,8 +244,10 @@ def describe(items):
 class RoomWatcher:
     """찾은 목록을 받아서 (1) core에 보낼 재실 이벤트 (2) 정리 확인 결과를 만든다."""
 
-    def __init__(self, room_id, check_objects=True, now=None, room_items=None, on_checkout=False):
+    def __init__(self, room_id, check_objects=True, now=None, room_items=None, on_checkout=False,
+                 baseline_path=None):
         self.room_id = room_id
+        self.baseline_path = baseline_path  # 기준을 파일에 적어 두면 껐다 켜도 남는다. None이면 메모리에만
         # on_checkout: 서버가 "예약이 끝났다"고 알려 줄 때만 확인한다 (request_check). 아니면 30초 빈 방 (연습 모드)
         self.on_checkout = on_checkout
         self.pending = None          # (예약 번호, 알게 된 시각): 퇴실했는데 아직 확인 못 한 예약
@@ -257,6 +260,39 @@ class RoomWatcher:
         self.had_people = False      # 정리 확인 전에 사람이 있었는지
         self.empty_since = None      # 0명이 된 시각
         self.baseline = None         # 깨끗한 빈 방에서 본 물건 종류별 개수 (처음 빈 방 또는 깨끗한 정리 확인 뒤)
+        self.load_baseline()
+
+    def load_baseline(self):
+        """저장해 둔 기준 파일이 있으면 읽는다. 없거나 깨졌거나 다른 방 것이면 새로 찍는다."""
+        if not self.baseline_path or not os.path.exists(self.baseline_path):
+            return
+        try:
+            with open(self.baseline_path, encoding="utf-8") as f:
+                saved = json.load(f)
+            objects = saved["objects"]
+            if saved.get("roomId") != self.room_id or not isinstance(objects, dict):
+                print(f"기준 파일이 {self.room_id}번 방 것이 아니라 새로 찍어요: {self.baseline_path}")
+                return
+            self.baseline = {str(k): int(v) for k, v in objects.items()}
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            print(f"기준 파일을 못 읽어서 새로 찍어요 ({self.baseline_path}: {e})")
+            return
+        print(f"저장된 깨끗한 방 기준 불러옴 {self.room_id}번 방: 물건 {sum(self.baseline.values())}개"
+              f"{' (' + describe(self.baseline) + ')' if self.baseline else ''} ({saved.get('savedAt', '시각 모름')})")
+
+    def write_baseline(self, now_iso):
+        """기준을 파일에 적는다. 임시 파일에 쓰고 바꿔치기해서, 쓰다가 꺼져도 파일이 깨지지 않게 한다."""
+        if not self.baseline_path:
+            return
+        record = {"roomId": self.room_id, "objects": self.baseline,
+                  "savedAt": now_iso or datetime.now(KST).isoformat(timespec="seconds")}
+        tmp = self.baseline_path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(record, f, ensure_ascii=False)
+            os.replace(tmp, self.baseline_path)
+        except OSError as e:  # 못 써도 카메라는 계속 (메모리엔 있음)
+            print(f"기준 파일을 못 썼어요 ({self.baseline_path}: {e}). 다시 켜면 기준을 새로 찍어요")
 
     def people(self, dets):
         return sum(1 for d in dets if d.label == "person")
@@ -339,6 +375,7 @@ class RoomWatcher:
     def save_baseline(self, dets, now_iso, reason=None):
         items = self.count(dets)
         self.baseline = dict(items)
+        self.write_baseline(now_iso)
         note = {
             "roomId": self.room_id,
             "status": "BASELINE_SAVED",
@@ -372,7 +409,10 @@ class RoomWatcher:
                 (trash if label in TRASH else left)[label] = extra
         status = "LEFT_ITEMS" if left else "NEEDS_CLEANING" if trash else "CLEAN"
         if status == "CLEAN":  # 깨끗하면 기준을 넓혀 둔다 (줄어든 건 기준에서 빼지 않음: 다시 나와도 괜찮게)
-            self.baseline = {k: max(base.get(k, 0), now_items.get(k, 0)) for k in set(base) | set(now_items)}
+            widened = {k: max(base.get(k, 0), now_items.get(k, 0)) for k in set(base) | set(now_items)}
+            if widened != base:
+                self.baseline = widened
+                self.write_baseline(now_iso)
         return {
             "roomId": self.room_id,
             "status": status,
@@ -383,8 +423,8 @@ class RoomWatcher:
 
 
 
-# 서버(core #81, docs api 6-3)가 받는 "두고 간 귀중품". 여기 없는 물건(노트북 등)은 items에만 넣는다
-SERVER_LEFT_ITEMS = {"backpack": "BAG", "handbag": "BAG", "suitcase": "BAG", "cell phone": "PHONE"}
+# 서버(core #81, docs api 6-3)가 받는 "두고 간 귀중품". 여기 없는 물건(책 등)은 items에만 넣는다
+SERVER_LEFT_ITEMS = {"backpack": "BAG", "handbag": "BAG", "suitcase": "BAG", "cell phone": "PHONE", "laptop": "LAPTOP"}
 MAX_SERVER_ITEMS = 20
 
 
@@ -392,7 +432,7 @@ def tidy_body(check, device_id, event_id=None):
     """정리 확인 결과를 서버 POST /api/rooms/{roomId}/tidy-checks 형식으로 바꾼다.
 
     장치 결과 3가지 → 서버 2가지: 치울 것이 있으면 NEEDS_CLEANING(자동 신고), 아니면 CLEAN.
-    두고 간 물건은 따로 leftItems (가방·휴대폰만 서버가 받는다).
+    두고 간 물건은 따로 leftItems (가방·휴대폰·노트북만 서버가 받는다).
     """
     found = {**check["leftItems"], **check["trash"]}
     items = [label for label, n in sorted(found.items()) for _ in range(n)][:MAX_SERVER_ITEMS]

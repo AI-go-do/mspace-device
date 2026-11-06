@@ -39,6 +39,7 @@ import ipaddress
 import json
 import os
 import re
+import subprocess
 import threading
 import time
 import uuid
@@ -79,6 +80,7 @@ class Config:
     preview_host: str = "127.0.0.1"        # 화면 보기를 열 주소. 맥에서 보려면 Tailscale IP (전체 공개 0.0.0.0은 피함)
     yolo_model: str | None = None          # YOLO ONNX 모델 파일. 없으면 사람만 세는 기본 방식(HOG)
     room_items: dict = field(default_factory=dict)  # 방 비품 {"remote": 1}: 그 개수까지는 있어도 없어도 괜찮음
+    baseline_file: str | None = "room_baseline.json"  # 깨끗한 방 기준을 적어 두는 파일. BASELINE_FILE=off면 메모리에만
 
 
 def find_port():
@@ -113,6 +115,8 @@ def load_config(env=None):
         preview_port=int(env["PREVIEW_PORT"]) if _is_number(env.get("PREVIEW_PORT", "")) else None,
         preview_host=env.get("PREVIEW_HOST") or Config.preview_host,
         room_items=parse_room_items(env.get("ROOM_ITEMS", "")),
+        baseline_file=(None if env.get("BASELINE_FILE") == "off"
+                       else env.get("BASELINE_FILE") or Config.baseline_file),
     )
 
 
@@ -532,10 +536,33 @@ def camera_push(config, sensors):
     return push
 
 
-def start_preview(port, host="127.0.0.1"):
-    """PREVIEW_PORT가 있으면 브라우저로 카메라 화면을 보는 작은 서버를 켠다."""
+def tailscale_ip(run=subprocess.run, tries=12, wait=5.0, sleep=time.sleep):
+    """`tailscale ip -4`로 내 Tailscale 주소를 찾는다. 막 켜졌을 땐 Tailscale이 늦게 붙어서 몇 번 기다린다."""
+    for i in range(tries):
+        try:
+            out = run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=10)
+            ip = out.stdout.strip().splitlines()[0] if out.returncode == 0 and out.stdout.strip() else ""
+            if ip:
+                return ip
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if i < tries - 1:
+            sleep(wait)
+    return None
+
+
+def start_preview(port, host="127.0.0.1", find_tailscale=tailscale_ip):
+    """PREVIEW_PORT가 있으면 브라우저로 카메라 화면을 보는 작은 서버를 켠다.
+
+    PREVIEW_HOST=tailscale 이면 Tailscale 주소를 알아서 찾는다 (자동 실행 서비스에서 $(tailscale ip -4)를 못 써서).
+    """
     if not port:
         return None
+    if host == "tailscale":
+        found = find_tailscale()
+        if not found:
+            print("Tailscale 주소를 못 찾아서 화면 보기는 젯슨 안에서만 열어요 (127.0.0.1)")
+        host = found or "127.0.0.1"
     import preview
     try:
         return preview.Preview(port, host=host).start()
@@ -552,7 +579,7 @@ def start_room_camera(config, sensors):
     detector = room_camera.make_detector(config.yolo_model)
     on_checkout = sensors is not None  # 서버로 보내는 중이면 "퇴실하면 확인", 아니면(연습) "30초 빈 방"
     watcher = room_camera.RoomWatcher(room, check_objects=detector.finds_objects, room_items=config.room_items,
-                                      on_checkout=on_checkout)
+                                      on_checkout=on_checkout, baseline_path=config.baseline_file)
     cam = room_camera.open_camera(config.room_camera)
     send_check = None
     if on_checkout:

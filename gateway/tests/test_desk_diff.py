@@ -72,6 +72,16 @@ def test_base_photo_survives_restart(tmp_path, capsys):
     assert "새로 찍어요" in capsys.readouterr().out
 
 
+def test_photo_and_meta_from_different_saves_are_not_used(tmp_path, capsys):
+    path = str(tmp_path / "desk.png")
+    DeskCompare(AREA, path=path).set_base(desk())
+    old_meta = (tmp_path / "desk.png.json").read_text()
+    DeskCompare(AREA, path=path).set_base(desk(PHONE), [Detection("remote", 0.8, (900, 400, 40, 80))])
+    (tmp_path / "desk.png.json").write_text(old_meta)  # 사진만 바뀌고 꺼진 경우
+    assert not DeskCompare(AREA, path=path).ready
+    assert "짝이 안 맞음" in capsys.readouterr().out
+
+
 def test_base_photo_write_failure_keeps_memory(tmp_path, capsys):
     d = DeskCompare(AREA, path=str(tmp_path / "no-dir" / "desk.png"))
     d.set_base(desk())

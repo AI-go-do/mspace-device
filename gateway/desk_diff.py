@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 
@@ -90,6 +91,11 @@ def to_frame(box, offset):
     return (x0 + bx / scale, y0 + by / scale, bw / scale, bh / scale)
 
 
+def fingerprint(img):
+    """사진 내용의 짧은 지문 (사진과 메타데이터가 같은 때 저장된 짝인지 확인용)."""
+    return hashlib.sha1(img.tobytes()).hexdigest()
+
+
 class DeskCompare:
     """깨끗한 책상 사진 한 장을 들고 있다가 퇴실 뒤 책상과 비교한다."""
 
@@ -114,6 +120,8 @@ class DeskCompare:
                 raise ValueError("이미지를 못 읽음")
             with open(self.path + ".json", encoding="utf-8") as f:
                 meta = json.load(f)
+            if meta.get("sum") != fingerprint(img):
+                raise ValueError("사진과 메타데이터 짝이 안 맞음")
             if list(meta["area"]) != list(self.area):
                 print("깨끗한 책상 사진의 DESK_AREA가 달라서 새로 찍어요")
                 return
@@ -134,8 +142,11 @@ class DeskCompare:
             if not cv2.imwrite(tmp, self.base):
                 raise OSError("저장 실패")
             os.replace(tmp, self.path)
-            with open(self.path + ".json", "w", encoding="utf-8") as f:
-                json.dump({"area": list(self.area), "known": self.known}, f)
+            # 사진 지문을 같이 적어 둔다. 둘 중 하나만 바뀐 채로 꺼지면 load가 짝이 안 맞는 걸 알고 버린다
+            meta_tmp = self.path + ".json.tmp"
+            with open(meta_tmp, "w", encoding="utf-8") as f:
+                json.dump({"area": list(self.area), "known": self.known, "sum": fingerprint(self.base)}, f)
+            os.replace(meta_tmp, self.path + ".json")
         except OSError as e:
             print(f"깨끗한 책상 사진을 못 썼어요 ({self.path}: {e}). 다시 켜면 새로 찍어요")
 

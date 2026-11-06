@@ -148,6 +148,23 @@ def test_item_that_was_there_when_clean_is_ignored():
     assert [c["status"] for c in checks if c] == ["CLEAN"]
 
 
+def test_no_check_while_pir_still_feels_someone():
+    """카메라엔 0명이어도 PIR이 움직임을 느끼는 동안은 정리 확인을 미룬다 (사각지대에 사람이 있을 수 있음)."""
+    w = RoomWatcher(1)
+    t = 0
+    for _ in range(3):
+        w.update([], now=t)
+        t += 1
+    for _ in range(5):
+        w.update([person()], now=t)
+        t += 1
+    for _ in range(EMPTY_CHECK_SEC + 30):
+        assert w.update([thing("cup")], now=t, pir=1)[1] is None
+        t += 1
+    checks = [w.update([thing("cup")], now=t + i, pir=0)[1] for i in range(EMPTY_CHECK_SEC + 5)]
+    assert [c["status"] for c in checks if c] == ["NEEDS_CLEANING"]  # PIR이 꺼진 뒤 30초에 한 번
+
+
 def test_check_only_once_per_visit_and_off_without_model():
     w = RoomWatcher(1)
     check = run_visit(w, [thing("cup")])

@@ -209,6 +209,9 @@ class RoomWatcher:
         check = None
         if people > 0:
             self.had_people, self.empty_since = True, None
+        elif pir:
+            # 카메라엔 안 보여도 PIR이 움직임을 느끼면(마지막 움직임 뒤 2분) 아직 누가 있을 수 있다
+            self.empty_since = None
         else:
             if self.empty_since is None:
                 self.empty_since = now

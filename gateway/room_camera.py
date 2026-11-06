@@ -110,25 +110,43 @@ def parse_yolo(output, scale_x, scale_y, conf=0.4):
 # ---------- 찾는 기계 두 가지 (같은 detect(frame) 모양) ----------
 
 class YoloDetector:
-    """YOLOv8 ONNX 모델로 사람 + 물건 80종을 찾는다 (OpenCV DNN)."""
+    """YOLOv8 ONNX 모델로 사람 + 물건 80종을 찾는다.
+
+    onnxruntime이 있으면 그걸로 돌린다(젯슨 기본 OpenCV 4.6은 YOLOv8 모델을 못 읽음).
+    없으면 OpenCV DNN(4.7 이상)으로 돌린다. 앞처리(크기 맞추기)는 둘 다 OpenCV로 한다.
+    """
     finds_objects = True
 
     def __init__(self, model_path, size=640):
         import cv2
         self.cv2 = cv2
-        self.net = cv2.dnn.readNetFromONNX(model_path)
-        try:  # 젯슨 GPU(CUDA)를 쓸 수 있으면 쓴다. 안 되면 CPU
-            self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
-            self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
-        except Exception:  # noqa: BLE001 - OpenCV 빌드마다 다름
-            pass
         self.size = size
+        self.session = self.net = None
+        try:
+            import onnxruntime as ort
+            providers = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider")
+                         if p in ort.get_available_providers()]
+            self.session = ort.InferenceSession(model_path, providers=providers)
+            self.input_name = self.session.get_inputs()[0].name
+            print("인원 세기: onnxruntime", providers[0])
+        except ImportError:
+            self.net = cv2.dnn.readNetFromONNX(model_path)
+            try:  # 젯슨 GPU(CUDA)를 쓸 수 있으면 쓴다. 안 되면 CPU
+                self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
+                self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
+            except Exception:  # noqa: BLE001 - OpenCV 빌드마다 다름
+                pass
+            print("인원 세기: OpenCV DNN", cv2.__version__)
 
     def detect(self, frame):
         h, w = frame.shape[:2]
         blob = self.cv2.dnn.blobFromImage(frame, 1 / 255.0, (self.size, self.size), swapRB=True)
-        self.net.setInput(blob)
-        return parse_yolo(self.net.forward(), w / self.size, h / self.size)
+        if self.session is not None:
+            output = self.session.run(None, {self.input_name: blob})[0]
+        else:
+            self.net.setInput(blob)
+            output = self.net.forward()
+        return parse_yolo(output, w / self.size, h / self.size)
 
 
 class HogPersonDetector:

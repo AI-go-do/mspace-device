@@ -280,3 +280,36 @@ def test_run_room_camera_keeps_going_after_error(tmp_path):
         run_room_camera(RoomWatcher(2), FakeCam(6), Flaky(), pushed.append, pir_now=lambda: 0,
                         log_path=tmp_path / "log.jsonl", clock=lambda: next(clock), sleep=lambda s: None)
     assert Flaky.calls >= 2 and pushed  # 첫 장 오류 뒤에도 계속 셈
+
+
+def test_yolo_detector_uses_onnxruntime(monkeypatch):
+    """젯슨 OpenCV 4.6은 YOLOv8을 못 읽어서, onnxruntime이 있으면 그걸로 돌린다."""
+    import sys
+    import types
+
+    import numpy as np
+
+    out = np.zeros((1, 84, 1), dtype=np.float32)
+    out[0, :4, 0] = [320, 320, 100, 200]  # 가운데 사람 하나
+    out[0, 4, 0] = 0.9
+
+    class Session:
+        def __init__(self, path, providers):
+            self.providers = providers
+
+        def get_inputs(self):
+            return [types.SimpleNamespace(name="images")]
+
+        def run(self, names, feed):
+            assert "images" in feed
+            return [out]
+
+    ort = types.SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"], InferenceSession=Session)
+    cv2 = types.SimpleNamespace(dnn=types.SimpleNamespace(blobFromImage=lambda *a, **k: "blob"), __version__="4.6.0")
+    monkeypatch.setitem(sys.modules, "onnxruntime", ort)
+    monkeypatch.setitem(sys.modules, "cv2", cv2)
+    from room_camera import YoloDetector
+
+    det = YoloDetector("m.onnx")
+    found = det.detect(np.zeros((640, 640, 3)))
+    assert [d.label for d in found] == ["person"]

@@ -199,3 +199,48 @@ def test_label_model_names_file_and_fallback(tmp_path, capsys):
 def test_join_near_merges_pieces_of_one_thing():
     from desk_diff import join_near
     assert join_near([(0, 0, 10, 10), (15, 0, 10, 10), (100, 100, 5, 5)]) == [(0, 0, 25, 10), (100, 100, 5, 5)]
+
+
+def test_skipped_compare_keeps_old_photo(capsys):
+    d = DeskCompare(AREA)
+    w = RoomWatcher(1, desk=d)
+    w.update([], now=0, photo=lambda: desk())
+    old = d.base.copy()
+    moved = np.roll(desk(PHONE), 300, axis=1)  # 카메라가 움직임 → 비교 못 함
+    check = None
+    w.had_people = True
+    for t in range(10, 10 + room_camera.EMPTY_CHECK_SEC + 5):
+        _, c = w.update([], now=t, photo=lambda: moved)
+        check = check or c
+    assert check["status"] == "CLEAN" and (d.base == old).all()  # 물건이 찍힌 사진을 깨끗한 기준으로 바꾸지 않음
+    assert "비교를 건너뜀" in capsys.readouterr().out
+
+
+def test_wrong_names_file_is_an_error_and_labeler_falls_back(capsys):
+    out = np.zeros((1, 4 + 22, 10), np.float32)
+    with pytest.raises(room_camera.LabelCountMismatch):
+        room_camera.parse_yolo(out, 1, 1)  # 22종 모델인데 이름표 없음(80종)
+
+    class Bad:
+        def detect(self, crop):
+            raise room_camera.LabelCountMismatch("22 vs 80")
+
+    class Good:
+        def detect(self, crop):
+            h, w = crop.shape[:2]
+            return [Detection("cup", 0.9, (w / 2 - 5, h / 2 - 5, 10, 10))]
+
+    good = Good()
+    labeler = room_camera.make_labeler(good)
+    assert labeler(desk(), (900, 400, 40, 80)) == "cup"
+    import types
+    orig = room_camera.YoloDetector
+    room_camera.YoloDetector = lambda path: types.SimpleNamespace(detect=Bad().detect, names=[])
+    try:
+        labeler = room_camera.make_labeler(good, "w.onnx")
+        assert labeler(desk(), (900, 400, 40, 80)) == "cup"
+    finally:
+        room_camera.YoloDetector = orig
+    assert "지금 모델로" in capsys.readouterr().out
+    with pytest.raises(room_camera.LabelCountMismatch):
+        room_camera.make_labeler(Bad())(desk(), (900, 400, 40, 80))  # 기본 모델 자체가 틀리면 숨기지 않음

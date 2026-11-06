@@ -123,6 +123,10 @@ PERSON_CONF = 0.4   # 사람은 이 점수 넘어야 센다 (잘못 세면 재�
 OBJECT_CONF = 0.3   # 물건은 조금 낮춰 작은 물건도 잡는다. 늘 있는 엉뚱한 것은 빈 방 기준과 비교할 때 빠짐
 
 
+class LabelCountMismatch(ValueError):
+    """모델이 내는 종류 수와 이름표(names.json) 수가 다름."""
+
+
 def parse_yolo(output, scale_x, scale_y, conf=OBJECT_CONF, person_conf=PERSON_CONF, names=None):
     """YOLOv8 ONNX 출력 (1, 84, N)을 Detection 목록으로 바꾼다.
 
@@ -132,11 +136,14 @@ def parse_yolo(output, scale_x, scale_y, conf=OBJECT_CONF, person_conf=PERSON_CO
     import numpy as np
     rows = np.asarray(output)[0].T  # (N, 84)
     scores = rows[:, 4:]
+    labels = names or COCO_NAMES
+    if scores.shape[1] != len(labels):  # 이름표가 없거나 다른 모델 것: 엉뚱한 이름(power bank → train)을 내지 않게
+        raise LabelCountMismatch(f"모델 종류 수({scores.shape[1]})와 이름 수({len(labels)})가 달라요")
     best = scores.argmax(axis=1)
     best_score = scores[np.arange(len(rows)), best]
     dets = []
     for i in np.nonzero(best_score >= min(conf, person_conf))[0]:
-        label = (names or COCO_NAMES)[int(best[i])]
+        label = labels[int(best[i])]
         if best_score[i] < (person_conf if label == "person" else conf):
             continue
         cx, cy, w, h = rows[i, :4]
@@ -463,7 +470,7 @@ class RoomWatcher:
         """책상 사진 비교로 달라진 곳 중, 모델이 이미 찾은 물건·기준 때 있던 물건 자리가 아닌 것에 이름을 붙인다."""
         changes = self.desk.changes(frame)
         if changes is None:
-            return {}
+            return None  # 비교를 못 함 (기준 없음, 조명·카메라가 크게 바뀜). "달라진 곳 없음"과 구분
         seen = [d.box for d in self.objects(dets)] + list(self.desk.known)
         items = {}
         for box in changes:
@@ -483,10 +490,15 @@ class RoomWatcher:
         base = self.baseline or {}
         now_items = self.count(dets)
         extra = {}
+        compared = False
         if self.desk is not None and self.desk.ready and photo is not None:
             frame = photo()
-            extra = self.desk_items(frame, dets)
+            found = self.desk_items(frame, dets)
             del frame
+            compared = found is not None
+            extra = found or {}
+            if not compared:
+                print(f"정리 확인 {self.room_id}번 방: 책상 사진 비교를 건너뜀 (조명·카메라가 크게 바뀜)")
         trash, left = {}, {}
         for label, n in now_items.items():
             more = n - max(base.get(label, 0), self.room_items.get(label, 0))  # 방 비품은 그 개수까지 괜찮음
@@ -496,7 +508,7 @@ class RoomWatcher:
             group = left if label in BELONGINGS else trash  # 이름 모름(unknown)·쓰레기는 치울 것
             group[label] = group.get(label, 0) + n
         status = "LEFT_ITEMS" if left else "NEEDS_CLEANING" if trash else "CLEAN"
-        if status == "CLEAN" and self.desk is not None and photo is not None:
+        if status == "CLEAN" and compared:  # 비교를 건너뛰었으면 물건이 있을 수 있어 사진을 바꾸지 않는다
             self.desk.set_base(photo(), self.objects(dets))  # 깨끗하면 책상 사진도 새로 (햇빛·조명이 천천히 바뀌는 것 따라감)
         if status == "CLEAN":  # 깨끗하면 기준을 넓혀 둔다 (줄어든 건 기준에서 빼지 않음: 다시 나와도 괜찮게)
             widened = {k: max(base.get(k, 0), now_items.get(k, 0)) for k in set(base) | set(now_items)}
@@ -602,7 +614,20 @@ def make_labeler(detector, label_model=None):
         except Exception as e:  # noqa: BLE001 - 모델 파일 문제여도 카메라는 계속
             print(f"LABEL_MODEL을 못 읽어서 지금 모델로 이름을 붙여요 ({label_model}: {e})")
             labeler = detector
-    return lambda frame, box: label_region(labeler.detect, frame, box)
+
+    def label(frame, box):
+        """달라진 곳 하나에 이름. LABEL_MODEL 이름표가 틀리면 지금 모델로 바꿔 다시 붙인다."""
+        nonlocal labeler
+        try:
+            return label_region(labeler.detect, frame, box)
+        except LabelCountMismatch as e:
+            if labeler is detector:
+                raise
+            print(f"LABEL_MODEL의 이름표가 모델과 안 맞아서 지금 모델로 이름을 붙여요 ({e})")
+            labeler = detector
+            return label_region(labeler.detect, frame, box)
+
+    return label
 
 
 def make_detector(model_path, desk_area=None):

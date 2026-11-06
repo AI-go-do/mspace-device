@@ -96,10 +96,15 @@ def nms(dets, threshold=0.45, person_threshold=PERSON_NMS):
     return kept
 
 
-def parse_yolo(output, scale_x, scale_y, conf=0.4):
+PERSON_CONF = 0.4   # 사람은 이 점수 넘어야 센다 (잘못 세면 재실이 틀림)
+OBJECT_CONF = 0.3   # 물건은 조금 낮춰 작은 물건도 잡는다. 늘 있는 엉뚱한 것은 빈 방 기준과 비교할 때 빠짐
+
+
+def parse_yolo(output, scale_x, scale_y, conf=OBJECT_CONF, person_conf=PERSON_CONF):
     """YOLOv8 ONNX 출력 (1, 84, N)을 Detection 목록으로 바꾼다.
 
     84 = 상자 4개 값(가운데 x, 가운데 y, 너비, 높이) + 80종 점수. scale은 모델 입력(640) → 원래 화면 크기 비율.
+    점수 기준은 사람(person_conf)과 물건(conf)을 따로 둔다.
     """
     import numpy as np
     rows = np.asarray(output)[0].T  # (N, 84)
@@ -107,10 +112,13 @@ def parse_yolo(output, scale_x, scale_y, conf=0.4):
     best = scores.argmax(axis=1)
     best_score = scores[np.arange(len(rows)), best]
     dets = []
-    for i in np.nonzero(best_score >= conf)[0]:
+    for i in np.nonzero(best_score >= min(conf, person_conf))[0]:
+        label = COCO_NAMES[int(best[i])]
+        if best_score[i] < (person_conf if label == "person" else conf):
+            continue
         cx, cy, w, h = rows[i, :4]
         box = (float((cx - w / 2) * scale_x), float((cy - h / 2) * scale_y), float(w * scale_x), float(h * scale_y))
-        dets.append(Detection(COCO_NAMES[int(best[i])], float(best_score[i]), box))
+        dets.append(Detection(label, float(best_score[i]), box))
     return nms(dets)
 
 

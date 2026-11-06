@@ -64,6 +64,16 @@ def test_parse_yolo():
     assert dets[0].box == pytest.approx((576.0, 256.0, 128.0, 128.0))
 
 
+def test_parse_yolo_lower_bar_for_objects_than_people():
+    out = np.zeros((1, 84, 3), dtype=np.float32)
+    out[0, :4, :] = 100
+    out[0, 4 + 0, 0] = 0.35    # 사람 0.35 → 안 셈 (사람은 0.4부터)
+    out[0, 4 + 67, 1] = 0.35   # 휴대폰(67번) 0.35 → 잡음 (물건은 0.3부터)
+    out[0, 4 + 67, 2] = 0.25   # 0.25 → 버림
+    out[0, :4, 2] = [500, 500, 10, 10]
+    assert [d.label for d in parse_yolo(out, 1, 1)] == ["cell phone"]
+
+
 # ---- 인원 세기 ----
 
 def test_event_shape_uses_existing_occupancy_api():

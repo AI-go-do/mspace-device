@@ -17,6 +17,14 @@ COLORS = {"person": (0, 200, 0)}  # 사람은 초록, 물건은 주황
 OTHER = (0, 140, 255)
 
 
+def text_size(img):
+    """화면 폭에 맞춘 글자 크기와 선 굵기. 1280 폭이면 0.8, 풀HD(1920)면 1.2."""
+    shape = getattr(img, "shape", None)
+    width = shape[1] if shape is not None and len(shape) > 1 else 640
+    size = max(0.5, width / 1600)
+    return size, max(1, round(size * 2))
+
+
 class Preview:
     """마지막 화면 한 장(JPEG)을 들고 있다가 브라우저에 계속 흘려보낸다."""
 
@@ -31,13 +39,15 @@ class Preview:
         """상자를 그린 사본을 JPEG로 바꿔 둔다. 원본 frame은 바꾸지 않는다."""
         import cv2
         img = frame.copy()
+        size, thick = text_size(img)
         for d in dets:
             x, y, w, h = (int(v) for v in d.box)
             color = COLORS.get(d.label, OTHER)
-            cv2.rectangle(img, (x, y), (x + w, y + h), color, 2)
-            cv2.putText(img, f"{d.label} {d.score:.2f}", (x, max(15, y - 5)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-        cv2.putText(img, f"people: {people}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+            cv2.rectangle(img, (x, y), (x + w, y + h), color, thick)
+            cv2.putText(img, f"{d.label} {d.score:.2f}", (x, max(int(30 * size), y - 8)),
+                        cv2.FONT_HERSHEY_SIMPLEX, size, color, thick)
+        cv2.putText(img, f"people: {people}", (15, int(60 * size)), cv2.FONT_HERSHEY_SIMPLEX, 2 * size,
+                    (255, 255, 255), thick + 1)
         ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 70])
         if ok:
             with self.lock:

@@ -33,6 +33,12 @@ def test_update_draws_boxes_and_count(monkeypatch):
     assert p.latest() == b"JPEG"
 
 
+def test_text_grows_with_screen_width():
+    assert preview.text_size(types.SimpleNamespace(shape=(1080, 1920, 3))) == (1.2, 2)
+    assert preview.text_size(types.SimpleNamespace(shape=(480, 640, 3))) == (0.5, 1)
+    assert preview.text_size(FakeImg()) == (0.5, 1)  # 크기를 모르면 작은 기본값
+
+
 def test_update_keeps_old_frame_when_encode_fails(monkeypatch):
     fake_cv2(monkeypatch, ok=False)
     p = preview.Preview(0)

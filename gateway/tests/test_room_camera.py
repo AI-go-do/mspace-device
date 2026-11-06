@@ -7,7 +7,7 @@ import pytest
 import gateway
 import room_camera
 from room_camera import (BEAT_SEC, EMPTY_CHECK_SEC, Detection, RoomWatcher, check_message, iou, nms,
-                         parse_yolo, run_room_camera)
+                         parse_yolo, run_room_camera, tile_boxes, detect_tiled, cut_by_tile)
 
 
 def person(x=0):
@@ -175,6 +175,93 @@ def test_no_check_while_pir_still_feels_someone():
     assert [c["status"] for c in checks if c] == ["NEEDS_CLEANING"]  # PIR이 꺼진 뒤 30초에 한 번
 
 
+def test_baseline_is_announced_when_saved():
+    w = RoomWatcher(1)
+    _, note = w.update([thing("book", 10, 10)], now=0)
+    assert note["status"] == "BASELINE_SAVED" and note["objects"] == {"book": 1}
+    assert check_message(note) == "깨끗한 방 기준 저장 1번 방: 물건 1개 (책 1)"
+    assert w.update([thing("book", 10, 10)], now=1)[1] is None  # 한 번만 알림
+
+
+def test_no_baseline_saves_one_instead_of_flagging_everything():
+    """켤 때부터 사람이 있어 기준이 없으면, 퇴실 때 결과를 내지 않고 그때 모습을 기준으로 삼는다."""
+    w = RoomWatcher(1)
+    t = 0
+    for _ in range(5):
+        w.update([person()], now=t)
+        t += 1
+    notes = [w.update([thing("laptop")], now=t + i)[1] for i in range(EMPTY_CHECK_SEC + 5)]
+    notes = [n for n in notes if n]
+    assert [n["status"] for n in notes] == ["BASELINE_SAVED"]
+    assert "기준이 없어" in check_message(notes[0])
+    assert run_visit(w, [thing("laptop"), thing("cup", 400, 400)], start=1000)["trash"] == {"cup": 1}
+
+
+def test_detail_is_used_only_for_baseline_and_check():
+    calls = []
+
+    def detail():
+        calls.append(1)
+        return [thing("cell phone", 900, 50)]  # 4조각으로 보니 멀리 있던 폰이 보임
+
+    w = RoomWatcher(1)
+    _, note = w.update([], now=0, detail=detail)
+    assert note["objects"] == {"cell phone": 1} and len(calls) == 1
+    t = 1
+    for _ in range(5):
+        w.update([person()], now=t, detail=detail)
+        t += 1
+    checks = [w.update([], now=t + i, detail=detail)[1] for i in range(EMPTY_CHECK_SEC + 5)]
+    assert [c["status"] for c in checks if c] == ["CLEAN"]  # 기준과 같은 눈으로 봐서 원래 폰은 새 물건 아님
+    assert len(calls) == 2  # 평소에는 부르지 않음
+
+
+def test_tile_boxes_cover_screen_with_overlap():
+    tiles = tile_boxes(1920, 1080)
+    assert tiles[0] == (0, 0, 1056, 594) and tiles[3] == (864, 486, 1056, 594)
+    assert tiles[0][2] > tiles[1][0]  # 왼쪽 조각 끝(1056)이 오른쪽 조각 시작(864)보다 뒤: 가운데가 겹침
+
+
+def test_detect_tiled_moves_boxes_back_and_merges():
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    sizes = []
+
+    def detect(img):
+        sizes.append(img.shape[:2])
+        if img.shape[:2] == (1080, 1920):
+            return [person(0)]
+        return [thing("cell phone", 10, 10)]  # 조각 안 (10, 10)
+
+    dets = detect_tiled(detect, frame)
+    assert sizes[0] == (1080, 1920) and sizes[1:] == [(594, 1056)] * 4
+    phones = sorted(d.box[:2] for d in dets if d.label == "cell phone")
+    assert phones == [(10, 10), (10, 496), (874, 10), (874, 496)]  # 조각 위치만큼 옮겨짐
+    assert [d.label for d in dets].count("person") == 1
+
+
+def test_detect_tiled_skips_cut_and_already_found_objects():
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    calls = []
+
+    def detect(img):
+        calls.append(1)
+        if len(calls) == 1:
+            return [thing("laptop", 100, 100)]  # 한 장 전체에서 찾은 노트북
+        if len(calls) == 2:  # 왼쪽 위 조각만 뭔가 찾았다고 치자
+            return [Detection("laptop", 0.8, (1010, 300, 46, 40)),  # 조각 오른쪽 경계에 잘린 반쪽
+                    Detection("laptop", 0.7, (105, 105, 20, 20)),   # 이미 찾은 노트북 안쪽
+                    Detection("cup", 0.6, (500, 300, 20, 20))]      # 새로 보인 컵
+        return []
+
+    assert sorted(d.label for d in detect_tiled(detect, frame)) == ["cup", "laptop"]
+
+
+def test_cut_by_tile_ignores_real_screen_edges():
+    assert cut_by_tile((1040, 10, 16, 16), 0, 0, 1056, 594, 1920, 1080)        # 조각 오른쪽 경계 = 잘림
+    assert not cut_by_tile((1040, 10, 16, 16), 864, 0, 1056, 594, 1920, 1080)  # 화면 끝이면 안 잘림
+    assert not cut_by_tile((0, 0, 16, 16), 0, 0, 1056, 594, 1920, 1080)
+
+
 def test_check_only_once_per_visit_and_off_without_model():
     w = RoomWatcher(1)
     check = run_visit(w, [thing("cup")])
@@ -215,7 +302,7 @@ def test_run_room_camera_pushes_and_logs(tmp_path):
 
 def test_run_room_camera_writes_check_log(tmp_path, monkeypatch):
     class OneCheck(RoomWatcher):
-        def update(self, dets, now, pir=None, now_iso=None):
+        def update(self, dets, now, pir=None, now_iso=None, detail=None):
             return None, {"roomId": 1, "status": "CLEAN", "trash": {}, "leftItems": {}, "checkedAt": "t"}
 
     log = tmp_path / "log.jsonl"
@@ -434,7 +521,7 @@ def test_run_room_camera_warns_on_read_failure_and_log_error(tmp_path, capsys):
     out = capsys.readouterr().out
     assert out.count("사진을 못 읽어요") == 1       # 매 장마다 찍지 않음
     assert len(seen) == 7
-    assert "정리 확인 1번 방" in out and "기록 파일에 못 썼어요" in out  # 기록 실패해도 카메라는 계속
+    assert "깨끗한 방 기준 저장 1번 방" in out and "기록 파일에 못 썼어요" in out  # 기록 실패해도 카메라는 계속
 
 
 def test_pir_change_sends_right_away():

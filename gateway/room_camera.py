@@ -10,6 +10,8 @@
      그래서 core를 바꾸지 않고도 "몇 명"이 서버에 남는다.
   2. 정리 확인: 사람이 있다가 모두 나가고 30초가 지나면, 빈 방에서 물건(컵·병·노트북·가방 …)을 찾는다.
      처음 빈 방(깨끗한 상태)에서 본 물건과 비교해서 "새로 생긴 물건"만 남은 물건으로 본다.
+     기준을 저장하면 "깨끗한 방 기준 저장"을 알리고, 기준이 없으면 결과 대신 지금 모습을 기준으로 저장한다.
+     기준·정리 확인 때만 화면을 4조각으로 나눠 자세히 본다(멀리 있는 작은 물건). 평소 인원 세기는 한 장 그대로.
      결과는 화면과 room_checks.jsonl(글자만)에 남긴다. core에 받을 곳이 생기면 그쪽으로 보낸다.
 
 개인정보
@@ -122,6 +124,52 @@ def parse_yolo(output, scale_x, scale_y, conf=OBJECT_CONF, person_conf=PERSON_CO
     return nms(dets)
 
 
+TILE_FRAC = 0.55  # 4조각 하나의 크기 (화면 가로·세로의 55%, 가운데가 조금씩 겹침)
+
+
+def tile_boxes(width, height, frac=TILE_FRAC):
+    """화면을 네 귀퉁이 조각으로 나눈 (x, y, w, h). 가운데가 겹쳐서 경계에 걸친 물건도 잘리지 않는다."""
+    tw, th = int(width * frac), int(height * frac)
+    return [(0, 0, tw, th), (width - tw, 0, tw, th), (0, height - th, tw, th), (width - tw, height - th, tw, th)]
+
+
+def detect_tiled(detect, frame):
+    """한 장 전체 + 4조각을 각각 찾아서 합친다. 조각은 덜 줄어들어서 멀리 있는 작은 물건이 보인다.
+
+    퇴실 뒤 정리 확인처럼 가끔 한 번만 쓴다 (한 장보다 5배 느림).
+    """
+    h, w = frame.shape[:2]
+    whole = list(detect(frame))
+    extra = []
+    for x, y, tw, th in tile_boxes(w, h):
+        for d in detect(frame[y:y + th, x:x + tw]):
+            bx, by, bw, bh = d.box
+            if cut_by_tile(d.box, x, y, tw, th, w, h):
+                continue  # 조각 경계에 잘린 큰 물건(반쪽 노트북 등)은 한 장 전체 결과를 믿는다
+            box = (bx + x, by + y, bw, bh)
+            if any(o.label == d.label and inside(box, o.box) for o in whole + extra):
+                continue  # 이미 찾은 같은 물건
+            extra.append(Detection(d.label, d.score, box))
+    return nms(whole + extra)
+
+
+def cut_by_tile(box, x, y, tw, th, width, height, margin=3):
+    """조각 안 상자가 화면 가장자리가 아닌 조각 경계에 닿았는지 (물건이 잘렸다는 뜻)."""
+    bx, by, bw, bh = box
+    return ((bx <= margin and x > 0) or (by <= margin and y > 0)
+            or (bx + bw >= tw - margin and x + tw < width) or (by + bh >= th - margin and y + th < height))
+
+
+def inside(a, b, ratio=0.5):
+    """a 상자가 b 상자 안에 절반 넘게 들어가 있는지."""
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    ix = max(0.0, min(ax + aw, bx + bw) - max(ax, bx))
+    iy = max(0.0, min(ay + ah, by + bh) - max(ay, by))
+    small = min(aw * ah, bw * bh)
+    return small > 0 and ix * iy / small >= ratio
+
+
 # ---------- 찾는 기계 두 가지 (같은 detect(frame) 모양) ----------
 
 class YoloDetector:
@@ -163,6 +211,9 @@ class YoloDetector:
             output = self.net.forward()
         return parse_yolo(output, w / self.size, h / self.size)
 
+    def detect_detailed(self, frame):
+        return detect_tiled(self.detect, frame)
+
 
 class HogPersonDetector:
     """모델 파일이 없을 때 쓰는 OpenCV 기본 사람 찾기. 서 있는 사람에 맞춰져 있어 앉은 사람은 놓칠 수 있다."""
@@ -202,8 +253,12 @@ class RoomWatcher:
     def people(self, dets):
         return sum(1 for d in dets if d.label == "person")
 
-    def update(self, dets, now, pir=None, now_iso=None):
-        """한 번 센 결과를 넣는다. 보낼 재실 이벤트(dict)와 정리 확인 결과(dict)를 (event, check)로 돌려준다."""
+    def update(self, dets, now, pir=None, now_iso=None, detail=None):
+        """한 번 센 결과를 넣는다. 보낼 재실 이벤트(dict)와 정리 확인 결과(dict)를 (event, check)로 돌려준다.
+
+        detail: 기준 저장·정리 확인 때만 부르는 "자세히 찾기"(4조각). 없으면 dets를 그대로 쓴다.
+        check는 정리 확인 결과이거나, 깨끗한 방 기준을 저장했다는 알림(status BASELINE_SAVED)이다.
+        """
         self.counts.append(self.people(dets))
         people = sorted(self.counts)[len(self.counts) // 2]  # 가운데 값
 
@@ -223,10 +278,15 @@ class RoomWatcher:
         else:
             if self.empty_since is None:
                 self.empty_since = now
-            if self.baseline is None and not self.had_people:
-                self.baseline = self.objects(dets)  # 처음 켰을 때 빈 방 = 깨끗한 기준
+            if self.baseline is None and not self.had_people and self.check_objects:
+                check = self.save_baseline(detail() if detail else dets, now_iso)  # 처음 켰을 때 빈 방 = 깨끗한 기준
             elif self.had_people and now - self.empty_since >= EMPTY_CHECK_SEC:
-                check = self.check(dets, now_iso)
+                seen = detail() if detail and self.check_objects else dets
+                if self.baseline is None and self.check_objects:
+                    # 기준 없이 비교하면 전부 "새 물건"이 된다. 결과를 내지 않고 지금 모습을 기준으로 삼는다
+                    check = self.save_baseline(seen, now_iso, reason="기준이 없어 지금 모습을 기준으로 저장")
+                else:
+                    check = self.check(seen, now_iso)
                 self.had_people = False
         return event, check
 
@@ -243,6 +303,21 @@ class RoomWatcher:
             "sources": sources,
             "observedAt": now_iso or datetime.now(KST).isoformat(timespec="seconds"),
         }
+
+    def save_baseline(self, dets, now_iso, reason=None):
+        self.baseline = self.objects(dets)
+        items = {}
+        for d in self.baseline:
+            items[d.label] = items.get(d.label, 0) + 1
+        note = {
+            "roomId": self.room_id,
+            "status": "BASELINE_SAVED",
+            "objects": items,
+            "checkedAt": now_iso or datetime.now(KST).isoformat(timespec="seconds"),
+        }
+        if reason:
+            note["reason"] = reason
+        return note
 
     def objects(self, dets):
         return [d for d in dets if d.label in TRASH or d.label in BELONGINGS]
@@ -272,6 +347,11 @@ class RoomWatcher:
 
 
 def check_message(check):
+    if check["status"] == "BASELINE_SAVED":
+        n = sum(check["objects"].values())
+        listed = f" ({describe(check['objects'])})" if n else ""
+        why = f" - {check['reason']}" if check.get("reason") else ""
+        return f"깨끗한 방 기준 저장 {check['roomId']}번 방: 물건 {n}개{listed}{why}"
     if check["status"] == "CLEAN":
         return f"정리 확인 {check['roomId']}번 방: 깨끗함"
     parts = []
@@ -336,8 +416,10 @@ def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path
                         preview.update(frame, dets, watcher.people(dets))
                     except Exception as e:  # 화면 보기 오류는 인원 세기를 막지 않는다
                         print("화면 보기 오류(카메라는 계속 돌아요):", repr(e))
-                del frame  # 사진은 바로 버린다
-                event, check = watcher.update(dets, clock(), pir_now())
+                detailed = getattr(detector, "detect_detailed", None)
+                detail = (lambda: detailed(frame)) if detailed else None  # 기준·정리 확인 때만 불림
+                event, check = watcher.update(dets, clock(), pir_now(), detail=detail)
+                del frame, detail  # 사진은 바로 버린다
                 on_frame()  # 찾기까지 성공한 장만 "카메라 살아 있음"으로 친다
                 if event:
                     print(f"인원 {watcher.room_id}번 방: {event['sources']['people']}명")

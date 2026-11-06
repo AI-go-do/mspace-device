@@ -94,6 +94,24 @@ flowchart LR
    서버에는 `Authorization: Bearer <장치 토큰>` 헤더로 보내요. 토큰이 없으면 DRY_RUN만 돼요.
    `http://`는 내 컴퓨터에 띄운 core 테스트에서만 써요. 원격 주소에 `http://`를 쓰면 게이트웨이가 시작하지 않아요(토큰 보호).
 
+### QR 입실 (문 앞 웹캠, 시연용)
+
+8차 회의(11/6)에서 시연을 **카메라 + QR**로 바꿨어요. 키패드는 "1차 시도"로 그대로 두고, 같은 서버 확인(`/api/access/verify`)을 QR로도 해요.
+
+```bash
+ls /dev/video*                                    # 웹캠 번호 확인 (보통 0)
+set -a; . ./.env; set +a
+QR_CAMERA=0 SEND_SENSORS=1 python3 gateway/gateway.py          # 진짜 서버
+DRY_RUN=1 QR_CAMERA=0 python3 gateway/gateway.py               # 서버 없이: 123456 QR만 초록
+```
+
+- 흐름: 폰에 QR 띄우기 → 문 앞 웹캠에 비추기 → 젯슨이 읽어 core에 확인 → 우노 LED 초록/빨강 (키패드와 같은 LED)
+- QR 안의 글자: 입실 번호 6자리(`123456`) 또는 방까지 넣은 `MSPACE:1:123456`. 방 번호는 `QR_ROOM_ID`(기본 1). 다른 방 QR은 서버에 묻지 않고 거부
+- 지금은 예약 때 받은 6자리 번호를 QR로 만들어 비춰요 (QR 만들기 사이트나 앱). 나중에 웹 입실 화면이 QR을 바로 띄우고, core가 "30초마다 바뀌는 코드"를 주면 `qr_door.py`의 `parse_qr()`만 바꾸면 돼요
+- 같은 QR을 계속 비추면 5초 동안은 다시 묻지 않아요
+- **사진·영상은 저장하지도 보내지도 않아요.** 읽은 글자만 써요
+- OpenCV(`cv2`)는 젯슨에 기본으로 깔려 있어요. 없다고 나오면 `sudo apt install python3-opencv`
+
 ### 젯슨에서 올리기 (맥 IDE가 안 될 때)
 
 ```bash
@@ -178,6 +196,7 @@ echo ch341 | sudo tee /etc/modules-load.d/ch341.conf
 | `handle_line()` + `HANDLERS` | 한 줄을 받아 `sensorType`별 처리기로 보냄 (`keypad`, `occupancy`) |
 | `handle_occupancy()` | 우노 재실 줄을 core 형식(`kind: OCCUPANCY`, `occupied`, `sources`, `observedAt`)으로 바꿈 |
 | `main()` | 위 부품을 조립하고 시리얼을 계속 읽음 |
+| `qr_door.py` | 문 앞 웹캠 QR 입실 (`QR_CAMERA`). `QrDoor`가 QR 글자 → 같은 확인기 → OK/NO, `run_camera()`가 카메라에서 QR을 찾음 |
 
 ### 테스트
 

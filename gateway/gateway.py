@@ -21,12 +21,14 @@ SEND_SENSORS=1이면 core POST /api/sensor-events로 보낸다 (FR-DEV-101). 키
   handle_occupancy()      : 재실 센서 줄을 core 형식으로 바꿔 화면에 찍고 SensorSender에 넘긴다
   handle_line()           : 우노가 보낸 한 줄을 받아 우노에 돌려줄 답(OK/NO)을 만든다
   main()                  : 위 부품을 조립해서 시리얼을 계속 읽는다
+  qr_door.py (QR_CAMERA)  : 문 앞 웹캠으로 QR 입실. 같은 확인기로 묻고 결과를 우노 LED로 보낸다
 
 설치:  pip3 install pyserial requests
 실행:  DRY_RUN=1 python3 gateway.py
        SERVER=https://dev-mspace.java21.net DEVICE_TOKEN=<장치 토큰> python3 gateway.py
        (http://는 localhost 테스트에서만. 토큰이 실리므로 원격 서버는 https)
        재실 센서도 보내려면 앞에 SEND_SENSORS=1 을 붙인다 (core에 /api/sensor-events가 올라간 뒤)
+       QR 입실도 켜려면 QR_CAMERA=0 (웹캠 번호)을 붙인다. 방 번호는 QR_ROOM_ID (기본 1)
 """
 from __future__ import annotations
 
@@ -67,6 +69,8 @@ class Config:
     device_token: str | None = None        # 장치 토큰. 서버가 "등록된 키패드"인지 확인하는 값. 저장소에 넣지 않고 .env에만 둔다
     port: str | None = None                # 우노가 꽂힌 USB 포트. 못 찾으면 None
     send_sensors: bool = False             # True면 재실 이벤트도 core로 보낸다 (core에 센서 API가 올라간 뒤 켠다)
+    qr_camera: str | None = None           # QR 입실용 웹캠 (0, 1 또는 /dev/video0). 비우면 QR 끔
+    qr_room_id: int = 1                    # QR 입실을 받는 방 번호
 
 
 def find_port():
@@ -87,6 +91,8 @@ def load_config(env=None):
         device_token=env.get("DEVICE_TOKEN"),
         port=env.get("PORT") or find_port(),
         send_sensors=env.get("SEND_SENSORS") == "1",
+        qr_camera=env.get("QR_CAMERA") or None,
+        qr_room_id=int(env["QR_ROOM_ID"]) if env.get("QR_ROOM_ID", "").isdigit() else Config.qr_room_id,
     )
 
 
@@ -367,19 +373,37 @@ def main(config=None):
     if not config.dry_run and not is_safe_server(config.server):
         raise SystemExit("원격 서버는 https://로만 연결해요 (장치 토큰이 실리므로). http://는 localhost 테스트에서만 써요.")
     print("연결:", config.port, "| 서버:", "DRY_RUN" if config.dry_run else config.server,
-          "| 재실 전송:", "켬" if config.send_sensors and not config.dry_run else "끔")
+          "| 재실 전송:", "켬" if config.send_sensors and not config.dry_run else "끔",
+          "| QR 입실:", f"켬 (카메라 {config.qr_camera}, {config.qr_room_id}번 방)" if config.qr_camera else "끔")
     verifier = make_verifier(config)
     sensors = None
     if config.send_sensors and not config.dry_run:
         sensors = SensorSender(config.server, config.device_token).start()
     ser = serial.Serial(config.port, 115200, timeout=1)  # ser = 우노와 연결된 시리얼 통로. 115200은 우노 코드와 같은 속도
     time.sleep(2)  # 우노는 시리얼 연결 시 재부팅되므로 켜질 때까지 기다린다
+    write_lock = threading.Lock()  # 키패드 답과 QR 답이 동시에 우노로 가도 줄이 섞이지 않게
+
+    def reply_to_uno(reply):
+        with write_lock:
+            ser.write(reply)  # 우노에 결과를 돌려줘서 LED를 켜게 한다
+
+    if config.qr_camera:
+        start_qr(config, verifier, reply_to_uno)
 
     while True:
         line = ser.readline().decode(errors="ignore")  # line = 우노가 보낸 한 줄 (글자로 변환, 깨진 글자는 무시)
         reply = handle_line(line, verifier, sensors)
         if reply:
-            ser.write(reply)  # 우노에 결과를 돌려줘서 LED를 켜게 한다
+            reply_to_uno(reply)
+
+
+def start_qr(config, verifier, on_reply):
+    """문 앞 웹캠 QR 입실을 뒤에서(스레드) 켠다. 키패드와 같은 확인기, 같은 우노 LED를 쓴다."""
+    from qr_door import QrDoor, run_camera  # QR을 켤 때만 불러온다
+    door = QrDoor(verifier, config.qr_room_id)
+    t = threading.Thread(target=run_camera, args=(door, config.qr_camera, on_reply), daemon=True)
+    t.start()
+    return t
 
 
 if __name__ == "__main__":

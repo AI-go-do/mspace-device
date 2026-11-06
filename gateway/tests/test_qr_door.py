@@ -179,3 +179,30 @@ def test_load_config_ignores_odd_digits():
     cfg = gateway.load_config({"QR_ROOM_ID": "²", "ROOM_CAMERA_ROOM": "²"})
     assert cfg.qr_room_id == gateway.Config.qr_room_id
     assert cfg.room_camera_room == gateway.Config.room_camera_room
+
+
+def test_reply_error_is_retried_not_dropped(monkeypatch, capsys):
+    monkeypatch.setattr(qr_door.time, "sleep", lambda s: None)
+    sent, fails = [], [1]
+
+    def flaky(reply):
+        if fails:
+            fails.pop()
+            raise OSError("시리얼 끊김")
+        sent.append(reply)
+
+    door = QrDoor(FakeVerifier({"result": "OPENED"}), 1)
+    with pytest.raises(StopIteration):
+        run_camera(door, 0, flaky, frames=(FakeCam([(True, "123456")]), FakeDetector()))
+    assert sent == [b"OK\n"]
+    assert "1/3" in capsys.readouterr().out
+
+
+def test_reply_gives_up_loudly(monkeypatch, capsys):
+    monkeypatch.setattr(qr_door.time, "sleep", lambda s: None)
+
+    def broken(reply):
+        raise OSError("없음")
+
+    assert qr_door.send_reply(broken, b"OK\n") is False
+    assert "끝내 못 보냈어요" in capsys.readouterr().out

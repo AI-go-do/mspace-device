@@ -94,7 +94,21 @@ def run_camera(door, device, on_reply, frames=None):
         try:
             text, _, _ = detector.detectAndDecode(frame)
             reply = door.handle(text)
-            if reply:
-                on_reply(reply)
         except Exception as e:  # 한 장에서 오류가 나도 QR 스레드는 계속 돈다
             print("QR 처리 오류(계속 돌아요):", repr(e))
+            continue
+        if reply:
+            send_reply(on_reply, reply)
+
+
+def send_reply(on_reply, reply, tries=3):
+    """서버 답(OK/NO)을 우노에 보낸다. 시리얼 쓰기가 실패하면 몇 번 다시 보내고, 그래도 안 되면 크게 알린다."""
+    for n in range(1, tries + 1):
+        try:
+            on_reply(reply)
+            return True
+        except Exception as e:  # 시리얼 오류: 서버가 연 문이 LED에 안 보이면 안 되니 다시 보낸다
+            print(f"우노에 답을 못 보냈어요 ({n}/{tries}):", repr(e))
+            time.sleep(0.2)
+    print("⚠ 우노에 QR 답을 끝내 못 보냈어요. 우노 USB 연결을 확인하세요:", reply)
+    return False

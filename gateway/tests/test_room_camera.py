@@ -208,9 +208,9 @@ def test_uno_occupancy_is_not_sent_when_camera_owns_room(capsys):
 
     line = json.dumps({"eventId": "1-1-1", "roomId": 1, "sensorType": "occupancy", "pir": 1, "light": 500})
     sender = Sender()
-    gateway.CAMERA_ROOMS.add(1)
+    gateway.CAMERA_ROOMS[1] = gateway.time.monotonic()
     gateway.handle_line(line, object(), sender)
-    assert sender.bodies == [] and gateway.LAST_PIR == {1: 1}
+    assert sender.bodies == [] and gateway.fresh_pir(1) == 1
     assert "카메라 이벤트에 합쳐" in capsys.readouterr().out
     gateway.CAMERA_ROOMS.clear()
     gateway.handle_line(line, object(), sender)
@@ -242,15 +242,16 @@ def test_start_room_camera(monkeypatch):
     monkeypatch.setattr(room_camera, "make_detector", lambda path: Det())
     monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
 
-    def fake_run(watcher, cam, detector, push, pir_now, fall=None):
-        gateway.LAST_PIR[3] = 1
+    def fake_run(watcher, cam, detector, push, pir_now, fall=None, on_frame=None):
+        gateway.LAST_PIR[3] = (1, gateway.time.monotonic())
+        on_frame()
         called.update(room=watcher.room_id, cam=cam, check=watcher.check_objects, pir=pir_now(),
                       fall=fall.hold_sec)
 
     monkeypatch.setattr(room_camera, "run_room_camera", fake_run)
     gateway.start_room_camera(gateway.Config(room_camera="1", room_camera_room=3), None).join(timeout=1)
     assert called == {"room": 3, "cam": "cam", "check": False, "pir": 1, "fall": 15}
-    assert 3 in gateway.CAMERA_ROOMS
+    assert gateway.camera_alive(3)
 
 
 def test_main_starts_room_camera(monkeypatch):
@@ -332,9 +333,10 @@ def test_fall_alert_after_hold_and_clear():
     assert alert == {"roomId": 1, "status": "FALL_SUSPECTED", "lyingSec": 15, "checkedAt": "t"}
     assert "쓰러짐 의심" in fall_message(alert)
     assert f.update([lying()], 20) is None          # 한 번만 알림
-    cleared = f.update([person()], 25)              # 일어나면 해제
+    assert f.update([person()], 25) is None         # 일어나도 3초는 기다린다 (한 장 놓침과 구별)
+    cleared = f.update([person()], 28)              # 3초 넘게 안 누워 있으면 해제
     assert cleared["status"] == "FALL_CLEARED" and "해제" in fall_message(cleared)
-    assert f.update([], 26) is None
+    assert f.update([], 29) is None
 
 
 def test_fall_moving_person_resets():
@@ -395,3 +397,68 @@ def test_main_runs_cameras_without_uno(monkeypatch, capsys):
 def test_main_without_uno_or_camera_stops():
     with pytest.raises(SystemExit):
         gateway.main(gateway.Config(port=None, dry_run=True))
+
+
+def test_fall_one_missed_frame_keeps_timer():
+    """YOLO가 누운 사람을 한 장 놓쳐도 타이머가 처음부터 다시 시작하지 않는다."""
+    from room_camera import FallWatcher
+    f = FallWatcher(1, hold_sec=15)
+    f.update([lying()], 0)
+    assert f.update([], 8) is None                  # 한 장 놓침
+    assert f.update([lying()], 9) is None
+    assert f.update([lying()], 15)["status"] == "FALL_SUSPECTED"
+    assert f.update([], 16) is None                 # 알린 뒤 한 장 놓쳐도 해제하지 않음
+    assert f.update([lying()], 17) is None          # 다시 보여도 또 알리지 않음
+
+
+def test_camera_alive_and_fresh_pir_expire():
+    gateway.CAMERA_ROOMS[1] = 100.0
+    gateway.LAST_PIR[1] = (1, 100.0)
+    assert gateway.camera_alive(1, now=110) and gateway.fresh_pir(1, now=110) == 1
+    assert not gateway.camera_alive(1, now=131)     # 카메라가 30초 넘게 못 읽으면 우노가 다시 보냄
+    assert gateway.fresh_pir(1, now=131) is None    # 우노 PIR도 30초 넘으면 안 씀
+    assert not gateway.camera_alive(2) and gateway.fresh_pir(2) is None
+
+
+def test_dead_camera_lets_uno_send_again():
+    got = []
+
+    class Sender:
+        def push(self, b):
+            got.append(b)
+
+    line = json.dumps({"eventId": "1-1-1", "roomId": 1, "sensorType": "occupancy", "pir": 1, "light": 500})
+    gateway.CAMERA_ROOMS[1] = gateway.time.monotonic() - 60
+    gateway.handle_line(line, object(), Sender())
+    assert len(got) == 1
+
+
+def test_run_room_camera_warns_on_read_failure_and_log_error(tmp_path, capsys):
+    from room_camera import FallWatcher
+
+    class Cam:
+        frames = [(False, None), (False, None), (True, "f"), (True, "f")]
+
+        def read(self):
+            if not self.frames:
+                raise StopIteration
+            return self.frames.pop(0)
+
+    class LyingDetector:
+        finds_objects = True
+
+        def detect(self, frame):
+            return [lying()]
+
+    pushed, seen = [], []
+    clock = iter(range(0, 1000, 10))
+    with pytest.raises(StopIteration):
+        run_room_camera(RoomWatcher(1), Cam(), LyingDetector(), pushed.append,
+                        log_path=tmp_path,  # 폴더라서 쓰기 실패
+                        clock=lambda: next(clock), sleep=lambda s: None, fall=FallWatcher(1, 5),
+                        on_frame=lambda: seen.append(1), warn_every=100)
+    out = capsys.readouterr().out
+    assert out.count("사진을 못 읽어요") == 1       # 매 장마다 찍지 않음
+    assert seen == [1, 1]
+    assert any(e["sources"].get("alert") == "FALL_SUSPECTED" for e in pushed)  # 기록 실패해도 core엔 감
+    assert "기록 파일에 못 썼어요" in out

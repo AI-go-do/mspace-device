@@ -61,6 +61,7 @@ SAME_PLACE_IOU = 0.3   # 깨끗할 때 본 물건과 이만큼 겹치면 "원래
 FALL_SEC = 15          # 누운 자세로 이만큼 거의 안 움직이면 "쓰러짐 의심" (시연용 값, FALL_SEC로 바꿈)
 LYING_RATIO = 1.2      # 사람 상자가 가로/세로 이보다 넓으면 누운 자세로 본다
 STILL_IOU = 0.5        # 처음 누운 자리와 이만큼 겹치면 "안 움직임"
+MISS_SEC = 3           # 누운 사람을 이 시간 넘게 연달아 못 찾아야 초기화·해제 (한 장 놓침으로 튀지 않게)
 
 
 @dataclass(frozen=True)
@@ -275,6 +276,7 @@ class FallWatcher:
         self.anchor = None   # 처음 누운 자리 (x, y, w, h)
         self.since = None    # 그때 시각
         self.alerted = False
+        self.missing_since = None  # 누운 사람을 못 찾기 시작한 시각
 
     @staticmethod
     def lying(dets):
@@ -288,10 +290,17 @@ class FallWatcher:
             best = max(lying, key=lambda d: iou(d.box, self.anchor))
             still = best if iou(best.box, self.anchor) >= STILL_IOU else None
         if still is not None:
+            self.missing_since = None
             if not self.alerted and now - self.since >= self.hold_sec:
                 self.alerted = True
                 return self.result("FALL_SUSPECTED", now, now_iso)
             return None
+        if self.anchor is not None and not lying:  # 못 찾음: 잠깐이면 기다린다 (YOLO는 누운 사람을 가끔 놓친다)
+            if self.missing_since is None:
+                self.missing_since = now
+            if now - self.missing_since < MISS_SEC:
+                return None
+        self.missing_since = None
         cleared = self.result("FALL_CLEARED", now, now_iso) if self.alerted else None
         self.anchor = max(lying, key=lambda d: d.score).box if lying else None
         self.since = now if lying else None
@@ -347,14 +356,31 @@ def write_log(log_path, record):
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def safe_log(log_path, record):
+    """기록 파일에 못 써도(권한·디스크) 카메라는 계속 돈다."""
+    try:
+        write_log(log_path, record)
+    except OSError as e:
+        print("기록 파일에 못 썼어요(계속 돌아요):", log_path, repr(e))
+
+
 def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path="room_checks.jsonl",
-                    every=1.0, clock=time.monotonic, sleep=time.sleep, fall=None):
-    """카메라에서 1초마다 한 장씩 세서 watcher에 넣는다. 사진은 저장하지 않는다."""
+                    every=1.0, clock=time.monotonic, sleep=time.sleep, fall=None, on_frame=lambda: None,
+                    warn_every=10.0):
+    """카메라에서 1초마다 한 장씩 세서 watcher에 넣는다. 사진은 저장하지 않는다.
+
+    on_frame: 사진을 잘 읽을 때마다 부른다 (게이트웨이가 카메라가 살아 있는지 본다).
+    """
     print(f"방 안 카메라 켜짐: {watcher.room_id}번 방")
+    last_warn = None
     while True:
         started = clock()
         ok, frame = cam.read()
+        if not ok and (last_warn is None or started - last_warn >= warn_every):
+            print(f"방 안 카메라 {watcher.room_id}번 방: 사진을 못 읽어요 (USB 연결 확인)")
+            last_warn = started
         if ok:
+            on_frame()
             try:
                 dets = detector.detect(frame)
                 del frame  # 사진은 바로 버린다
@@ -364,12 +390,12 @@ def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path
                     push(event)
                 if check:
                     print(check_message(check))
-                    write_log(log_path, check)
+                    safe_log(log_path, check)
                 alert = fall.update(dets, clock()) if fall else None
                 if alert:
                     print(fall_message(alert))
-                    write_log(log_path, alert)
-                    push(watcher.alert_event(alert, pir_now()))
+                    push(watcher.alert_event(alert, pir_now()))  # core에 먼저 알리고 기록은 나중에
+                    safe_log(log_path, alert)
             except Exception as e:  # 한 장에서 오류가 나도 카메라 스레드는 계속 돈다
                 print("방 안 카메라 처리 오류(계속 돌아요):", repr(e))
         sleep(max(0.0, every - (clock() - started)))

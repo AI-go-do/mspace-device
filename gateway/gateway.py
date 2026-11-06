@@ -81,6 +81,8 @@ class Config:
     yolo_model: str | None = None          # YOLO ONNX 모델 파일. 없으면 사람만 세는 기본 방식(HOG)
     room_items: dict = field(default_factory=dict)  # 방 비품 {"remote": 1}: 그 개수까지는 있어도 없어도 괜찮음
     desk_area: tuple | None = None         # 책상 부분 (x1, y1, x2, y2) 화면 비율. 정리 확인 때 책상만 확대해서 한 번 더 본다
+    desk_photo: bool = False               # True면 깨끗한 책상 사진(사람 0명일 때)을 젯슨에만 두고 퇴실 뒤 책상과 비교
+    label_model: str | None = None         # 달라진 곳에 이름 붙일 모델 (YOLO-World ONNX). 없으면 YOLO_MODEL로
     baseline_file: str | None = "room_baseline.json"  # 깨끗한 방 기준을 적어 두는 파일. BASELINE_FILE=off면 메모리에만
 
 
@@ -117,6 +119,8 @@ def load_config(env=None):
         preview_host=env.get("PREVIEW_HOST") or Config.preview_host,
         room_items=parse_room_items(env.get("ROOM_ITEMS", "")),
         desk_area=parse_desk_area(env.get("DESK_AREA", "")),
+        desk_photo=env.get("DESK_PHOTO") == "1",
+        label_model=env.get("LABEL_MODEL") or None,
         baseline_file=(None if env.get("BASELINE_FILE") == "off"
                        else env.get("BASELINE_FILE") or Config.baseline_file),
     )
@@ -590,6 +594,21 @@ def start_preview(port, host="127.0.0.1", find_tailscale=tailscale_ip):
         return None
 
 
+def desk_compare(config, detector):
+    """DESK_PHOTO=1 이면 깨끗한 책상 사진 비교와 이름 붙이기를 만든다. 아니면 (None, None)."""
+    if not config.desk_photo:
+        return None, None
+    if not config.desk_area or not detector.finds_objects:
+        print("DESK_PHOTO=1은 DESK_AREA와 YOLO_MODEL이 있어야 해요. 책상 사진 비교는 꺼요")
+        return None, None
+    import desk_diff
+    import room_camera
+    path = os.path.splitext(config.baseline_file)[0] + "_desk.png" if config.baseline_file else None
+    print("정리 확인: 깨끗한 책상 사진과 비교해요 (사람 0명일 때 찍은 책상 사진 한 장만 젯슨에 둠, 서버로 안 보냄)")
+    return (desk_diff.DeskCompare(config.desk_area, path=path),
+            room_camera.make_labeler(detector, config.label_model))
+
+
 def start_room_camera(config, sensors):
     """방 안 웹캠 인원 세기·정리 확인을 뒤에서(스레드) 켠다."""
     import room_camera  # 켤 때만 불러온다 (OpenCV는 젯슨에만 있으면 됨)
@@ -597,8 +616,10 @@ def start_room_camera(config, sensors):
     CAMERA_ROOMS[room] = time.monotonic()  # 켤 때 한 번 잡고, 이후 사진을 읽을 때마다 새로 적는다
     detector = room_camera.make_detector(config.yolo_model, config.desk_area)
     on_checkout = sensors is not None  # 서버로 보내는 중이면 "퇴실하면 확인", 아니면(연습) "30초 빈 방"
+    desk, labeler = desk_compare(config, detector)
     watcher = room_camera.RoomWatcher(room, check_objects=detector.finds_objects, room_items=config.room_items,
-                                      on_checkout=on_checkout, baseline_path=config.baseline_file)
+                                      on_checkout=on_checkout, baseline_path=config.baseline_file,
+                                      desk=desk, labeler=labeler)
     cam = room_camera.open_camera(config.room_camera)
     send_check = None
     if on_checkout:

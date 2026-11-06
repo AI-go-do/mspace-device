@@ -364,7 +364,7 @@ def test_run_room_camera_sends_only_reservation_checks(monkeypatch):
     class W(RoomWatcher):
         n = 0
 
-        def update(self, dets, now, pir=None, now_iso=None, detail=None):
+        def update(self, dets, now, pir=None, now_iso=None, detail=None, photo=None):
             W.n += 1
             if W.n == 1:
                 return None, {"roomId": 1, "status": "BASELINE_SAVED", "objects": {}, "checkedAt": "t"}
@@ -417,7 +417,7 @@ def test_run_room_camera_pushes_and_logs(tmp_path):
 
 def test_run_room_camera_writes_check_log(tmp_path, monkeypatch):
     class OneCheck(RoomWatcher):
-        def update(self, dets, now, pir=None, now_iso=None, detail=None):
+        def update(self, dets, now, pir=None, now_iso=None, detail=None, photo=None):
             return None, {"roomId": 1, "status": "CLEAN", "trash": {}, "leftItems": {}, "checkedAt": "t"}
 
     log = tmp_path / "log.jsonl"

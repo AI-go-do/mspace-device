@@ -17,8 +17,13 @@
      기준·정리 확인 때만 화면을 4조각으로 나눠 자세히 본다(멀리 있는 작은 물건). 평소 인원 세기는 한 장 그대로.
      결과는 화면과 room_checks.jsonl(글자만)에도 남긴다.
 
+  3. (선택) 책상 확대 DESK_AREA: 정리 확인 때 책상만 잘라 한 번 더 본다 (위에서 찍으면 물건이 작아서).
+  4. (선택) 책상 사진 비교 DESK_PHOTO=1: 깨끗한 책상 사진과 달라진 곳을 찾아 모델이 모르는 물건도 "모르는 물건"으로 잡는다
+     (desk_diff.py). 달라진 곳에는 모델(또는 YOLO-World LABEL_MODEL)로 이름을 붙인다.
+
 개인정보
   사진·영상은 저장하지도, 보내지도 않는다. 프레임은 메모리에서 세고 바로 버린다. 남는 건 숫자와 물건 이름뿐.
+  DESK_PHOTO=1을 켰을 때만 사람 0명일 때 찍은 깨끗한 책상 사진 한 장(책상 부분, 흑백)을 젯슨 안에 둔다. 서버로는 안 보낸다.
 
 모델
   YOLO_MODEL=yolov8n.onnx 처럼 ONNX 모델 파일을 주면 사람 + 물건 80종을 찾는다 (OpenCV DNN, 젯슨 기본 설치).
@@ -33,6 +38,8 @@ import uuid
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+
+from desk_diff import desk_box
 
 KST = timezone(timedelta(hours=9))
 
@@ -54,11 +61,20 @@ TRASH = {"bottle", "cup", "wine glass", "bowl", "fork", "knife", "spoon", "banan
          "orange", "pizza", "donut", "cake", "hot dog"}
 BELONGINGS = {"backpack", "handbag", "suitcase", "umbrella", "laptop", "cell phone", "book", "mouse",
               "keyboard", "remote"}
+# 이름을 직접 정하는 모델(YOLO-World, LABEL_MODEL)이 낼 수 있는 이름. 80종 밖이라 위 두 묶음에 더한다
+TRASH |= {"paper", "can", "snack bag", "plastic bag", "tissue", "food container"}
+BELONGINGS |= {"wallet", "credit card", "power bank", "earphone case", "tumbler", "pencil case", "glasses",
+               "remote control"}
+UNKNOWN = "unknown"  # 책상 사진 비교로 달라졌는데 이름을 못 붙인 것 → 치울 것(확인 필요)으로 본다
 KOREAN = {"bottle": "병", "cup": "컵", "wine glass": "잔", "bowl": "그릇", "fork": "포크", "knife": "칼",
           "spoon": "숟가락", "banana": "바나나", "apple": "사과", "sandwich": "샌드위치", "orange": "귤",
           "pizza": "피자", "donut": "도넛", "cake": "케이크", "hot dog": "핫도그", "backpack": "가방",
           "handbag": "손가방", "suitcase": "캐리어", "umbrella": "우산", "laptop": "노트북",
-          "cell phone": "휴대폰", "book": "책", "mouse": "마우스", "keyboard": "키보드", "remote": "리모컨"}
+          "cell phone": "휴대폰", "book": "책", "mouse": "마우스", "keyboard": "키보드", "remote": "리모컨",
+          "paper": "종이", "can": "캔", "snack bag": "과자 봉지", "plastic bag": "비닐봉지", "tissue": "휴지",
+          "food container": "음식 용기", "wallet": "지갑", "credit card": "카드", "power bank": "보조배터리",
+          "earphone case": "이어폰 케이스", "tumbler": "텀블러", "pencil case": "필통", "glasses": "안경",
+          "remote control": "리모컨", "unknown": "모르는 물건"}
 
 BEAT_SEC = 10          # 바뀌지 않아도 10초마다 보낸다 (core는 1분 안 오면 끊김)
 SMOOTH_FRAMES = 5      # 최근 5번 센 값의 가운데 값을 쓴다 (한 번 놓치거나 잘못 세서 숫자가 튀지 않게)
@@ -107,10 +123,10 @@ PERSON_CONF = 0.4   # 사람은 이 점수 넘어야 센다 (잘못 세면 재�
 OBJECT_CONF = 0.3   # 물건은 조금 낮춰 작은 물건도 잡는다. 늘 있는 엉뚱한 것은 빈 방 기준과 비교할 때 빠짐
 
 
-def parse_yolo(output, scale_x, scale_y, conf=OBJECT_CONF, person_conf=PERSON_CONF):
+def parse_yolo(output, scale_x, scale_y, conf=OBJECT_CONF, person_conf=PERSON_CONF, names=None):
     """YOLOv8 ONNX 출력 (1, 84, N)을 Detection 목록으로 바꾼다.
 
-    84 = 상자 4개 값(가운데 x, 가운데 y, 너비, 높이) + 80종 점수. scale은 모델 입력(640) → 원래 화면 크기 비율.
+    84 = 상자 4개 값(가운데 x, 가운데 y, 너비, 높이) + 80종 점수. YOLO-World처럼 종류를 직접 정한 모델은 names로. scale은 모델 입력(640) → 원래 화면 크기 비율.
     점수 기준은 사람(person_conf)과 물건(conf)을 따로 둔다.
     """
     import numpy as np
@@ -120,7 +136,7 @@ def parse_yolo(output, scale_x, scale_y, conf=OBJECT_CONF, person_conf=PERSON_CO
     best_score = scores[np.arange(len(rows)), best]
     dets = []
     for i in np.nonzero(best_score >= min(conf, person_conf))[0]:
-        label = COCO_NAMES[int(best[i])]
+        label = (names or COCO_NAMES)[int(best[i])]
         if best_score[i] < (person_conf if label == "person" else conf):
             continue
         cx, cy, w, h = rows[i, :4]
@@ -158,13 +174,6 @@ def detect_tiled(detect, frame):
     return nms(whole + extra)
 
 
-def desk_box(width, height, area):
-    """DESK_AREA 비율 (x1, y1, x2, y2) → 화면 픽셀 (x, y, w, h)."""
-    x1, y1, x2, y2 = area
-    x, y = int(width * x1), int(height * y1)
-    return x, y, max(1, int(width * x2) - x), max(1, int(height * y2) - y)
-
-
 def detect_desk(detect, frame, area):
     """책상 부분만 잘라 (책상 전체 + 책상 4조각) 찾는다. 책상 위 작은 물건이 몇 배 크게 보인다."""
     h, w = frame.shape[:2]
@@ -189,6 +198,11 @@ def cut_by_tile(box, x, y, tw, th, width, height, margin=3):
             or (bx + bw >= tw - margin and x + tw < width) or (by + bh >= th - margin and y + th < height))
 
 
+def overlaps(a, b, ratio=0.3):
+    """두 상자가 작은 쪽 넓이의 ratio 넘게 겹치는지."""
+    return inside(a, b, ratio)
+
+
 def inside(a, b, ratio=0.5):
     """a 상자가 b 상자 안에 절반 넘게 들어가 있는지."""
     ax, ay, aw, ah = a
@@ -197,6 +211,15 @@ def inside(a, b, ratio=0.5):
     iy = max(0.0, min(ay + ah, by + bh) - max(ay, by))
     small = min(aw * ah, bw * bh)
     return small > 0 and ix * iy / small >= ratio
+
+
+def load_names(model_path):
+    """모델 옆에 이름표(yolov8s-worldv2.names.json = ["power bank", ...])가 있으면 읽는다. 없으면 80종(COCO)."""
+    path = os.path.splitext(model_path)[0] + ".names.json"
+    if not os.path.exists(path):
+        return COCO_NAMES
+    with open(path, encoding="utf-8") as f:
+        return [str(n) for n in json.load(f)]
 
 
 # ---------- 찾는 기계 두 가지 (같은 detect(frame) 모양) ----------
@@ -214,6 +237,7 @@ class YoloDetector:
         self.cv2 = cv2
         self.size = size
         self.desk_area = desk_area  # (x1, y1, x2, y2) 비율. 정리 확인 때 책상만 잘라 한 번 더 본다
+        self.names = load_names(model_path)
         self.session = self.net = None
         try:
             import onnxruntime as ort
@@ -239,7 +263,7 @@ class YoloDetector:
         else:
             self.net.setInput(blob)
             output = self.net.forward()
-        return parse_yolo(output, w / self.size, h / self.size)
+        return parse_yolo(output, w / self.size, h / self.size, names=self.names)
 
     def detect_detailed(self, frame):
         """정리 확인·기준 저장 때만: 한 장 전체 + 4조각, 그리고 DESK_AREA가 있으면 책상 확대까지 합친다."""
@@ -274,8 +298,12 @@ class RoomWatcher:
     """찾은 목록을 받아서 (1) core에 보낼 재실 이벤트 (2) 정리 확인 결과를 만든다."""
 
     def __init__(self, room_id, check_objects=True, now=None, room_items=None, on_checkout=False,
-                 baseline_path=None):
+                 baseline_path=None, desk=None, labeler=None):
         self.room_id = room_id
+        # desk: 깨끗한 책상 사진 비교(desk_diff.DeskCompare, DESK_PHOTO=1). 모델이 모르는 물건도 "남음"으로 잡는다
+        # labeler(frame, box): 달라진 곳에 이름 붙이기. 못 붙이면 None → "모르는 물건"
+        self.desk = desk
+        self.labeler = labeler
         self.baseline_path = baseline_path  # 기준을 파일에 적어 두면 껐다 켜도 남는다. None이면 메모리에만
         # on_checkout: 서버가 "예약이 끝났다"고 알려 줄 때만 확인한다 (request_check). 아니면 30초 빈 방 (연습 모드)
         self.on_checkout = on_checkout
@@ -326,10 +354,11 @@ class RoomWatcher:
     def people(self, dets):
         return sum(1 for d in dets if d.label == "person")
 
-    def update(self, dets, now, pir=None, now_iso=None, detail=None):
+    def update(self, dets, now, pir=None, now_iso=None, detail=None, photo=None):
         """한 번 센 결과를 넣는다. 보낼 재실 이벤트(dict)와 정리 확인 결과(dict)를 (event, check)로 돌려준다.
 
         detail: 기준 저장·정리 확인 때만 부르는 "자세히 찾기"(4조각). 없으면 dets를 그대로 쓴다.
+        photo: 기준 저장·정리 확인 때만 부르는 "지금 화면" (책상 사진 비교용, DESK_PHOTO=1일 때만 씀).
         check는 정리 확인 결과이거나, 깨끗한 방 기준을 저장했다는 알림(status BASELINE_SAVED)이다.
         """
         self.counts.append(self.people(dets))
@@ -351,17 +380,20 @@ class RoomWatcher:
         else:
             if self.empty_since is None:
                 self.empty_since = now
-            if self.baseline is None and not self.had_people and self.check_objects:
-                check = self.save_baseline(detail() if detail else dets, now_iso)  # 처음 켰을 때 빈 방 = 깨끗한 기준
+            no_photo = self.desk is not None and not self.desk.ready and photo is not None
+            if (self.baseline is None or no_photo) and not self.had_people and self.check_objects:
+                # 처음 켰을 때 빈 방 = 깨끗한 기준 (책상 사진 비교를 새로 켰는데 사진이 없을 때도)
+                check = self.save_baseline(detail() if detail else dets, now_iso, photo=photo)
             elif self.on_checkout:
-                check = self.checkout_check(dets, now, now_iso, detail)
+                check = self.checkout_check(dets, now, now_iso, detail, photo)
             elif self.had_people and now - self.empty_since >= EMPTY_CHECK_SEC:
                 seen = detail() if detail and self.check_objects else dets
                 if self.baseline is None and self.check_objects:
                     # 기준 없이 비교하면 전부 "새 물건"이 된다. 결과를 내지 않고 지금 모습을 기준으로 삼는다
-                    check = self.save_baseline(seen, now_iso, reason="기준이 없어 지금 모습을 기준으로 저장")
+                    check = self.save_baseline(seen, now_iso, reason="기준이 없어 지금 모습을 기준으로 저장",
+                                               photo=photo)
                 else:
-                    check = self.check(seen, now_iso)
+                    check = self.check(seen, now_iso, photo=photo)
                 self.had_people = False
         if self.on_checkout and self.pending and now - self.pending[1] >= PENDING_MAX_SEC:
             print(f"정리 확인 {self.room_id}번 방: 예약 {self.pending[0]} 퇴실 뒤 10분 동안 방이 비지 않아 건너뜀")
@@ -372,7 +404,7 @@ class RoomWatcher:
         """서버에서 예약이 끝났다는 걸 알았을 때 부른다. 방이 비면(사람 0, PIR 없음) 확인한다."""
         self.pending = (reservation_id, now)
 
-    def checkout_check(self, dets, now, now_iso, detail):
+    def checkout_check(self, dets, now, now_iso, detail, photo=None):
         if self.pending is None or now - self.empty_since < SETTLE_SEC:
             return None
         reservation_id, _ = self.pending
@@ -382,8 +414,8 @@ class RoomWatcher:
             return None
         seen = detail() if detail else dets
         if self.baseline is None:
-            return self.save_baseline(seen, now_iso, reason="기준이 없어 지금 모습을 기준으로 저장")
-        check = self.check(seen, now_iso)
+            return self.save_baseline(seen, now_iso, reason="기준이 없어 지금 모습을 기준으로 저장", photo=photo)
+        check = self.check(seen, now_iso, photo=photo)
         check["reservationId"] = reservation_id
         return check
 
@@ -401,10 +433,12 @@ class RoomWatcher:
             "observedAt": now_iso or datetime.now(KST).isoformat(timespec="seconds"),
         }
 
-    def save_baseline(self, dets, now_iso, reason=None):
+    def save_baseline(self, dets, now_iso, reason=None, photo=None):
         items = self.count(dets)
         self.baseline = dict(items)
         self.write_baseline(now_iso)
+        if self.desk is not None and photo is not None:
+            self.desk.set_base(photo(), self.objects(dets))  # 사람 0명일 때만 여기 온다
         note = {
             "roomId": self.room_id,
             "status": "BASELINE_SAVED",
@@ -425,18 +459,45 @@ class RoomWatcher:
             items[d.label] = items.get(d.label, 0) + 1
         return items
 
-    def check(self, dets, now_iso):
-        """깨끗할 때보다 늘어난 물건만 골라 결과를 만든다 (종류별 개수, 자리는 보지 않음)."""
+    def desk_items(self, frame, dets):
+        """책상 사진 비교로 달라진 곳 중, 모델이 이미 찾은 물건·기준 때 있던 물건 자리가 아닌 것에 이름을 붙인다."""
+        changes = self.desk.changes(frame)
+        if changes is None:
+            return {}
+        seen = [d.box for d in self.objects(dets)] + list(self.desk.known)
+        items = {}
+        for box in changes:
+            if any(overlaps(box, b) for b in seen):
+                continue  # 이미 개수로 센 물건이거나, 원래 있던 물건(리모컨)을 옮겨서 생긴 빈자리
+            label = (self.labeler(frame, box) if self.labeler else None) or UNKNOWN
+            items[label] = items.get(label, 0) + 1
+        return items
+
+    def check(self, dets, now_iso, photo=None):
+        """깨끗할 때보다 늘어난 물건만 골라 결과를 만든다 (종류별 개수, 자리는 보지 않음).
+
+        책상 사진 비교(DESK_PHOTO)를 켜면 모델이 모르는 물건도 "모르는 물건"(치울 것)으로 더한다.
+        """
         if not self.check_objects:
             return None
         base = self.baseline or {}
         now_items = self.count(dets)
+        extra = {}
+        if self.desk is not None and self.desk.ready and photo is not None:
+            frame = photo()
+            extra = self.desk_items(frame, dets)
+            del frame
         trash, left = {}, {}
         for label, n in now_items.items():
-            extra = n - max(base.get(label, 0), self.room_items.get(label, 0))  # 방 비품은 그 개수까지 괜찮음
-            if extra > 0:
-                (trash if label in TRASH else left)[label] = extra
+            more = n - max(base.get(label, 0), self.room_items.get(label, 0))  # 방 비품은 그 개수까지 괜찮음
+            if more > 0:
+                (trash if label in TRASH else left)[label] = more
+        for label, n in extra.items():  # 책상 사진 비교로 찾은 것: 자리가 새로 생긴 것이라 기준 개수와 빼지 않는다
+            group = left if label in BELONGINGS else trash  # 이름 모름(unknown)·쓰레기는 치울 것
+            group[label] = group.get(label, 0) + n
         status = "LEFT_ITEMS" if left else "NEEDS_CLEANING" if trash else "CLEAN"
+        if status == "CLEAN" and self.desk is not None and photo is not None:
+            self.desk.set_base(photo(), self.objects(dets))  # 깨끗하면 책상 사진도 새로 (햇빛·조명이 천천히 바뀌는 것 따라감)
         if status == "CLEAN":  # 깨끗하면 기준을 넓혀 둔다 (줄어든 건 기준에서 빼지 않음: 다시 나와도 괜찮게)
             widened = {k: max(base.get(k, 0), now_items.get(k, 0)) for k in set(base) | set(now_items)}
             if widened != base:
@@ -503,6 +564,47 @@ def open_camera(device):
     return cam
 
 
+LABEL_MIN_SIDE = 320  # 달라진 곳을 이 크기 이상으로 잘라 키워서 모델에 넣는다 (작은 물건도 크게 보이게)
+
+
+def label_region(detect, frame, box, pad=0.6, conf=0.2):
+    """달라진 곳 상자 주변을 넉넉히 잘라 모델을 돌려, 가운데에 있는 물건 이름을 돌려준다. 없으면 None.
+
+    detect는 사람·물건 80종 모델이거나, 우리 물건 이름을 넣은 YOLO-World 모델(LABEL_MODEL)이다.
+    """
+    h, w = frame.shape[:2]
+    bx, by, bw, bh = box
+    side = max(bw, bh) * (1 + 2 * pad)
+    side = max(side, LABEL_MIN_SIDE * 0.5)
+    cx, cy = bx + bw / 2, by + bh / 2
+    x0, y0 = int(max(0, cx - side / 2)), int(max(0, cy - side / 2))
+    x1, y1 = int(min(w, cx + side / 2)), int(min(h, cy + side / 2))
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return None
+    crop = frame[y0:y1, x0:x1]
+    best = None
+    for d in detect(crop):
+        if d.label == "person" or d.score < conf:
+            continue
+        dx, dy = d.box[0] + d.box[2] / 2 + x0, d.box[1] + d.box[3] / 2 + y0
+        if bx <= dx <= bx + bw and by <= dy <= by + bh and (best is None or d.score > best.score):
+            best = d
+    return best.label if best else None
+
+
+def make_labeler(detector, label_model=None):
+    """달라진 곳에 이름 붙이는 함수. LABEL_MODEL(YOLO-World)이 있으면 그걸, 없으면 지금 모델을 쓴다."""
+    labeler = detector
+    if label_model:
+        try:
+            labeler = YoloDetector(label_model)
+            print("이름 붙이기: YOLO-World 모델", label_model, f"({len(labeler.names)}가지)")
+        except Exception as e:  # noqa: BLE001 - 모델 파일 문제여도 카메라는 계속
+            print(f"LABEL_MODEL을 못 읽어서 지금 모델로 이름을 붙여요 ({label_model}: {e})")
+            labeler = detector
+    return lambda frame, box: label_region(labeler.detect, frame, box)
+
+
 def make_detector(model_path, desk_area=None):
     if model_path:
         print("인원 세기: YOLO 모델", model_path)
@@ -555,8 +657,9 @@ def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path
                         print("화면 보기 오류(카메라는 계속 돌아요):", repr(e))
                 detailed = getattr(detector, "detect_detailed", None)
                 detail = (lambda: detailed(frame)) if detailed else None  # 기준·정리 확인 때만 불림
-                event, check = watcher.update(dets, clock(), pir_now(), detail=detail)
-                del frame, detail  # 사진은 바로 버린다
+                photo = (lambda: frame) if watcher.desk is not None else None  # 책상 사진 비교 (DESK_PHOTO)
+                event, check = watcher.update(dets, clock(), pir_now(), detail=detail, photo=photo)
+                del frame, detail, photo  # 사진은 바로 버린다
                 on_frame()  # 찾기까지 성공한 장만 "카메라 살아 있음"으로 친다
                 if event:
                     print(f"인원 {watcher.room_id}번 방: {event['sources']['people']}명")

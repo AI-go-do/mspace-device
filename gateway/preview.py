@@ -1,7 +1,7 @@
 """방 안 카메라가 지금 보는 화면을 브라우저로 보여 준다 (설치·시연 확인용, 기본은 꺼짐).
 
-PREVIEW_PORT=8080 을 붙여 실행하면 같은 네트워크(Tailscale 포함)의 브라우저에서
-http://<젯슨 주소>:8080 으로 볼 수 있다. 찾은 사람·물건 상자와 사람 수를 그려서 보여 준다.
+PREVIEW_PORT=8090 을 붙여 실행하면 젯슨 안에서만 열린다(127.0.0.1). 맥에서 보려면
+PREVIEW_HOST=$(tailscale ip -4) 로 Tailscale 주소에만 열어서 팀 Tailscale 안에서만 보이게 한다. 찾은 사람·물건 상자와 사람 수를 그려서 보여 준다.
 사진은 메모리에 마지막 한 장만 두고, 파일로 저장하거나 서버로 보내지 않는다.
 """
 import threading
@@ -20,7 +20,7 @@ OTHER = (0, 140, 255)
 class Preview:
     """마지막 화면 한 장(JPEG)을 들고 있다가 브라우저에 계속 흘려보낸다."""
 
-    def __init__(self, port, host="0.0.0.0"):
+    def __init__(self, port, host="127.0.0.1"):
         self.port = port
         self.host = host
         self.jpeg = None
@@ -77,5 +77,5 @@ class Preview:
         self.server = ThreadingHTTPServer((self.host, self.port), Handler)
         self.server.daemon_threads = True
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        print(f"카메라 화면 보기: 브라우저에서 http://<젯슨 주소>:{self.port} (예: Tailscale IP)")
+        print(f"카메라 화면 보기: 브라우저에서 http://{self.host}:{self.port}")
         return self

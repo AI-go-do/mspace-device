@@ -433,3 +433,16 @@ def test_run_room_camera_feeds_preview():
         run_room_camera(RoomWatcher(1), FakeCam(2), FakeDetector(), lambda e: None,
                         clock=iter(range(100)).__next__, sleep=lambda s: None, preview=P())
     assert got  # 읽은 장마다 화면 보기에 넘김
+
+
+def test_preview_error_does_not_stop_counting():
+    class Broken:
+        def update(self, frame, dets, people):
+            raise RuntimeError("인코딩 실패")
+
+    pushed, seen = [], []
+    with pytest.raises(StopIteration):
+        run_room_camera(RoomWatcher(1), FakeCam(2), FakeDetector(), pushed.append,
+                        clock=iter(range(100)).__next__, sleep=lambda s: None, preview=Broken(),
+                        on_frame=lambda: seen.append(1))
+    assert pushed and seen  # 화면 보기가 망가져도 인원 이벤트와 살아 있음 표시는 계속

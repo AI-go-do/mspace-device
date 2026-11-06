@@ -314,7 +314,10 @@ def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path
             try:
                 dets = detector.detect(frame)
                 if preview is not None:  # 화면 보기를 켰을 때만 상자를 그려 메모리에 한 장 둔다
-                    preview.update(frame, dets, watcher.people(dets))
+                    try:
+                        preview.update(frame, dets, watcher.people(dets))
+                    except Exception as e:  # 화면 보기 오류는 인원 세기를 막지 않는다
+                        print("화면 보기 오류(카메라는 계속 돌아요):", repr(e))
                 del frame  # 사진은 바로 버린다
                 event, check = watcher.update(dets, clock(), pir_now())
                 on_frame()  # 찾기까지 성공한 장만 "카메라 살아 있음"으로 친다

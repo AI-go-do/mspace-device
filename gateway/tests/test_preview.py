@@ -54,11 +54,20 @@ def test_server_serves_page(monkeypatch):
 
 def test_preview_off_by_default(monkeypatch):
     assert gateway.load_config({}).preview_port is None
+    assert gateway.load_config({}).preview_host == "127.0.0.1"
+    assert gateway.load_config({"PREVIEW_HOST": "100.1.2.3"}).preview_host == "100.1.2.3"
     assert gateway.load_config({"PREVIEW_PORT": "8080"}).preview_port == 8080
     assert gateway.start_preview(None) is None
     started = []
-    monkeypatch.setattr(preview.Preview, "start", lambda self: started.append(self.port) or self)
-    assert gateway.start_preview(8080).port == 8080 and started == [8080]
+    monkeypatch.setattr(preview.Preview, "start", lambda self: started.append((self.host, self.port)) or self)
+    assert gateway.start_preview(8080).port == 8080 and started == [("127.0.0.1", 8080)]
+    gateway.start_preview(8090, "100.1.2.3")
+    assert started[-1] == ("100.1.2.3", 8090)
+
+
+def test_preview_port_out_of_range_does_not_stop_camera(capsys):
+    assert gateway.start_preview(70000) is None
+    assert "다른 번호로" in capsys.readouterr().out
 
 
 def test_preview_port_in_use_does_not_stop_camera(monkeypatch, capsys):

@@ -18,7 +18,7 @@ import re
 import time
 import uuid
 
-QR_RE = re.compile(r"(?:MSPACE:(\d{1,4}):)?(\d{6})")  # 앞부분(방 번호)은 있어도 되고 없어도 된다
+QR_RE = re.compile(r"(?:MSPACE:([0-9]{1,4}):)?([0-9]{6})")  # 앞부분(방 번호)은 있어도 되고 없어도 된다
 SAME_QR_IGNORE_SEC = 5  # 같은 QR을 카메라 앞에 계속 들고 있으면 5초 동안은 다시 묻지 않는다
 
 

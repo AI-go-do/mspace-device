@@ -87,6 +87,11 @@ def find_port():
     return None
 
 
+def _is_number(text):
+    """0-9로만 된 글자인지 (², ١ 같은 숫자 모양 글자는 int()가 못 바꿔서 뺀다)."""
+    return text.isascii() and text.isdigit()
+
+
 def load_config(env=None):
     """환경변수에서 설정을 읽어 Config로 만든다. PORT를 안 정하면 find_port()로 찾는다."""
     env = os.environ if env is None else env
@@ -97,9 +102,9 @@ def load_config(env=None):
         port=env.get("PORT") or find_port(),
         send_sensors=env.get("SEND_SENSORS") == "1",
         qr_camera=env.get("QR_CAMERA") or None,
-        qr_room_id=int(env["QR_ROOM_ID"]) if env.get("QR_ROOM_ID", "").isdigit() else Config.qr_room_id,
+        qr_room_id=int(env["QR_ROOM_ID"]) if _is_number(env.get("QR_ROOM_ID", "")) else Config.qr_room_id,
         room_camera=env.get("ROOM_CAMERA") or None,
-        room_camera_room=(int(env["ROOM_CAMERA_ROOM"]) if env.get("ROOM_CAMERA_ROOM", "").isdigit()
+        room_camera_room=(int(env["ROOM_CAMERA_ROOM"]) if _is_number(env.get("ROOM_CAMERA_ROOM", ""))
                           else Config.room_camera_room),
         yolo_model=env.get("YOLO_MODEL") or None,
     )
@@ -445,9 +450,10 @@ def start_room_camera(config, sensors):
 
 def start_qr(config, verifier, on_reply):
     """문 앞 웹캠 QR 입실을 뒤에서(스레드) 켠다. 키패드와 같은 확인기, 같은 우노 LED를 쓴다."""
-    from qr_door import QrDoor, run_camera  # QR을 켤 때만 불러온다
-    door = QrDoor(verifier, config.qr_room_id)
-    t = threading.Thread(target=run_camera, args=(door, config.qr_camera, on_reply), daemon=True)
+    import qr_door  # QR을 켤 때만 불러온다
+    door = qr_door.QrDoor(verifier, config.qr_room_id)
+    frames = qr_door.open_camera(config.qr_camera)  # 스레드 전에 연다: 카메라가 없으면 바로 멈추고 알려줌
+    t = threading.Thread(target=qr_door.run_camera, args=(door, config.qr_camera, on_reply, frames), daemon=True)
     t.start()
     return t
 

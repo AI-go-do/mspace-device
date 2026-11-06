@@ -42,6 +42,16 @@ def test_nms_keeps_best_of_overlapping_same_label():
     assert nms([b, a, c]) == [a, c]
 
 
+def test_nms_keeps_two_people_sitting_close():
+    """겹침 0.54: 물건이면 하나로 합치지만, 사람은 붙어 앉은 두 명으로 남긴다."""
+    p1, p2 = Detection("person", 0.9, (0, 0, 10, 10)), Detection("person", 0.8, (3, 0, 10, 10))
+    assert nms([p1, p2]) == [p1, p2]
+    c1, c2 = Detection("cup", 0.9, (0, 0, 10, 10)), Detection("cup", 0.8, (3, 0, 10, 10))
+    assert nms([c1, c2]) == [c1]
+    same = Detection("person", 0.7, (0.5, 0, 10, 10))  # 거의 같은 상자는 여전히 한 명
+    assert nms([p1, same]) == [p1]
+
+
 def test_parse_yolo():
     out = np.zeros((1, 84, 3), dtype=np.float32)
     out[0, :4, 0] = [320, 320, 64, 128]   # 사람

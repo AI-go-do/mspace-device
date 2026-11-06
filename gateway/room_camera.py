@@ -80,11 +80,18 @@ def iou(a, b):
     return inter / union if union > 0 else 0.0
 
 
-def nms(dets, threshold=0.45):
-    """같은 물건을 여러 상자로 잡은 걸 하나로 줄인다 (점수 높은 것만 남김)."""
+PERSON_NMS = 0.6  # 사람끼리는 붙어 앉아 많이 겹치므로 더 많이 겹쳐야 같은 사람으로 본다
+
+
+def nms(dets, threshold=0.45, person_threshold=PERSON_NMS):
+    """같은 물건을 여러 상자로 잡은 걸 하나로 줄인다 (점수 높은 것만 남김).
+
+    사람은 옆 사람과 상자가 많이 겹쳐도 다른 사람일 수 있어서 기준을 더 느슨하게 둔다.
+    """
     kept = []
     for d in sorted(dets, key=lambda d: d.score, reverse=True):
-        if all(k.label != d.label or iou(k.box, d.box) < threshold for k in kept):
+        limit = person_threshold if d.label == "person" else threshold
+        if all(k.label != d.label or iou(k.box, d.box) < limit for k in kept):
             kept.append(d)
     return kept
 

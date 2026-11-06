@@ -117,9 +117,10 @@ DRY_RUN=1 QR_CAMERA=0 python3 gateway/gateway.py               # 서버 없이: 
 방 안을 비추는 두 번째 웹캠으로 **몇 명 있는지** 세고, 사람이 다 나가면 **방이 깨끗한지** 확인해요.
 
 ```bash
-# 처음 한 번: 사람·물건 찾는 모델 받기 (yolov8n.onnx, 약 12MB)
-pip3 install ultralytics && yolo export model=yolov8n.pt format=onnx
-mv yolov8n.onnx gateway/
+# 처음 한 번: 사람·물건 찾는 모델 받기 (yolov8s.onnx, 약 45MB)
+# 작은 n(12MB)은 빠르지만 위에서 내려다본 노트북·폰을 자주 놓쳐서 s를 써요
+pip3 install ultralytics && yolo export model=yolov8s.pt format=onnx opset=12
+mv yolov8s.onnx gateway/
 
 # 젯슨 기본 OpenCV(4.6)는 YOLOv8 모델을 못 읽어서 onnxruntime을 같이 써요 (처음 한 번)
 sudo apt install -y python3-opencv python3-numpy python3-venv
@@ -127,9 +128,9 @@ python3 -m venv --system-site-packages ~/mspace-venv     # apt로 깐 OpenCV·se
 ~/mspace-venv/bin/pip install onnxruntime
 
 set -a; . ./.env; set +a
-ROOM_CAMERA=2 YOLO_MODEL=gateway/yolov8n.onnx SEND_SENSORS=1 ~/mspace-venv/bin/python gateway/gateway.py
+ROOM_CAMERA=2 YOLO_MODEL=gateway/yolov8s.onnx SEND_SENSORS=1 ~/mspace-venv/bin/python gateway/gateway.py
 # 문 앞 QR과 같이: QR_CAMERA=0 ROOM_CAMERA=1 ...
-# 서버 없이 화면 출력만: DRY_RUN=1 ROOM_CAMERA=1 YOLO_MODEL=gateway/yolov8n.onnx python3 gateway/gateway.py
+# 서버 없이 화면 출력만: DRY_RUN=1 ROOM_CAMERA=1 YOLO_MODEL=gateway/yolov8s.onnx python3 gateway/gateway.py
 ```
 
 **카메라 화면 보기 (설치·시연 확인용, 기본 꺼짐):** 실행 명령 앞에 `PREVIEW_PORT=8090 PREVIEW_HOST=$(tailscale ip -4)`를 붙이면 팀 Tailscale 안의 브라우저에서 `http://<젯슨 Tailscale IP>:8090`으로 카메라가 보는 화면을 볼 수 있어요. `PREVIEW_HOST`를 안 주면 젯슨 안(127.0.0.1)에서만 열려요. 인증이 없어서 학교 와이파이 같은 열린 네트워크(0.0.0.0)에는 열지 않아요. 사람은 초록, 물건은 주황 상자로 그리고 사람 수를 표시해요. 젯슨 B는 8080을 다른 서비스가 쓰고 있어서 8090을 써요. 마지막 한 장만 메모리에 두고 저장·전송은 하지 않아요.

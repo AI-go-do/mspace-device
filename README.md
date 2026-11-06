@@ -134,10 +134,25 @@ echo ch341 | sudo tee /etc/modules-load.d/ch341.conf
 | OUT | D27 |
 | TX · RX | 비움 |
 
+**키패드 (시험용, `USE_KEYPAD 1`일 때)**: 2번 방에서도 키패드 체크인이 되는지, 두 방이 동시에 돌아가는지 볼 때만 켜요. 발표·운영에서 빼려면 `config.h`의 `USE_KEYPAD`를 `0`으로 바꾸고 다시 올리면 키패드 코드가 통째로 빠져요(배선은 그냥 둬도 돼요).
+
+| 부품 | ESP32 핀 |
+|---|---|
+| 키패드 행 R1~R4 | 32, 33, 25, 14 |
+| 키패드 열 C1~C4 | 13, 23, 19, 18 |
+| 초록 LED (열림) | 16 → 220Ω → LED → GND |
+| 빨강 LED (거부) | 17 → 220Ω → LED → GND |
+
+- 사용법은 우노와 같아요: 6자리 + `#` → 기다리는 동안 초록 깜빡임 → 초록(열림)/빨강(거부) 1.5초, `*`는 지우기. DRY_RUN이면 `123456`만 열려요
+- 숫자가 다르게 찍히면 선을 바꾸지 말고 `config.h`의 `KEYPAD_ROW_PINS`·`KEYPAD_COL_PINS` 순서만 바꿔요
+- 0·2·12·15번(부팅에 쓰임), 34~39번(입력 전용이라 키패드 행으로 못 씀), 21·22번(CO2 센서 자리)은 피했어요
+- 번호를 확인하는 동안(보통 1초 안) 센서 전송은 잠깐 멈췄다가 이어서 해요. 재실 판단은 1분 기준이라 영향 없어요
+
 **올리기**
 1. 아두이노 IDE → 보드 매니저 → **esp32** (Espressif) 설치, 보드는 `ESP32 Dev Module`
-2. `firmware/esp32_room_node/esp32_room_node.ino` 열기 (같은 폴더 파일이 탭으로 같이 열려요) → 업로드
-3. 시리얼 모니터(115200): 레이더 앞에 서면 `재실 2번 방: 있음 (레이더=1)`, 그대로여도 10초마다 한 줄 + `[DRY_RUN] POST ...`
+2. (키패드를 켰으면) 라이브러리 관리 → **Keypad** (Mark Stanley) 설치
+3. `firmware/esp32_room_node/esp32_room_node.ino` 열기 (같은 폴더 파일이 탭으로 같이 열려요) → 업로드
+4. 시리얼 모니터(115200): 레이더 앞에 서면 `재실 2번 방: 있음 (레이더=1)`, 그대로여도 10초마다 한 줄 + `[DRY_RUN] POST ...`
 
 **와이파이·서버 (준비되면)**
 1. `secrets.h.example`을 `secrets.h`로 복사해서 와이파이(2.4GHz), 서버 주소, 장치 토큰, 인증서 넣기. **GitHub에 안 올라가요**
@@ -148,12 +163,15 @@ echo ch341 | sudo tee /etc/modules-load.d/ch341.conf
 
 | 파일 | 하는 일 |
 |---|---|
-| `config.h` | 방 번호, 핀, 어떤 센서를 달았나(`USE_RADAR`, `USE_PIR`), 주기, DRY_RUN |
+| `config.h` | 방 번호, 핀, 어떤 센서를 달았나(`USE_RADAR`, `USE_PIR`, `USE_KEYPAD`), 주기, DRY_RUN |
 | `secrets.h` | 와이파이·서버 주소·토큰 (복사해서 만듦) |
 | `occupancy.*` | 레이더·PIR 읽기 → "하나라도 있음이면 있음"으로 합치기, 바뀜/10초 판단 |
 | `events.*` | core 형식 이벤트 (새 UUID eventId, 센서가 본 시각 observedAt) |
 | `net.*` | 와이파이 연결·자동 재연결, 인터넷 시계 |
+| `server.*` | 서버 설정 확인(토큰, https 인증서, 원격 http 막기) + POST 한 번. 재실·키패드가 같이 써요 |
 | `sender.*` | 큐에 모아 순서대로 전송. 5xx·연결 실패·401·403·404·408·429·리디렉션은 큐를 그대로 두고 같은 eventId로 재시도(1→2→4…30초). 400·409·413·422(이 이벤트 형식 문제)만 버림. 시계(NTP)를 기다리는 동안 1분마다 로그 |
+| `access.*` | 키패드 번호를 `/api/access/verify`로 확인. 5xx·연결 실패면 같은 eventId로 1번 더, 그래도 안 되면 거부(게이트웨이와 같음) |
+| `keypad_door.*` | 키패드 읽기 + LED. 기다리는 동안 초록 깜빡임 |
 
 큐는 32개(10초 신호 기준 약 5분)까지 모아요. 와이파이가 5분 넘게 끊기면 그 사이 기록은 오래된 것부터 일부 빠져요(정확도 측정 #13 때 참고). core는 다시 받은 시각부터 10·15분을 새로 재요.
 
@@ -163,7 +181,7 @@ echo ch341 | sudo tee /etc/modules-load.d/ch341.conf
 |---|---|
 | PIR 같이 달기 (정확도 비교, 이슈 #13) | `USE_PIR 1`, OUT → D26. 코드는 이미 있음 |
 | CO2 (FR-DEV-104) | SCD40 읽는 파일 추가 → 1분마다 `makeCo2Event()`로 큐에 넣기. 보내는 쪽은 그대로 |
-| 키패드 체크인 (FR-ACC-001) | 우노 코드의 키패드·LED 부분을 옮기고, `/api/access/verify`로 보내는 함수 추가 |
+| 키패드 체크인 (FR-ACC-001) | 코드 있음 (`USE_KEYPAD 1`). 방마다 ESP32 하나에 키패드까지 달면 젯슨 없이 체크인 |
 | 방 늘리기 | 같은 코드에 `ROOM_ID`·`DEVICE_ID`·토큰만 바꿔서 올리기 |
 
 ### 게이트웨이 구조
@@ -240,7 +258,7 @@ pytest --cov --cov-report=term-missing   # 우노·서버 없이 가짜 시리�
 
 ```
 firmware/uno_sensor_node/   우노 코드 (키패드 · PIR · 조도) → 1번 방
-firmware/esp32_room_node/   ESP32 메인 장치 (레이더 → 와이파이로 core 직접) → 2번 방
+firmware/esp32_room_node/   ESP32 메인 장치 (레이더 → 와이파이로 core 직접, 시험용 키패드) → 2번 방
 gateway/                    중계 (노트북·젯슨)
 docs/                       배선도·회로도 (png, svg)
 ```

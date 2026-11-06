@@ -4,12 +4,12 @@
 // - 버림: 400·409·413·422(이 이벤트 자체의 형식 문제)만 로그를 남기고 버린다
 // - 막힘: 401·403·404·408·429·3xx는 설정·서버 문제라 큐를 그대로 두고 간격을 늘려 다시 보낸다
 // - DRY_RUN: 서버에 안 보내고 시리얼 모니터에 보낼 JSON만 찍는다
+// - 서버 설정 확인(토큰, https 인증서, 원격 http 막기)과 실제 POST는 server.*가 한다
 #pragma once
 #include <Arduino.h>
 #include "events.h"
 
 namespace sender {
-void begin();                       // 설정 확인 (https 인증서, 토큰). 문제가 있으면 이유를 찍는다
 void push(const Event& e);          // 큐에 넣는다. 꽉 차면 가장 오래된 것을 버린다
 void update(unsigned long nowMs);   // loop()마다. 보낼 때가 됐으면 맨 앞 하나를 보낸다
 size_t pending();                   // 아직 못 보낸 개수

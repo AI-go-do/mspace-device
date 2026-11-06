@@ -1,6 +1,7 @@
 # PR마다 자동 확인
 #  - test: 게이트웨이 테스트 + 커버리지
 #  - firmware: 우노 펌웨어가 컴파일되는지
+#  - firmware-esp32: ESP32 펌웨어가 컴파일되는지 (키패드 켬·끔 둘 다)
 #  - sonar: 학교 SonarQube 서버 분석. develop은 결과 표시만, main으로 가는 PR은 품질 게이트(새 코드 커버리지 80% 이상) 통과해야 성공
 name: CI
 
@@ -49,6 +50,33 @@ jobs:
           arduino-cli lib install Keypad
       - name: 컴파일
         run: arduino-cli compile -b arduino:avr:uno firmware/uno_sensor_node
+
+  # ESP32 방 장치(2번 방)가 컴파일되는지. 키패드를 켠 것(USE_KEYPAD 1)과 끈 것(0) 둘 다 확인한다
+  firmware-esp32:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: arduino-cli 설치
+        run: |
+          mkdir -p $HOME/bin
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=$HOME/bin sh
+          echo "$HOME/bin" >> $GITHUB_PATH
+      - name: ESP32 지원·Keypad 설치
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+          arduino-cli lib install Keypad
+      - name: 컴파일 (키패드 켬)
+        run: arduino-cli compile -b esp32:esp32:esp32 firmware/esp32_room_node
+      - name: 컴파일 (키패드 끔)
+        run: |
+          sed -i 's/^#define USE_KEYPAD 1/#define USE_KEYPAD 0/' firmware/esp32_room_node/config.h
+          grep -q '^#define USE_KEYPAD 0' firmware/esp32_room_node/config.h
+          arduino-cli compile -b esp32:esp32:esp32 firmware/esp32_room_node
 
   # 학교 SonarQube 서버로 분석 (mspace-assistant와 같은 방식)
   # Community 판은 PR·브랜치 분석이 없어서

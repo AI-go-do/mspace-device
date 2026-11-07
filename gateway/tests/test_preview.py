@@ -33,6 +33,12 @@ def test_update_draws_boxes_and_count(monkeypatch):
     assert p.latest() == b"JPEG"
 
 
+def test_update_draws_desk_area(monkeypatch):
+    drawn = fake_cv2(monkeypatch)
+    preview.Preview(0).update(FakeImg(), [], 0, area=(100, 50, 200, 100))
+    assert ("box", (100, 50), (300, 150)) in drawn and ("text", "desk") in drawn
+
+
 def test_text_grows_with_screen_width():
     assert preview.text_size(types.SimpleNamespace(shape=(1080, 1920, 3))) == (1.2, 2)
     assert preview.text_size(types.SimpleNamespace(shape=(480, 640, 3))) == (0.5, 1)

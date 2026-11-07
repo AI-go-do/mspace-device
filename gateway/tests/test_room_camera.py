@@ -8,7 +8,8 @@ import pytest
 import gateway
 import room_camera
 from room_camera import (BEAT_SEC, EMPTY_CHECK_SEC, Detection, RoomWatcher, check_message, iou, nms,
-                         parse_yolo, run_room_camera, tile_boxes, detect_tiled, cut_by_tile, tidy_body)
+                         parse_yolo, run_room_camera, tile_boxes, detect_tiled, cut_by_tile, tidy_body,
+                         desk_box, detect_desk, merge)
 
 
 def person(x=0):
@@ -363,7 +364,7 @@ def test_run_room_camera_sends_only_reservation_checks(monkeypatch):
     class W(RoomWatcher):
         n = 0
 
-        def update(self, dets, now, pir=None, now_iso=None, detail=None):
+        def update(self, dets, now, pir=None, now_iso=None, detail=None, photo=None):
             W.n += 1
             if W.n == 1:
                 return None, {"roomId": 1, "status": "BASELINE_SAVED", "objects": {}, "checkedAt": "t"}
@@ -416,7 +417,7 @@ def test_run_room_camera_pushes_and_logs(tmp_path):
 
 def test_run_room_camera_writes_check_log(tmp_path, monkeypatch):
     class OneCheck(RoomWatcher):
-        def update(self, dets, now, pir=None, now_iso=None, detail=None):
+        def update(self, dets, now, pir=None, now_iso=None, detail=None, photo=None):
             return None, {"roomId": 1, "status": "CLEAN", "trash": {}, "leftItems": {}, "checkedAt": "t"}
 
     log = tmp_path / "log.jsonl"
@@ -477,7 +478,7 @@ def test_start_room_camera(monkeypatch):
     class Det:
         finds_objects = False
 
-    monkeypatch.setattr(room_camera, "make_detector", lambda path: Det())
+    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None: Det())
     monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
 
     def fake_run(watcher, cam, detector, push, pir_now, on_frame=None, preview=None, send_check=None):
@@ -499,7 +500,7 @@ def test_start_room_camera_uses_checkout_mode_when_sending(monkeypatch):
     class Det:
         finds_objects = True
 
-    monkeypatch.setattr(room_camera, "make_detector", lambda path: Det())
+    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None: Det())
     monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
     monkeypatch.setattr(gateway.SensorSender, "start", lambda self: self)
     monkeypatch.setattr(gateway.CheckoutPoller, "start", lambda self: polled.append(self.url) or self)
@@ -687,8 +688,8 @@ def test_run_room_camera_feeds_preview():
     got = []
 
     class P:
-        def update(self, frame, dets, people):
-            got.append(people)
+        def update(self, frame, dets, people, area=None):
+            got.append((people, area))
 
     with pytest.raises(StopIteration):
         run_room_camera(RoomWatcher(1), FakeCam(2), FakeDetector(), lambda e: None,
@@ -698,7 +699,7 @@ def test_run_room_camera_feeds_preview():
 
 def test_preview_error_does_not_stop_counting():
     class Broken:
-        def update(self, frame, dets, people):
+        def update(self, frame, dets, people, area=None):
             raise RuntimeError("인코딩 실패")
 
     pushed, seen = [], []
@@ -810,3 +811,70 @@ def test_no_baseline_path_keeps_memory_only(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     RoomWatcher(1).update([thing("remote")], now=0)
     assert list(tmp_path.iterdir()) == []
+
+
+# ---- 책상 확대 (DESK_AREA) ----
+
+def test_desk_box_turns_ratio_into_pixels():
+    assert desk_box(1920, 1080, (0.25, 0.2, 0.75, 0.8)) == (480, 216, 960, 648)
+
+
+def test_detect_desk_moves_boxes_back_to_screen():
+    frame = np.zeros((1000, 2000, 3), dtype=np.uint8)
+    shapes = []
+
+    def detect(img):
+        shapes.append(img.shape[:2])
+        return [Detection("cell phone", 0.6, (10, 20, 30, 15))] if len(shapes) == 1 else []
+
+    found = detect_desk(detect, frame, (0.25, 0.2, 0.75, 0.8))
+    assert shapes[0] == (600, 1000)  # 책상만 잘라서 본다 (+ 책상 4조각)
+    assert len(shapes) == 5
+    assert [(d.label, d.box) for d in found] == [("cell phone", (510, 220, 30, 15))]
+
+
+def test_merge_counts_same_object_once():
+    whole = [thing("cup", 100, 100)]
+    desk = [Detection("cup", 0.9, (105, 105, 30, 30)), Detection("cell phone", 0.5, (400, 400, 20, 10))]
+    assert sorted(d.label for d in merge(whole, desk)) == ["cell phone", "cup"]
+
+
+def test_yolo_detailed_adds_desk_only_when_set():
+    class Y(room_camera.YoloDetector):
+        def __init__(self, desk_area):
+            self.desk_area = desk_area
+            self.calls = 0
+
+        def detect(self, frame):
+            self.calls += 1
+            return []
+
+    frame = np.zeros((100, 200, 3), dtype=np.uint8)
+    plain, desk = Y(None), Y((0.2, 0.2, 0.8, 0.8))
+    plain.detect_detailed(frame)
+    desk.detect_detailed(frame)
+    assert plain.calls == 5 and desk.calls == 10  # 전체+4조각, 책상+책상 4조각
+
+
+def test_preview_gets_desk_area_in_pixels():
+    got = []
+
+    class P:
+        def update(self, frame, dets, people, area=None):
+            got.append(area)
+
+    class D(FakeDetector):
+        desk_area = (0.5, 0.5, 1.0, 1.0)
+
+    class Cam:
+        frames = [np.zeros((100, 200, 3), dtype=np.uint8)]
+
+        def read(self):
+            if not self.frames:
+                raise StopIteration
+            return True, self.frames.pop()
+
+    with pytest.raises(StopIteration):
+        run_room_camera(RoomWatcher(1), Cam(), D(), lambda e: None,
+                        clock=iter(range(100)).__next__, sleep=lambda s: None, preview=P())
+    assert got == [(100, 50, 100, 50)]

@@ -1,10 +1,7 @@
 #include "sender.h"
-#include <HTTPClient.h>
-#include <WiFiClient.h>
-#include <WiFiClientSecure.h>
 #include "config.h"
 #include "net.h"
-#include "secrets_or_default.h"
+#include "server.h"
 
 namespace sender {
 
@@ -28,61 +25,6 @@ void push(const Event& e) {
 static void popFront() {
   head = (head + 1) % QUEUE_SIZE;
   count--;
-}
-
-// ---------- 서버 설정 확인 ----------
-// http 시험을 허용할 주소인가: 사설망 IP(10.x, 172.16~31.x, 192.168.x)나 .local 이름만.
-// "http://192.168.evil.com"처럼 앞부분만 같은 이름은 막도록 호스트 부분을 통째로 확인한다
-static bool isLocalHost(const String& url) {
-  String host = url.substring(7);  // "http://" 뒤
-  if (host.indexOf('@') >= 0) return false;  // user@host 꼴은 받지 않는다 ("10.1.2.3:80@evil.com"도 막게 자르기 전에 본다)
-  int end = host.length();
-  const char stops[] = {'/', ':', '?', '#'};
-  for (char c : stops) {
-    int i = host.indexOf(c);
-    if (i >= 0 && i < end) end = i;
-  }
-  host = host.substring(0, end);
-  if (host.endsWith(".local") && host.length() > 6) return true;
-  int a, b, c, d;
-  char extra;
-  if (sscanf(host.c_str(), "%d.%d.%d.%d%c", &a, &b, &c, &d, &extra) != 4) return false;
-  if (a < 0 || a > 255 || b < 0 || b > 255 || c < 0 || c > 255 || d < 0 || d > 255) return false;
-  return a == 10 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168);
-}
-
-enum Mode { MODE_DRY_RUN, MODE_HTTPS, MODE_HTTP_LOCAL, MODE_BLOCKED };
-static Mode mode = MODE_DRY_RUN;
-
-void begin() {
-  if (DRY_RUN) {
-    Serial.println("[전송] DRY_RUN: 서버에 안 보내고 화면에만 찍어요");
-    mode = MODE_DRY_RUN;
-    return;
-  }
-  String url = SERVER_URL;
-  mode = MODE_BLOCKED;  // 아래 조건을 통과해야 보낸다
-  if (strlen(DEVICE_TOKEN) == 0) {
-    Serial.println("[전송] 막힘: secrets.h에 DEVICE_TOKEN이 없어요");
-  } else if (url.startsWith("https://")) {
-    if (strlen(SERVER_CA_PEM) == 0) {
-      Serial.println("[전송] 막힘: https 인증서(SERVER_CA_PEM)가 없어요. 확인 없이 보내면 가짜 서버에 토큰이 갈 수 있어요");
-    } else {
-      mode = MODE_HTTPS;
-    }
-  } else if (url.startsWith("http://")) {
-    if (ALLOW_HTTP_FOR_LOCAL_TEST && !isLocalHost(url)) {
-      Serial.println("[전송] 막힘: http 시험은 같은 와이파이의 사설 주소(192.168.x.x 등)나 .local만 돼요");
-    } else if (ALLOW_HTTP_FOR_LOCAL_TEST) {
-      Serial.println("[전송] 주의: http로 보내요 (맥 로컬 시험용). 시험이 끝나면 ALLOW_HTTP_FOR_LOCAL_TEST 0으로");
-      mode = MODE_HTTP_LOCAL;
-    } else {
-      Serial.println("[전송] 막힘: 원격 서버는 https://로만 보내요 (장치 토큰 보호)");
-    }
-  } else {
-    Serial.println("[전송] 막힘: SERVER_URL이 비었거나 http(s)://로 시작하지 않아요");
-  }
-  if (mode == MODE_BLOCKED) Serial.println("[전송] 이벤트는 큐에 모으기만 해요. secrets.h를 고치고 다시 올려 주세요");
 }
 
 // ---------- 한 건 보내기 ----------
@@ -110,30 +52,6 @@ static Result classify(int status) {
   return RETRY;
 }
 
-static int httpPost(const char* json) {
-  String url = String(SERVER_URL) + EVENT_PATH;
-  HTTPClient http;
-  WiFiClientSecure secure;
-  WiFiClient plain;
-  bool ok;
-  if (mode == MODE_HTTPS) {
-    secure.setCACert(SERVER_CA_PEM);  // 서버 인증서를 이 루트 인증서로 확인한다
-    secure.setHandshakeTimeout(5);    // https 인사(TLS)가 5초 넘게 멈추면 포기 (기본 120초 동안 센서를 못 읽음)
-    ok = http.begin(secure, url);
-  } else {
-    ok = http.begin(plain, url);
-  }
-  if (!ok) return -1;
-  http.setConnectTimeout(CONNECT_TIMEOUT_MS);
-  http.setTimeout(RESPONSE_TIMEOUT_MS);
-  http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("Authorization", String("Bearer ") + DEVICE_TOKEN);
-  int status = http.POST((uint8_t*)json, strlen(json));
-  http.end();
-  return status;  // 음수면 연결 실패
-}
-
 // ---------- 큐 처리 ----------
 static unsigned long nextTryMs = 0;   // 다음에 보내 볼 시각 (millis)
 static unsigned long backoffMs = RETRY_MIN_MS;
@@ -143,13 +61,13 @@ void update(unsigned long nowMs) {
   const Event& e = queue[head];
   char json[320];
 
-  if (mode == MODE_DRY_RUN) {  // 연습: 화면에 찍고 바로 성공 처리
+  if (server::mode() == server::MODE_DRY_RUN) {  // 연습: 화면에 찍고 바로 성공 처리
     eventToJson(e, net::epochNow(), nowMs, json, sizeof(json), true);
     Serial.print("[DRY_RUN] POST "); Serial.print(EVENT_PATH); Serial.print(' '); Serial.println(json);
     popFront();
     return;
   }
-  if (mode == MODE_BLOCKED || !net::online()) return;    // 보낼 수 없으면 모아 두기만
+  if (!server::canSend() || !net::online()) return;    // 보낼 수 없으면 모아 두기만
   if ((long)(nowMs - nextTryMs) < 0) return;              // 아직 기다리는 중 (재시도 간격)
   if (!eventToJson(e, net::epochNow(), nowMs, json, sizeof(json))) {  // 시계가 맞춰질 때까지 기다림
     static unsigned long lastClockLogMs = 0;
@@ -160,7 +78,7 @@ void update(unsigned long nowMs) {
     return;
   }
 
-  Result r = classify(httpPost(json));
+  Result r = classify(server::post(EVENT_PATH, json));
   if (r == RETRY) {
     nextTryMs = millis() + backoffMs;
     backoffMs = min(backoffMs * 2, RETRY_MAX_MS);

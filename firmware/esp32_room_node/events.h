@@ -18,6 +18,9 @@ struct Event {
   unsigned long madeMs;  // 만든 시각 (millis). 시계가 늦게 맞춰져도 이걸로 실제 시각을 거꾸로 계산한다
 };
 
+// 새 UUID(버전 4). 이벤트마다 하나. 키패드 확인(checkin)도 같이 쓴다
+void makeUuid(char* out, size_t n);
+
 Event makeOccupancyEvent(const OccupancyReading& r, unsigned long nowMs);
 Event makeCo2Event(uint16_t ppm, unsigned long nowMs);
 

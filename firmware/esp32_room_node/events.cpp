@@ -3,7 +3,7 @@
 #include <time.h>
 
 // 새 UUID(버전 4)를 만든다. ESP32의 random()은 하드웨어 난수를 쓴다
-static void makeUuid(char* out, size_t n) {
+void makeUuid(char* out, size_t n) {
   uint8_t b[16];
   for (int i = 0; i < 16; i++) b[i] = (uint8_t)random(256);
   b[6] = (b[6] & 0x0F) | 0x40;  // 버전 4 표시

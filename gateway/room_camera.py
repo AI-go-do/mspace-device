@@ -104,17 +104,27 @@ def iou(a, b):
 
 
 PERSON_NMS = 0.6  # 사람끼리는 붙어 앉아 많이 겹치므로 더 많이 겹쳐야 같은 사람으로 본다
+SAME_SPOT = 0.8   # 이름이 다른 물건 두 상자가 이만큼 겹치면 같은 물건에 이름이 두 개 붙은 것
 
 
-def nms(dets, threshold=0.45, person_threshold=PERSON_NMS):
+def same_thing(a, b, threshold, person_threshold, same_spot):
+    """b(점수 높은 쪽)가 있으면 a는 버려도 되는지."""
+    if a.label == b.label:
+        return iou(a.box, b.box) >= (person_threshold if a.label == "person" else threshold)
+    # 물건끼리 거의 같은 자리·크기면 한 물건이다 (11/7 방 사진: 리모컨을 "리모컨"과 "휴대폰"으로 동시에 봄).
+    # 사람은 손에 든 물건과 상자가 겹칠 수 있어서 이름이 다르면 따로 둔다.
+    return "person" not in (a.label, b.label) and iou(a.box, b.box) >= same_spot
+
+
+def nms(dets, threshold=0.45, person_threshold=PERSON_NMS, same_spot=SAME_SPOT):
     """같은 물건을 여러 상자로 잡은 걸 하나로 줄인다 (점수 높은 것만 남김).
 
     사람은 옆 사람과 상자가 많이 겹쳐도 다른 사람일 수 있어서 기준을 더 느슨하게 둔다.
+    물건 하나에 이름이 두 개 붙으면(거의 같은 상자) 점수 높은 이름만 남긴다.
     """
     kept = []
     for d in sorted(dets, key=lambda d: d.score, reverse=True):
-        limit = person_threshold if d.label == "person" else threshold
-        if all(k.label != d.label or iou(k.box, d.box) < limit for k in kept):
+        if not any(same_thing(d, k, threshold, person_threshold, same_spot) for k in kept):
             kept.append(d)
     return kept
 

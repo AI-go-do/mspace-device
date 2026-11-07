@@ -54,6 +54,32 @@ def test_nms_keeps_two_people_sitting_close():
     assert nms([p1, same]) == [p1]
 
 
+def test_nms_one_thing_with_two_names_keeps_higher_score():
+    """11/7 방 사진 4장 모두: 책상 리모컨을 "리모컨"과 "휴대폰"으로 거의 같은 상자에 동시에 봄."""
+    remote = Detection("remote", 0.65, (621, 461, 59, 55))
+    phone = Detection("cell phone", 0.33, (620, 461, 59, 56))
+    assert nms([phone, remote]) == [remote]
+
+
+def test_nms_keeps_person_and_phone_in_hand():
+    """사람과 손에 든 휴대폰은 상자가 많이 겹쳐도 따로 남긴다."""
+    p = Detection("person", 0.9, (0, 0, 10, 10))
+    phone = Detection("cell phone", 0.5, (0, 0, 10, 9))
+    assert nms([p, phone]) == [p, phone]
+
+
+def test_remote_also_seen_as_phone_is_not_left_phone():
+    """방 비품 리모컨에 "휴대폰" 이름이 같이 붙어도 "휴대폰 두고 감"으로 알리지 않는다."""
+    remote = Detection("remote", 0.65, (621, 461, 59, 55))
+    phone = Detection("cell phone", 0.33, (620, 461, 59, 56))
+    w = RoomWatcher(1, room_items={"remote": 1})
+    w.update([remote], now=0)
+    for t in range(1, 6):
+        w.update([person()], now=t)
+    checks = [c for c in (w.update(nms([remote, phone]), now=6 + i)[1] for i in range(EMPTY_CHECK_SEC + 5)) if c]
+    assert [c["status"] for c in checks] == ["CLEAN"]
+
+
 def test_parse_yolo():
     out = np.zeros((1, 84, 3), dtype=np.float32)
     out[0, :4, 0] = [320, 320, 64, 128]   # 사람

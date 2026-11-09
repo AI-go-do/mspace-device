@@ -29,6 +29,7 @@ FUTURE_SEC = 30      # 센서 시각이 받은 시각보다 이만큼 넘게 뒤
 STALE_SEC = 300      # 기기 값이 이만큼 안 오면 평균에서 뺀다 (주기 1~2분 → 두세 번 놓쳐도 남게)
 SEND_SEC = 60        # core로 보내는 간격 (core CO2 판단이 1분 단위)
 SEEN_MAX = 5000      # 중복 확인용으로 기억할 (devEui, fCnt) 수. 넘치면 오래된 것부터 잊는다
+DEDUP_SEC = 120      # 같은 (devEui, fCnt)가 이 안에 다시 오면 중복. 넘으면 센서가 재가입해 fCnt가 0부터 다시 센 것
 KST = timezone(timedelta(hours=9))
 
 # core가 받는 범위 (docs api 6-1). 벗어난 값은 그 값만 뺀다
@@ -119,7 +120,7 @@ class RoomEnv:
         self.push = push          # core로 보낼 줄 (SensorSender.push 또는 화면 출력)
         self.log = log
         self.lock = threading.Lock()
-        self.seen = OrderedDict()  # (devEui, fCnt) → None. 중복 확인
+        self.seen = OrderedDict()  # (devEui, fCnt) → 받은 시각. 중복 확인
         self.latest = {}           # devEui → Reading (기기마다 최근 값 하나)
         self.shown = set()         # object 키를 이미 보여 준 기기
         self.fresh = False         # 마지막으로 보낸 뒤 새 값이 왔는지
@@ -136,9 +137,11 @@ class RoomEnv:
         with self.lock:
             if r.fcnt is not None:
                 key = (r.dev, r.fcnt)
-                if key in self.seen:
-                    return None  # 게이트웨이 2대가 같은 메시지를 보냄
-                self.seen[key] = None
+                prev = self.seen.get(key)
+                if prev is not None and received - prev <= DEDUP_SEC:
+                    return None  # 게이트웨이 2대가 같은 메시지를 보냄 (거의 같은 때 도착)
+                self.seen[key] = received
+                self.seen.move_to_end(key)
                 if len(self.seen) > SEEN_MAX:
                     self.seen.popitem(last=False)
             if r.dev not in self.shown:
@@ -150,7 +153,8 @@ class RoomEnv:
             if old is not None and old.at > r.at:
                 return None  # 늦게 도착한 옛 값은 최근 값을 덮지 않는다
             self.latest[r.dev] = r
-            self.fresh = True
+            if r.co2 is not None:  # CO2 없는 메시지만으로는 보내지 않는다 (같은 CO2를 새 eventId로 다시 보내지 않게)
+                self.fresh = True
         return r
 
     def summary(self, now):
@@ -219,6 +223,9 @@ def make_client(env, client_id, host, username, password, port=1883, mqtt=None):
     def on_disconnect(client, userdata, flags, reason_code, properties=None):
         print(f"[환경 MQTT] 끊김 ({reason_code}), 다시 붙어요")
 
+    def on_connect_fail(client, userdata):
+        print("[환경 MQTT] 접속 실패, 다시 해 볼게요 (MQTT_HOST 주소·인터넷 확인)")
+
     def on_message(client, userdata, msg):
         env.on_message(msg.topic, msg.payload)
 
@@ -226,6 +233,7 @@ def make_client(env, client_id, host, username, password, port=1883, mqtt=None):
     if username:
         client.username_pw_set(username, password)
     client.on_connect, client.on_disconnect, client.on_message = on_connect, on_disconnect, on_message
+    client.on_connect_fail = on_connect_fail
     client.reconnect_delay_set(min_delay=1, max_delay=5)
     client.connect_async(host, port, keepalive=30)
     return client

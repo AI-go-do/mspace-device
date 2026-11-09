@@ -134,13 +134,26 @@ def load_config(env=None):
                        else env.get("BASELINE_FILE") or Config.baseline_file),
         mqtt_room=int(env["MQTT_ROOM"]) if _is_number(env.get("MQTT_ROOM", "")) else None,
         mqtt_location=env.get("MQTT_LOCATION") or Config.mqtt_location,
-        mqtt_host=env.get("MQTT_HOST") or None,
-        mqtt_port=int(env["MQTT_PORT"]) if _is_number(env.get("MQTT_PORT", "")) else Config.mqtt_port,
+        mqtt_host=parse_mqtt_host(env.get("MQTT_HOST", ""))[0],
+        mqtt_port=(int(env["MQTT_PORT"]) if _is_number(env.get("MQTT_PORT", ""))
+                   else parse_mqtt_host(env.get("MQTT_HOST", ""))[1] or Config.mqtt_port),
         mqtt_username=env.get("MQTT_USERNAME") or None,
         mqtt_password=env.get("MQTT_PASSWORD") or None,
         mqtt_client_id=env.get("MQTT_CLIENT_ID") or None,
         mqtt_device_id=env.get("MQTT_DEVICE_ID") or None,
     )
+
+
+def parse_mqtt_host(text):
+    """MQTT_HOST="mqtt://broker:1883" → ("broker", 1883). 포트를 같이 적어도, 안 적어도 된다. 비면 (None, None)."""
+    text = text.strip()
+    if "://" in text:
+        text = text.split("://", 1)[1]
+    text = text.rstrip("/")
+    host, sep, port = text.rpartition(":")
+    if sep and _is_number(port) and host:
+        return host, int(port)
+    return (text or None), None
 
 
 def parse_room_items(text):

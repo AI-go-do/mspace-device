@@ -88,6 +88,23 @@ def test_duplicate_fcnt_counted_once():
     assert env.on_message("t", uplink(fcnt=8), received=T0) is not None
 
 
+def test_fcnt_restart_after_rejoin_is_not_duplicate():
+    env, _, _ = make()
+    env.on_message("t", uplink(fcnt=0, co2=500), received=T0)
+    # 센서가 재가입해 fCnt가 0부터 다시: 2분 넘게 지나 온 같은 키는 새 측정값
+    r = env.on_message("t", uplink(fcnt=0, at=T0 + 600, co2=700), received=T0 + 600)
+    assert r is not None and env.latest["a1"].co2 == 700
+
+
+def test_message_without_co2_does_not_resend_same_co2():
+    env, pushed, _ = make()
+    env.on_message("t", uplink(dev="a", fcnt=1, co2=900), received=T0)
+    assert env.tick(T0) is not None
+    env.on_message("t", uplink(dev="b", fcnt=1, at=T0 + 30, co2=None), received=T0 + 30)  # 온도·습도만 오는 기종
+    assert env.tick(T0 + 60) is None  # 같은 CO2를 새 eventId로 다시 보내지 않는다
+    assert len(pushed) == 1
+
+
 def test_seen_is_bounded(monkeypatch):
     monkeypatch.setattr(room_env, "SEEN_MAX", 3)
     env, _, _ = make()
@@ -245,6 +262,30 @@ def test_config_reads_mqtt_env():
     assert "secret" not in repr(c)  # 비밀번호는 화면에 안 찍힌다
     off = gateway.load_config({"PORT": "x"})
     assert off.mqtt_room is None and off.mqtt_location == "실습실"
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("data.example.net", ("data.example.net", None)),
+    ("data.example.net:1883", ("data.example.net", 1883)),
+    ("mqtt://data.example.net:1884/", ("data.example.net", 1884)),
+    ("  ", (None, None)),
+])
+def test_parse_mqtt_host(text, expected):
+    assert gateway.parse_mqtt_host(text) == expected
+
+
+def test_config_host_with_port():
+    c = gateway.load_config({"PORT": "x", "MQTT_HOST": "broker:1884"})
+    assert (c.mqtt_host, c.mqtt_port) == ("broker", 1884)
+    c = gateway.load_config({"PORT": "x", "MQTT_HOST": "broker:1884", "MQTT_PORT": "1885"})
+    assert (c.mqtt_host, c.mqtt_port) == ("broker", 1885)  # MQTT_PORT가 있으면 그게 먼저
+
+
+def test_connect_fail_is_logged(capsys):
+    env, _, _ = make()
+    c = room_env.make_client(env, "id", "broker", None, None, mqtt=FakeMqtt)
+    c.on_connect_fail(c, None)
+    assert "접속 실패" in capsys.readouterr().out
 
 
 def test_start_room_env_wiring():

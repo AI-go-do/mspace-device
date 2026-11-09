@@ -130,10 +130,18 @@ class DeskCompare:
         except (OSError, ValueError, KeyError, TypeError) as e:
             print(f"깨끗한 책상 사진을 못 읽어서 새로 찍어요 ({self.path}: {e})")
 
+    def look(self, frame):
+        """책상 부분만 흑백·작게 줄인 사진 (저장하지 않음). 나중에 set_prepared로 기준으로 삼을 수 있다."""
+        return prepare(frame, self.area)[0]
+
     def set_base(self, frame, known_dets=()):
         """사람 0명인 깨끗한 방에서만 부른다."""
-        self.base, _ = prepare(frame, self.area)
-        self.known = [tuple(float(v) for v in d.box) for d in known_dets]
+        self.set_prepared(self.look(frame), [d.box for d in known_dets])
+
+    def set_prepared(self, img, known_boxes=()):
+        """look으로 미리 줄여 둔 사진을 기준으로 삼고 파일에 적는다 (사람 0명일 때 찍은 것만)."""
+        self.base = img
+        self.known = [tuple(float(v) for v in b) for b in known_boxes]
         if not self.path:
             return
         try:
@@ -149,6 +157,16 @@ class DeskCompare:
             os.replace(meta_tmp, self.path + ".json")
         except OSError as e:
             print(f"깨끗한 책상 사진을 못 썼어요 ({self.path}: {e}). 다시 켜면 새로 찍어요")
+
+    def clear(self):
+        """기준 사진을 메모리와 파일에서 지운다 (예약 기준은 정리 확인이 끝나면 지운다)."""
+        self.base, self.known = None, []
+        for p in (self.path, self.path and self.path + ".json"):
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError as e:
+                    print(f"기준 사진 파일을 못 지웠어요 ({p}: {e})")
 
     def changes(self, frame):
         """달라진 곳을 원래 화면 좌표 상자로. 기준이 없거나 조명이 통째로 바뀌었으면 None."""

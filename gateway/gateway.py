@@ -617,9 +617,14 @@ def start_room_camera(config, sensors):
     detector = room_camera.make_detector(config.yolo_model, config.desk_area)
     on_checkout = sensors is not None  # 서버로 보내는 중이면 "퇴실하면 확인", 아니면(연습) "30초 빈 방"
     desk, labeler = desk_compare(config, detector)
+    entry_desk = None
+    if desk is not None and on_checkout:  # 예약 기준 책상 사진 (입실 직전 빈 방, 정리 확인 뒤 지움, Q-22)
+        import desk_diff
+        path = os.path.splitext(config.baseline_file)[0] + "_entry_desk.png" if config.baseline_file else None
+        entry_desk = desk_diff.DeskCompare(config.desk_area, path=path)
     watcher = room_camera.RoomWatcher(room, check_objects=detector.finds_objects, room_items=config.room_items,
                                       on_checkout=on_checkout, baseline_path=config.baseline_file,
-                                      desk=desk, labeler=labeler)
+                                      desk=desk, labeler=labeler, entry_desk=entry_desk)
     cam = room_camera.open_camera(config.room_camera)
     send_check = None
     if on_checkout:
@@ -628,7 +633,8 @@ def start_room_camera(config, sensors):
         send_check = tidy.push
         CheckoutPoller(config.server, config.device_token, room,
                        lambda rid: watcher.request_check(rid, time.monotonic())).start()
-        print("정리 확인: 퇴실하면 확인 (서버 예약 상태를 10초마다 확인)")
+        print("정리 확인: 퇴실하면 확인 (서버 예약 상태를 10초마다 확인). "
+              "기준은 사람이 처음 보이기 직전 3초 빈 방 (그 예약 동안 생긴 것만 봄)")
     else:
         print("정리 확인: 연습 모드 (모두 나가고 30초 뒤 확인, 서버로 안 보냄)")
     t = threading.Thread(target=room_camera.run_room_camera,

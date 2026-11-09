@@ -163,6 +163,25 @@ ROOM_CAMERA=2 YOLO_MODEL=gateway/yolov8s.onnx SEND_SENSORS=1 ~/mspace-venv/bin/p
 - **사진·영상은 저장하지도 보내지도 않아요.** 한 장 보고 바로 지우고, 숫자와 물건 이름만 남겨요. `DESK_PHOTO=1`을 켰을 때만 사람 없는 책상 사진(깨끗한 방 1장 + 예약 기준 1장)을 젯슨 안에 두고, 예약 기준 사진은 그 예약 정리 확인 뒤 지워요 (docs v0.4.26)
 - **우노 없이 카메라만**: 우노가 안 꽂혀 있어도 `QR_CAMERA`나 `ROOM_CAMERA`를 켜면 카메라만 돌아가요. QR 결과는 LED 대신 화면에 "초록(열림)/빨강(거부)"로 나와요
 
+#### 정리 확인 채점 (후보 비교)
+
+정리 확인이 얼마나 맞는지 숫자로 재요. 정답을 적은 **시험 사진 쌍**(입실 전 빈 책상 + 퇴실 뒤)을 모아 두고, 설정(후보)을 바꿔 가며 같은 문제로 채점해요. 목표는 **정확도 95% 이상, 심각한 오류 0, 사진당 1초 안**이에요.
+
+```bash
+# 1) 시험 사진 찍기 (젯슨, 사람이 화면에 보이면 저장 안 함). 질문에 Enter, 정답 번호, 메모를 넣어요
+ROOM_CAMERA=2 YOLO_MODEL=gateway/yolov8s.onnx ~/mspace-venv/bin/python gateway/tidy_eval.py capture
+# 2) 채점 (게이트웨이와 같은 설정 이름). 후보를 바꿔 여러 번 돌려요
+YOLO_MODEL=gateway/yolov8s.onnx ~/mspace-venv/bin/python gateway/tidy_eval.py score
+YOLO_MODEL=gateway/yolov8s.onnx DESK_PHOTO=1 DESK_AREA=0.25,0.22,0.64,0.83 ~/mspace-venv/bin/python gateway/tidy_eval.py score
+```
+
+- 문제집은 `eval/tidy/`에 쌓여요: `001/before.jpg`, `001/after.jpg`, `answers.csv`(정답 `CLEAN` / `NEEDS_CLEANING` / `LEFT_ITEMS`와 메모). 사람 없는 책상 사진만, **젯슨 안에만** 두고 git(`.gitignore`)·서버에는 안 올려요
+- 깨끗한 문제도 꼭 섞어요(잘못 신고 검사). 쓰레기 종류·자리·조명을 바꿔 가며 30~50개
+- 판정은 퇴실 모드와 같아요: `before`를 그 예약의 기준으로 보고 `after`에서 늘어난 것만 봐요
+- **심각한 오류**: 깨끗한데 치울 것·두고 감으로 봄(죄 없는 예약자 신고), 치울 것·두고 감이 있는데 깨끗함으로 봄(다음 팀이 더러운 방을 받음). 치울 것 ↔ 두고 감끼리 바뀐 건 틀림이지만 심각하진 않아요(어느 쪽이든 관리자가 봐요)
+- 채점하면 정확도·심각한 오류·시간, 틀린 문제와 그때 찾은 것을 보여 주고, 아래 **실험 기록** 표에 붙일 한 줄을 만들어 줘요. 매번 `eval/tidy/results.jsonl`에도 남아요
+- 설정을 맞추는 데 쓴 사진과 채점 사진은 나눠요. 같은 사진으로 맞추고 채점하면 점수가 실제보다 높게 나와요
+
 ### 교육장 MQTT 센서 → 방 CO2·온도·습도 (시연용, 기본 꺼짐)
 
 실습실에 이미 있는 센서(CO2·온도·습도)를 M-SPACE 방으로 치고 써요 (docs Q-21). 젯슨이 교육장 MQTT를 **구독만** 하고, 고른 공간 센서들의 평균을 1분마다 core `POST /api/sensor-events`(`kind: CO2` + `temperatureC`·`humidityPct`)로 보내요. 실제 방에 센서를 달면 설정만 바꾸면 돼요.
@@ -314,6 +333,7 @@ echo ch341 | sudo tee /etc/modules-load.d/ch341.conf
 | `qr_door.py` | 문 앞 웹캠 QR 입실 (`QR_CAMERA`). `QrDoor`가 QR 글자 → 같은 확인기 → OK/NO, `run_camera()`가 카메라에서 QR을 찾음 |
 | `room_camera.py` | 방 안 웹캠 (`ROOM_CAMERA`). `RoomWatcher`가 사람 수 → 재실 이벤트, 빈 방이 되면 정리 확인. `YoloDetector`(모델 있을 때) / `HogPersonDetector`(없을 때) |
 | `room_env.py` | 교육장 MQTT 센서 (`MQTT_ROOM`). `RoomEnv`가 업링크 → 중복·미래 시각 정리 → 기기별 최근 값 평균 → 1분마다 CO2 이벤트, `make_client()`는 구독만 하는 paho 클라이언트 |
+| `tidy_eval.py` | 정리 확인 채점. `capture`로 시험 사진 쌍과 정답을 모으고, `score`로 지금 설정의 정확도·심각한 오류·시간을 잼 |
 
 ### 테스트
 
@@ -371,6 +391,16 @@ pytest --cov --cov-report=term-missing   # 우노·서버 없이 가짜 시리�
 | 실제 도어락 · QR | 릴레이 + 잠금장치, QR 리더 | 같은 `/api/access/verify`를 부르는 장치만 교체 |
 | 방마다 설치 | ESP32 + 센서 세트 | 방 번호(`ROOM_ID`)만 바꿔서 복제 |
 | 환기 예측 | 젯슨 | CO2 기록으로 "곧 환기 필요" 미리 알림 (팀 결정 대기, Q-10) |
+
+## 9. 실험 기록 (품질 개선)
+
+후보를 채점할 때마다 한 줄씩 남겨요(`tidy_eval.py score`가 줄을 만들어 줘요). 무엇을 바꿔서 몇 % 좋아졌는지가 남고, 채택하지 않은 후보도 지우지 않아요. 같은 문제집끼리만 비교하고, 문제집을 바꾸면 기준선부터 다시 재요.
+
+목표: 정확도 95% 이상 · 심각한 오류 0 · 사진당 1초 안 (젯슨)
+
+| 날짜 | 대상 | 후보 | 정확도 | 심각한 오류 | 사진당 시간 | 바꾼 것 | 메모 |
+|---|---|---|---|---|---|---|---|
+| | 정리 확인 | `YOLO_MODEL=gateway/yolov8s.onnx` (지금) | 측정 전 | | | 기준선 | |
 
 ## 폴더 구조
 

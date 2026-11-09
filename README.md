@@ -163,6 +163,35 @@ ROOM_CAMERA=2 YOLO_MODEL=gateway/yolov8s.onnx SEND_SENSORS=1 ~/mspace-venv/bin/p
 - **사진·영상은 저장하지도 보내지도 않아요.** 한 장 보고 바로 지우고, 숫자와 물건 이름만 남겨요. `DESK_PHOTO=1`을 켰을 때만 사람 없는 책상 사진(깨끗한 방 1장 + 예약 기준 1장)을 젯슨 안에 두고, 예약 기준 사진은 그 예약 정리 확인 뒤 지워요 (docs v0.4.26)
 - **우노 없이 카메라만**: 우노가 안 꽂혀 있어도 `QR_CAMERA`나 `ROOM_CAMERA`를 켜면 카메라만 돌아가요. QR 결과는 LED 대신 화면에 "초록(열림)/빨강(거부)"로 나와요
 
+### 교육장 MQTT 센서 → 방 CO2·온도·습도 (시연용, 기본 꺼짐)
+
+실습실에 이미 있는 센서(CO2·온도·습도)를 M-SPACE 방으로 치고 써요 (docs Q-21). 젯슨이 교육장 MQTT를 **구독만** 하고, 고른 공간 센서들의 평균을 1분마다 core `POST /api/sensor-events`(`kind: CO2` + `temperatureC`·`humidityPct`)로 보내요. 실제 방에 센서를 달면 설정만 바꾸면 돼요.
+
+```bash
+~/mspace-venv/bin/pip install "paho-mqtt>=2.0,<3"   # 처음 한 번
+# .env에 (저장소에 안 올라가요, 채팅·코드에 쓰지 않기)
+#   MQTT_HOST=…  MQTT_USERNAME=…  MQTT_PASSWORD=…
+set -a; . ./.env; set +a
+MQTT_ROOM=1 SEND_SENSORS=1 ~/mspace-venv/bin/python gateway/gateway.py   # 카메라 설정은 평소처럼 같이 붙여요
+```
+
+| 설정 | 기본 | 뜻 |
+|---|---|---|
+| `MQTT_ROOM` | 끔 | 이 방 번호로 보내요. 비우면 MQTT를 안 켜요 |
+| `MQTT_LOCATION` | `실습실` | `deviceInfo.tags.location`이 이 값인 센서만 써요 |
+| `MQTT_HOST` · `MQTT_PORT` | · `1883` | 교육장 브로커 (TLS 없음) |
+| `MQTT_USERNAME` · `MQTT_PASSWORD` | 없음 | `.env`에만. 비밀번호는 화면에도 안 찍어요 |
+| `MQTT_CLIENT_ID` | `mspace-<젯슨 이름>-reader` | 다른 사람과 겹치면 서로 끊겨요 |
+| `MQTT_DEVICE_ID` | `sensor-<방 번호>` | core에 보내는 장치 이름. 장치별 토큰이면 core에 등록된 이름이어야 해요(아니면 403) |
+
+- 토픽 `application/+/device/+/event/up` (ChirpStack 업링크), QoS 1, `clean_session=False`, keepalive 30 → 잠깐 끊겨도 그동안 온 메시지를 받아요. 끊기면 1~5초 간격으로 다시 붙어요
+- 게이트웨이 2대가 같은 메시지를 보내서 `(devEui, fCnt)`가 같으면 한 번만 써요
+- 센서 시각이 받은 시각보다 30초 넘게 미래면 받은 시각을 써요
+- 공간 평균은 **기기마다 최근 값 하나**를 먼저 고른 뒤 내요(실습실 9대 넘음). 5분 넘게 안 온 기기는 빼요(주기 1~2분)
+- 새 값이 온 분에만 보내요. 같은 값을 다시 보내면 core의 "1000ppm 3분 연속 → 환기 알림"이 옛 값으로 늘어나서요
+- 형식이 안 맞는 메시지는 건너뛰고 로그로 남겨요. 센서마다 처음 한 번 `object`에 온 키(co2·tvoc·pressure 등)를 찍어요
+- **주의**: 실습실 CO2가 1000ppm을 3분 넘기면 그 시간 1번 방 예약자에게 진짜 환기 알림이 가요(30분에 한 번)
+
 ### 젯슨 켜지면 자동 실행 (systemd)
 
 SSH가 끊기거나 젯슨을 껐다 켜도 게이트웨이가 알아서 다시 켜져요. 처음 한 번만:
@@ -284,6 +313,7 @@ echo ch341 | sudo tee /etc/modules-load.d/ch341.conf
 | `main()` | 위 부품을 조립하고 시리얼을 계속 읽음 |
 | `qr_door.py` | 문 앞 웹캠 QR 입실 (`QR_CAMERA`). `QrDoor`가 QR 글자 → 같은 확인기 → OK/NO, `run_camera()`가 카메라에서 QR을 찾음 |
 | `room_camera.py` | 방 안 웹캠 (`ROOM_CAMERA`). `RoomWatcher`가 사람 수 → 재실 이벤트, 빈 방이 되면 정리 확인. `YoloDetector`(모델 있을 때) / `HogPersonDetector`(없을 때) |
+| `room_env.py` | 교육장 MQTT 센서 (`MQTT_ROOM`). `RoomEnv`가 업링크 → 중복·미래 시각 정리 → 기기별 최근 값 평균 → 1분마다 CO2 이벤트, `make_client()`는 구독만 하는 paho 클라이언트 |
 
 ### 테스트
 

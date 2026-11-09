@@ -1,3 +1,4 @@
+import json
 import random
 
 import pytest
@@ -95,3 +96,44 @@ def test_mqtt_rooms_config_and_wiring():
                                     None, make_client=fake_make, start_thread=False)
     assert isinstance(env, room_env.RoomRouter) and made["host"] == "localhost"
     assert sorted(e.room_id for e in env.envs.values()) == [1, 2]
+
+
+def test_published_co2_stays_under_max():
+    """방 상태가 상한에 닿아도 센서마다 더하는 흔들림 때문에 넘지 않는다."""
+    s = fake.RoomState(1, people=4, co2=950)
+    for seed in range(50):
+        for _, payload in fake.uplinks(s, 1_700_000_000.0, random.Random(seed), co2_max=950):
+            assert json.loads(payload)["object"]["co2"] <= 950
+
+
+def test_duplicate_location_is_skipped():
+    assert gateway.parse_mqtt_rooms("가상-1:1,가상-1:2,가상-2:3") == (("가상-1", 1), ("가상-2", 3))
+
+
+def test_each_room_gets_its_own_sender():
+    """한 방이 403으로 막혀도 다른 방이 줄 뒤에서 기다리지 않게 방마다 전송 줄을 따로 둔다."""
+    made = {}
+
+    class Sender:
+        def __init__(self, room):
+            self.room, self.sent = room, []
+
+        def push(self, body):
+            self.sent.append(body)
+
+    def make_sender(room):
+        made[room] = Sender(room)
+        return made[room]
+
+    shared = Sender(0)
+    config = gateway.Config(mqtt_rooms=(("가상-1", 1), ("가상-2", 2)), mqtt_host="localhost")
+    env, _ = gateway.start_room_env(config, shared, make_client=lambda *a, **k: "c", start_thread=False,
+                                    make_sender=make_sender)
+    assert sorted(made) == [1, 2]
+    for e in env.envs.values():
+        e.push({"roomId": e.room_id})
+    assert made[1].sent == [{"roomId": 1}] and made[2].sent == [{"roomId": 2}] and shared.sent == []
+    one, _ = gateway.start_room_env(gateway.Config(mqtt_room=1, mqtt_host="localhost"), shared,
+                                    make_client=lambda *a, **k: "c", start_thread=False, make_sender=make_sender)
+    one.push({"roomId": 1})
+    assert shared.sent == [{"roomId": 1}]  # 방 하나면 원래대로 같은 줄

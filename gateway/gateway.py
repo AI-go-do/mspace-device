@@ -153,6 +153,9 @@ def parse_mqtt_rooms(text):
     for part in text.split(","):
         name, _, room = part.strip().rpartition(":")
         if name.strip() and _is_number(room.strip()):
+            if any(n == name.strip() for n, _ in rooms):
+                print(f"MQTT_ROOMS에 같은 공간 이름이 두 번 있어 뒤의 것은 건너뛰어요: {name.strip()!r}")
+                continue
             rooms.append((name.strip(), int(room.strip())))
     return tuple(rooms)
 
@@ -639,10 +642,11 @@ def camera_push(config, sensors):
     return push
 
 
-def start_room_env(config, sensors, make_client=None, start_thread=True):
+def start_room_env(config, sensors, make_client=None, start_thread=True, make_sender=None):
     """교육장 MQTT 센서(CO2·온도·습도)를 방 값으로 core에 보낸다 (Q-21 시연). 구독만 한다.
 
     MQTT_ROOMS가 있으면 공간마다 방 하나씩, 없으면 MQTT_LOCATION → MQTT_ROOM 하나.
+    방이 여럿이면 방마다 전송 줄을 따로 둔다. 한 방이 막혀도(403 등) 다른 방·카메라 이벤트는 계속 간다.
     """
     import socket
 
@@ -650,10 +654,15 @@ def start_room_env(config, sensors, make_client=None, start_thread=True):
     if not config.mqtt_host:
         print("MQTT_ROOM을 켰지만 MQTT_HOST가 없어요. .env에 MQTT_HOST·MQTT_USERNAME·MQTT_PASSWORD를 넣어요")
         return None
-    push = camera_push(config, sensors)
     rooms = env_rooms(config)
+    if len(rooms) > 1 and sensors is not None:
+        make_sender = make_sender or (lambda room: SensorSender(config.server, config.device_token,
+                                                               name=f"센서 전송 {room}번 방").start())
+        pushes = [camera_push(config, make_sender(room)) for _, room in rooms]
+    else:
+        pushes = [camera_push(config, sensors)] * len(rooms)
     envs = [room_env.RoomEnv(loc, room, (config.mqtt_device_id if len(rooms) == 1 else None) or f"sensor-{room}",
-                             push) for loc, room in rooms]
+                             push) for (loc, room), push in zip(rooms, pushes)]
     env = envs[0] if len(envs) == 1 else room_env.RoomRouter(envs)
     client_id = config.mqtt_client_id or f"mspace-{socket.gethostname()}-reader"
     client = (make_client or room_env.make_client)(env, client_id, config.mqtt_host, config.mqtt_username,

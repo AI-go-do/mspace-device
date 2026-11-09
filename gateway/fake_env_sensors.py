@@ -61,8 +61,8 @@ def step(state, rng, co2_max=950.0):
     return state
 
 
-def uplinks(state, now, rng):
-    """방 하나의 센서 2대 업링크 [(토픽, JSON 바이트)]. 센서마다 값이 조금씩 다르다."""
+def uplinks(state, now, rng, co2_max=950.0):
+    """방 하나의 센서 2대 업링크 [(토픽, JSON 바이트)]. 센서마다 값이 조금씩 다르다 (CO2는 상한을 넘지 않게)."""
     out = []
     for i in range(DEVICES_PER_ROOM):
         dev = dev_eui(state.room, i)
@@ -72,7 +72,7 @@ def uplinks(state, now, rng):
             "fCnt": state.fcnt[dev],
             "deviceInfo": {"devEui": dev, "deviceName": f"FAKE-{state.room}-{i}",
                            "tags": {"location": location_name(state.room), "point": POINTS[i % len(POINTS)]}},
-            "object": {"co2": round(state.co2 + rng.uniform(-15, 15)),
+            "object": {"co2": min(round(co2_max), round(state.co2 + rng.uniform(-15, 15))),
                        "temperature": round(state.temperature + rng.uniform(-0.2, 0.2), 1),
                        "humidity": round(state.humidity + rng.uniform(-1, 1), 1)},
         }
@@ -100,7 +100,7 @@ def run(client, rooms, rng, co2_max=950.0, clock=time.time, sleep=time.sleep, ro
         now = clock()
         for s in states:
             step(s, rng, co2_max)
-            for topic, payload in uplinks(s, now, rng):
+            for topic, payload in uplinks(s, now, rng, co2_max):
                 client.publish(topic, payload, qos=1)
         print("가짜 센서: " + ", ".join(f"{s.room}번 방 {s.people}명 CO2 {round(s.co2)}ppm "
                                      f"{s.temperature:.1f}℃ {s.humidity:.0f}%" for s in states))

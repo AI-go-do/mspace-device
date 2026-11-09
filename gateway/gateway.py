@@ -150,6 +150,12 @@ def parse_mqtt_host(text):
     if "://" in text:
         text = text.split("://", 1)[1]
     text = text.rstrip("/")
+    if text.startswith("["):  # IPv6는 [::1]:1883 처럼 대괄호로 감싼다
+        host, _, rest = text[1:].partition("]")
+        port = rest[1:] if rest.startswith(":") else ""
+        return (host or None), (int(port) if _is_number(port) else None)
+    if text.count(":") > 1:  # 대괄호 없는 IPv6는 포트로 자르지 않는다
+        return text, None
     host, sep, port = text.rpartition(":")
     if sep and _is_number(port) and host:
         return host, int(port)

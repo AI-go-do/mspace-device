@@ -269,6 +269,9 @@ def test_config_reads_mqtt_env():
     ("data.example.net:1883", ("data.example.net", 1883)),
     ("mqtt://data.example.net:1884/", ("data.example.net", 1884)),
     ("  ", (None, None)),
+    ("[::1]:1884", ("::1", 1884)),
+    ("[::1]", ("::1", None)),
+    ("2001:db8::1", ("2001:db8::1", None)),  # 대괄호 없는 IPv6는 통째로 호스트
 ])
 def test_parse_mqtt_host(text, expected):
     assert gateway.parse_mqtt_host(text) == expected

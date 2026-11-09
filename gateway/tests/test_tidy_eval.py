@@ -263,3 +263,19 @@ def test_capture_stops_when_photo_not_saved(tmp_path):
         te.capture_one(str(tmp_path), Cam(), lambda f: 0, ask=lambda p: next(answers), out=lambda s: None,
                        save=lambda p, f: False)
     assert not (tmp_path / "answers.csv").exists()
+
+
+def test_run_one_uses_default_timeout_for_bad_value():
+    seen = []
+
+    class Done:
+        stdout, stderr, returncode = te.RESULT_MARK + '{"accuracy": 1.0}', "", 0
+
+    def run(cmd, env, timeout, **kw):
+        seen.append(timeout)
+        return Done()
+
+    for bad in ("abc", "0", "-5"):
+        te.run_one("eval/tidy", te.Candidate("a", {"TIDY_TIMEOUT": bad}), {}, run=run)
+    te.run_one("eval/tidy", te.Candidate("a", {"TIDY_TIMEOUT": "60"}), {}, run=run)
+    assert seen == [1800.0, 1800.0, 1800.0, 60.0]

@@ -282,7 +282,12 @@ def run_one(folder, candidate, base_env, run=None):
     import subprocess
     run = run or subprocess.run
     env = {**base_env, **candidate.env}
-    timeout = float(env.get("TIDY_TIMEOUT") or 1800)
+    try:
+        timeout = float(env.get("TIDY_TIMEOUT") or 1800)
+    except ValueError:
+        timeout = 1800.0
+    if not timeout > 0:  # 0 이하·NaN이면 기본값
+        timeout = 1800.0
     try:
         done = run([sys.executable, os.path.abspath(__file__), "score", folder, "--json"],
                    env=env, capture_output=True, text=True, check=False, timeout=timeout)

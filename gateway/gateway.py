@@ -24,6 +24,7 @@ SEND_SENSORS=1이면 core POST /api/sensor-events로 보낸다 (FR-DEV-101). 키
   qr_door.py (QR_CAMERA)  : 문 앞 웹캠으로 QR 입실. 같은 확인기로 묻고 결과를 우노 LED로 보낸다
   room_camera.py (ROOM_CAMERA) : 방 안 웹캠으로 인원 세기 + 퇴실 뒤 정리 확인. 사진은 저장·전송 안 함
   room_env.py (MQTT_ROOM)      : 교육장 MQTT 센서(CO2·온도·습도)를 그 방 값으로 core에 보냄. 구독만 함
+  fake_env_sensors.py          : 젯슨 안 브로커에 방마다 가짜 CO2·온도·습도를 올린다 (진짜 센서가 멈췄을 때 시연용)
 
 설치:  pip3 install pyserial requests
 실행:  DRY_RUN=1 python3 gateway.py
@@ -86,6 +87,7 @@ class Config:
     label_model: str | None = None         # 달라진 곳에 이름 붙일 모델 (YOLO-World ONNX). 없으면 YOLO_MODEL로
     baseline_file: str | None = "room_baseline.json"  # 깨끗한 방 기준을 적어 두는 파일. BASELINE_FILE=off면 메모리에만
     mqtt_room: int | None = None           # 교육장 MQTT 센서 값을 이 방 CO2·온도·습도로 보낸다 (Q-21 시연). 비우면 끔
+    mqtt_rooms: tuple = ()                 # 여러 방: ((공간 이름, 방 번호), ...). MQTT_ROOMS="가상-1:1,가상-2:2"
     mqtt_location: str = "실습실"           # MQTT 센서 중 이 공간(deviceInfo.tags.location)만 쓴다
     mqtt_host: str | None = None           # 교육장 MQTT 브로커 주소. 아이디·비밀번호와 함께 .env에만 둔다
     mqtt_port: int = 1883
@@ -133,6 +135,7 @@ def load_config(env=None):
         baseline_file=(None if env.get("BASELINE_FILE") == "off"
                        else env.get("BASELINE_FILE") or Config.baseline_file),
         mqtt_room=int(env["MQTT_ROOM"]) if _is_number(env.get("MQTT_ROOM", "")) else None,
+        mqtt_rooms=parse_mqtt_rooms(env.get("MQTT_ROOMS", "")),
         mqtt_location=env.get("MQTT_LOCATION") or Config.mqtt_location,
         mqtt_host=parse_mqtt_host(env.get("MQTT_HOST", ""))[0],
         mqtt_port=(int(env["MQTT_PORT"]) if _is_number(env.get("MQTT_PORT", ""))
@@ -142,6 +145,26 @@ def load_config(env=None):
         mqtt_client_id=env.get("MQTT_CLIENT_ID") or None,
         mqtt_device_id=env.get("MQTT_DEVICE_ID") or None,
     )
+
+
+def parse_mqtt_rooms(text):
+    """MQTT_ROOMS="가상-1:1, 가상-2:2" → (("가상-1", 1), ("가상-2", 2)). 형식이 틀린 칸은 건너뛴다."""
+    rooms = []
+    for part in text.split(","):
+        name, _, room = part.strip().rpartition(":")
+        if name.strip() and _is_number(room.strip()):
+            if any(n == name.strip() for n, _ in rooms):
+                print(f"MQTT_ROOMS에 같은 공간 이름이 두 번 있어 뒤의 것은 건너뛰어요: {name.strip()!r}")
+                continue
+            rooms.append((name.strip(), int(room.strip())))
+    return tuple(rooms)
+
+
+def env_rooms(config):
+    """MQTT로 받을 (공간 이름, 방 번호) 목록. MQTT_ROOMS가 있으면 그것, 없으면 MQTT_LOCATION → MQTT_ROOM 하나."""
+    if config.mqtt_rooms:
+        return config.mqtt_rooms
+    return ((config.mqtt_location, config.mqtt_room),) if config.mqtt_room else ()
 
 
 def parse_mqtt_host(text):
@@ -562,7 +585,7 @@ def handle_line(line, verifier, sensors=None):
 
 def main(config=None):
     config = config or load_config()
-    cameras_only = not config.port and bool(config.qr_camera or config.room_camera or config.mqtt_room)
+    cameras_only = not config.port and bool(config.qr_camera or config.room_camera or env_rooms(config))
     if not config.port and not cameras_only:
         raise SystemExit("우노를 못 찾았어요. USB 연결을 확인하거나 PORT=/dev/ttyACM0 처럼 지정하세요.")
     if not config.dry_run and not config.device_token:
@@ -573,7 +596,8 @@ def main(config=None):
           "| 재실 전송:", "켬" if config.send_sensors and not config.dry_run else "끔",
           "| QR 입실:", f"켬 (카메라 {config.qr_camera}, {config.qr_room_id}번 방)" if config.qr_camera else "끔",
           "| 인원 세기:", f"켬 (카메라 {config.room_camera}, {config.room_camera_room}번 방)" if config.room_camera else "끔",
-          "| 환경 MQTT:", f"켬 ({config.mqtt_location} → {config.mqtt_room}번 방)" if config.mqtt_room else "끔")
+          "| 환경 MQTT:", ("켬 (" + ", ".join(f"{loc} → {room}번 방" for loc, room in env_rooms(config)) + ")"
+                          if env_rooms(config) else "끔"))
     verifier = make_verifier(config)
     sensors = None
     if config.send_sensors and not config.dry_run:
@@ -595,7 +619,7 @@ def main(config=None):
         start_qr(config, verifier, reply_to_uno)
     if config.room_camera:
         start_room_camera(config, sensors)
-    if config.mqtt_room:
+    if env_rooms(config):
         start_room_env(config, sensors)
 
     while ser is None:  # 우노가 없으면 카메라 스레드만 돌게 두고 기다린다 (Ctrl+C로 끝)
@@ -618,21 +642,34 @@ def camera_push(config, sensors):
     return push
 
 
-def start_room_env(config, sensors, make_client=None, start_thread=True):
-    """교육장 MQTT 센서(CO2·온도·습도)를 MQTT_ROOM 방 값으로 core에 보낸다 (Q-21 시연). 구독만 한다."""
+def start_room_env(config, sensors, make_client=None, start_thread=True, make_sender=None):
+    """교육장 MQTT 센서(CO2·온도·습도)를 방 값으로 core에 보낸다 (Q-21 시연). 구독만 한다.
+
+    MQTT_ROOMS가 있으면 공간마다 방 하나씩, 없으면 MQTT_LOCATION → MQTT_ROOM 하나.
+    방이 여럿이면 방마다 전송 줄을 따로 둔다. 한 방이 막혀도(403 등) 다른 방·카메라 이벤트는 계속 간다.
+    """
     import socket
 
     import room_env
     if not config.mqtt_host:
         print("MQTT_ROOM을 켰지만 MQTT_HOST가 없어요. .env에 MQTT_HOST·MQTT_USERNAME·MQTT_PASSWORD를 넣어요")
         return None
-    env = room_env.RoomEnv(config.mqtt_location, config.mqtt_room,
-                           config.mqtt_device_id or f"sensor-{config.mqtt_room}", camera_push(config, sensors))
+    rooms = env_rooms(config)
+    if len(rooms) > 1 and sensors is not None:
+        make_sender = make_sender or (lambda room: SensorSender(config.server, config.device_token,
+                                                               name=f"센서 전송 {room}번 방").start())
+        pushes = [camera_push(config, make_sender(room)) for _, room in rooms]
+    else:
+        pushes = [camera_push(config, sensors)] * len(rooms)
+    envs = [room_env.RoomEnv(loc, room, (config.mqtt_device_id if len(rooms) == 1 else None) or f"sensor-{room}",
+                             push) for (loc, room), push in zip(rooms, pushes)]
+    env = envs[0] if len(envs) == 1 else room_env.RoomRouter(envs)
     client_id = config.mqtt_client_id or f"mspace-{socket.gethostname()}-reader"
     client = (make_client or room_env.make_client)(env, client_id, config.mqtt_host, config.mqtt_username,
                                                   config.mqtt_password, port=config.mqtt_port)
-    print(f"환경 MQTT: {config.mqtt_host}:{config.mqtt_port} ({client_id}), '{config.mqtt_location}' 센서 평균을 "
-          f"{config.mqtt_room}번 방 CO2·온도·습도로 1분마다 보내요")
+    for e in envs:
+        print(f"환경 MQTT: {config.mqtt_host}:{config.mqtt_port} ({client_id}), '{e.location}' 센서 평균을 "
+              f"{e.room_id}번 방 CO2·온도·습도로 1분마다 보내요")
     if start_thread:
         client.loop_start()  # paho가 뒤에서 받고, 끊기면 1~5초 간격으로 다시 붙는다
         threading.Thread(target=room_env.run_ticks, args=(env,), daemon=True).start()

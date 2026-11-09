@@ -197,6 +197,9 @@ def run_score(folder, env, out=print):
     def run_case(case):
         before = cv2.imread(os.path.join(folder, case.name, "before.jpg"))
         after = cv2.imread(os.path.join(folder, case.name, "after.jpg"))
+        for key, img in (("before.jpg", before), ("after.jpg", after)):
+            if img is None:
+                raise SystemExit(f"{case.name}/{key}를 못 읽었어요 (파일이 깨졌을 수 있어요). 다시 찍거나 answers.csv에서 빼요")
         desk = desk_diff.DeskCompare(config.desk_area) if use_desk else None  # 메모리에만 (파일 안 씀)
         return judge(before, after, find, config.room_items, desk, labeler)
 

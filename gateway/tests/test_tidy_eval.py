@@ -150,3 +150,21 @@ def test_run_score_end_to_end(tmp_path, monkeypatch):
     assert (tmp_path / "results.jsonl").exists() and any("통과" == line for line in lines)
     with pytest.raises(SystemExit):
         te.run_score(str(tmp_path), {}, out=lines.append)
+
+
+def test_run_score_stops_on_broken_photo(tmp_path, monkeypatch):
+    import room_camera
+    (tmp_path / "001").mkdir()
+    (tmp_path / "001" / "before.jpg").write_bytes(b"not a jpg")
+    (tmp_path / "001" / "after.jpg").write_bytes(b"not a jpg")
+    te.append_answer(str(tmp_path), te.Case("001", "CLEAN"))
+
+    class Fake:
+        finds_objects = True
+
+        def detect(self, f):
+            return []
+
+    monkeypatch.setattr(room_camera, "make_detector", lambda model, area: Fake())
+    with pytest.raises(SystemExit, match="001/before.jpg"):
+        te.run_score(str(tmp_path), {"YOLO_MODEL": "m.onnx"}, out=lambda s: None)

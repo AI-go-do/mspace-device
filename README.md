@@ -234,6 +234,25 @@ MQTT_ROOM=1 SEND_SENSORS=1 ~/mspace-venv/bin/python gateway/gateway.py   # 카�
 - 형식이 안 맞는 메시지는 건너뛰고 로그로 남겨요. 센서마다 처음 한 번 `object`에 온 키(co2·tvoc·pressure 등)를 찍어요
 - **주의**: 실습실 CO2가 1000ppm을 3분 넘기면 그 시간 1번 방 예약자에게 진짜 환기 알림이 가요(30분에 한 번)
 
+#### 진짜 센서가 멈췄을 때: 가짜 센서로 시연
+
+교육장 센서 값이 브로커에 안 들어올 때(정전 뒤 등) 쓰는 방법이에요. 젯슨 **안에** 우리만 쓰는 브로커를 켜고, 가짜 센서가 방마다 진짜와 같은 모양의 값을 1분마다 올려요. 교육장 공용 브로커에는 절대 올리지 않아요(코드가 `localhost`가 아니면 멈춰요).
+
+```bash
+sudo apt install -y mosquitto        # 한 번만. 젯슨 안에서만 열려요 (localhost)
+# 터미널 1: 가짜 센서
+cd ~/mspace-device && FAKE_ROOMS=1,2,3 ~/mspace-venv/bin/python gateway/fake_env_sensors.py
+# 터미널 2: 게이트웨이 (평소 명령 앞에 두 개만 바꿔 붙임)
+cd ~/mspace-device && set -a; . ./.env; set +a
+MQTT_HOST=localhost MQTT_ROOMS=가상-1:1,가상-2:2,가상-3:3 SEND_SENSORS=1 QR_CAMERA=0 ROOM_CAMERA=2 \
+  YOLO_MODEL=gateway/yolov8s.onnx ~/mspace-venv/bin/python gateway/gateway.py
+```
+
+- 방마다 센서 2대, 사람 수가 몇 분마다 바뀌고 그에 따라 CO2·온도·습도가 천천히 움직여요
+- CO2는 `FAKE_CO2_MAX`(기본 950)를 넘지 않아요. 1000ppm 3분 연속이면 서버가 실제 예약자에게 환기 알림을 보내서요
+- `MQTT_ROOMS`는 `공간 이름:방 번호`를 쉼표로 이어요. 진짜 센서로 돌아갈 때는 `MQTT_HOST`·`MQTT_ROOMS`를 빼고 평소처럼 켜요
+- 방마다 core에 `sensor-<방 번호>`로 보내요. `막힘(403 …)`이 뜨면 그 장치 이름이 서버에 등록돼 있는지 확인해요
+
 ### 젯슨 켜지면 자동 실행 (systemd)
 
 SSH가 끊기거나 젯슨을 껐다 켜도 게이트웨이가 알아서 다시 켜져요. 처음 한 번만:
@@ -355,7 +374,8 @@ echo ch341 | sudo tee /etc/modules-load.d/ch341.conf
 | `main()` | 위 부품을 조립하고 시리얼을 계속 읽음 |
 | `qr_door.py` | 문 앞 웹캠 QR 입실 (`QR_CAMERA`). `QrDoor`가 QR 글자 → 같은 확인기 → OK/NO, `run_camera()`가 카메라에서 QR을 찾음 |
 | `room_camera.py` | 방 안 웹캠 (`ROOM_CAMERA`). `RoomWatcher`가 사람 수 → 재실 이벤트, 빈 방이 되면 정리 확인. `YoloDetector`(모델 있을 때) / `HogPersonDetector`(없을 때) |
-| `room_env.py` | 교육장 MQTT 센서 (`MQTT_ROOM`). `RoomEnv`가 업링크 → 중복·미래 시각 정리 → 기기별 최근 값 평균 → 1분마다 CO2 이벤트, `make_client()`는 구독만 하는 paho 클라이언트 |
+| `room_env.py` | 교육장 MQTT 센서 (`MQTT_ROOM`). `RoomEnv`가 업링크 → 중복·미래 시각 정리 → 기기별 최근 값 평균 → 1분마다 CO2 이벤트, `RoomRouter`는 방 여러 개(`MQTT_ROOMS`), `make_client()`는 구독만 하는 paho 클라이언트 |
+| `fake_env_sensors.py` | 가짜 교육장 센서. 젯슨 안 브로커(localhost)에만 방마다 CO2·온도·습도 업링크를 1분마다 올림 (CO2 상한 950) |
 | `tidy_eval.py` | 정리 확인 채점. `capture`로 시험 사진 쌍과 정답을 모으고, `score`로 지금 설정의 정확도·심각한 오류·시간을 재고, `compare`로 여러 후보를 한 표로 비교 |
 
 ### 테스트

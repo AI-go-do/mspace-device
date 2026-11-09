@@ -209,6 +209,43 @@ class RoomEnv:
         return body
 
 
+class RoomRouter:
+    """MQTT 접속 하나로 여러 방(RoomEnv)을 돌린다. 메시지는 공간 이름(location)이 맞는 방에만 준다."""
+
+    def __init__(self, envs, log=print):
+        self.envs = {e.location: e for e in envs}
+        self.log = log
+        self.shown = set()  # 어느 방에도 안 맞는 센서를 이미 알린 공간
+
+    def on_message(self, topic, payload, received=None):
+        received = time.time() if received is None else received
+        try:
+            r = parse_uplink(payload, received)
+        except BadMessage as e:
+            self.log(f"[환경 MQTT] 형식 안 맞음, 건너뜀 ({e}): {topic} {bytes(payload)[:200]!r}")
+            return None
+        env = self.envs.get(r.location)
+        if env is None:
+            if r.location not in self.shown:
+                self.shown.add(r.location)
+                self.log(f"[환경 MQTT] 방에 안 붙인 공간 '{r.location}' 센서는 건너뜀 (MQTT_ROOMS 확인)")
+            return None
+        return env.on_message(topic, payload, received)
+
+    def tick(self, now=None):
+        """방마다 tick. 보낸 이벤트 목록을 돌려준다."""
+        sent = []
+        for env in self.envs.values():
+            try:
+                body = env.tick(now)
+            except Exception as e:  # noqa: BLE001 - 한 방이 실패해도 다른 방은 보낸다
+                self.log(f"[환경 MQTT] {env.room_id}번 방 보내기 준비 실패: {e.__class__.__name__}: {e}")
+                continue
+            if body is not None:
+                sent.append(body)
+        return sent
+
+
 def make_client(env, client_id, host, username, password, port=1883, mqtt=None):
     """paho-mqtt 2.x 클라이언트. 구독만 한다. QoS 1, clean_session=False, keepalive 30 (끊긴 동안 온 것도 받게)."""
     if mqtt is None:

@@ -254,3 +254,69 @@ def test_wrong_names_file_is_an_error_and_labeler_falls_back(capsys):
     assert "지금 모델로" in capsys.readouterr().out
     with pytest.raises(room_camera.LabelCountMismatch):
         room_camera.make_labeler(Bad())(desk(), (900, 400, 40, 80))  # 기본 모델 자체가 틀리면 숨기지 않음
+
+
+def test_entry_desk_photo_is_the_last_empty_room_not_the_first_clean_one(tmp_path):
+    """앞 팀이 둔 종이는 입실 직전 사진에 이미 있어서 다음 팀 탓이 아니다. 다음 팀이 둔 카드만 잡힌다."""
+    entry = DeskCompare(AREA, path=str(tmp_path / "entry_desk.png"))
+    w = RoomWatcher(1, on_checkout=True, desk=DeskCompare(AREA), entry_desk=entry)
+    who = Detection("person", 0.9, (0, 0, 50, 100))
+    t = 0
+
+    def run(dets, frame, sec):
+        nonlocal t
+        out = []
+        for _ in range(sec):
+            c = w.update(dets, now=t, photo=lambda: frame)[1]
+            if c and "reservationId" in c:
+                out.append(c)
+            t += 1
+        return out
+
+    run([], desk(), 5)                       # 깨끗한 방
+    run([who], desk(), 3)                    # 앞 팀(8) 입실
+    w.request_check(8, t)
+    first = run([], desk(PAPER), room_camera.SETTLE_SEC + 6)  # 종이를 두고 나감
+    assert [(c["reservationId"], c["trash"]) for c in first] == [(8, {"unknown": 1})]
+    run([], desk(PAPER), 5)                  # 종이가 남은 빈 방
+    run([who], desk(PAPER), 3)               # 다음 팀(9) 입실 → 입실 직전 사진(종이 있음) 저장
+    assert entry.ready and (tmp_path / "entry_desk.png").exists()
+    w.request_check(9, t)
+    got = run([], desk(PAPER, CARD), room_camera.SETTLE_SEC + 6)
+    assert [(c["reservationId"], c["trash"]) for c in got] == [(9, {"unknown": 1})]  # 카드만
+    assert not entry.ready and not (tmp_path / "entry_desk.png").exists()  # 확인 뒤 지움
+
+
+def test_look_does_not_save_and_clear_removes_files(tmp_path):
+    d = DeskCompare(AREA, path=str(tmp_path / "d.png"))
+    img = d.look(desk())
+    assert not d.ready and not (tmp_path / "d.png").exists()
+    d.set_prepared(img, [(1, 2, 3, 4)])
+    assert d.ready and d.known == [(1.0, 2.0, 3.0, 4.0)] and (tmp_path / "d.png.json").exists()
+    d.clear()
+    assert not d.ready and not list(tmp_path.iterdir())
+
+
+def test_gateway_gives_entry_desk_only_in_checkout_mode_with_desk_photo(monkeypatch, tmp_path):
+    import gateway
+
+    class Det:
+        finds_objects = True
+
+        def detect(self, frame):
+            return []
+
+    got = []
+    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None: Det())
+    monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
+    monkeypatch.setattr(gateway.SensorSender, "start", lambda self: self)
+    monkeypatch.setattr(gateway.CheckoutPoller, "start", lambda self: self)
+    monkeypatch.setattr(room_camera, "run_room_camera", lambda watcher, *a, **k: got.append(watcher))
+    cfg = gateway.Config(room_camera="1", server="https://x.example", device_token="t", desk_photo=True,
+                         desk_area=AREA, baseline_file=str(tmp_path / "b.json"))
+    gateway.start_room_camera(cfg, object()).join(timeout=1)  # 퇴실 모드
+    gateway.start_room_camera(cfg, None).join(timeout=1)      # 연습 모드
+    assert got[0].entry_desk.path == str(tmp_path / "b_entry_desk.png")
+    assert got[0].entry_path == str(tmp_path / "b_entry.json")
+    assert got[1].entry_desk is None
+    gateway.CAMERA_ROOMS.clear()  # 다른 테스트에 카메라 방이 남지 않게

@@ -7,7 +7,7 @@ import pytest
 
 import gateway
 import room_camera
-from room_camera import (BEAT_SEC, EMPTY_CHECK_SEC, Detection, RoomWatcher, check_message, iou, nms,
+from room_camera import (BEAT_SEC, EMPTY_CHECK_SEC, ENTRY_EMPTY_SEC, PENDING_MAX_SEC, SETTLE_SEC, Detection, RoomWatcher, check_message, iou, nms,
                          parse_yolo, run_room_camera, tile_boxes, detect_tiled, cut_by_tile, tidy_body,
                          desk_box, detect_desk, merge)
 
@@ -322,10 +322,11 @@ def test_parse_room_items():
 
 
 def visit_then_checkout(w, after, checkout_at=None, t0=0):
-    """기준(빈 방) → 사람 5초 → 나감. checkout_at초에 서버가 퇴실을 알려 줌. 결과 목록을 돌려준다."""
+    """기준(빈 방 4초) → 사람 5초 → 나감. checkout_at초에 서버가 퇴실을 알려 줌. 결과 목록을 돌려준다."""
     out = []
-    w.update([], now=t0)  # 기준
-    t = t0 + 1
+    for i in range(ENTRY_EMPTY_SEC + 1):
+        w.update([], now=t0 + i)  # 깨끗한 방 기준 + 입실 직전 빈 방 후보
+    t = t0 + ENTRY_EMPTY_SEC + 1
     for _ in range(5):
         w.update([person()], now=t)
         t += 1
@@ -356,10 +357,12 @@ def test_checkout_mode_checks_after_settle_and_tags_reservation():
 def test_checkout_mode_waits_until_room_is_empty():
     """퇴실 알림이 와도 사람(또는 PIR)이 있으면 비고 10초 뒤에 확인한다."""
     w = RoomWatcher(1, on_checkout=True)
-    w.update([], now=0)
-    w.request_check(5, 1)
-    assert w.update([person()], now=1)[1] is None
-    assert all(w.update([], now=2 + i, pir=1)[1] is None for i in range(20))  # PIR 있음
+    for t in range(4):
+        w.update([], now=t)
+    assert w.update([person()], now=4)[1] is None  # 입실: 직전 빈 방이 예약 기준
+    w.request_check(5, 5)
+    assert w.update([person()], now=5)[1] is None
+    assert all(w.update([], now=6 + i, pir=1)[1] is None for i in range(20))  # PIR 있음
     got = [w.update([], now=30 + i)[1] for i in range(15)]
     assert [g["reservationId"] for g in got if g] == [5]
 
@@ -371,6 +374,99 @@ def test_checkout_pending_expires_after_10_minutes(capsys):
     for t in range(1, 700, 10):
         w.update([person()], now=t)  # 다음 예약 사람이 계속 있음
     assert w.pending is None and "건너뜀" in capsys.readouterr().out
+
+
+# ---- 예약 기준 (Q-22 B안: 사람이 처음 보이기 직전 빈 방과 비교) ----
+
+class Room:
+    """퇴실 모드 RoomWatcher를 1초씩 돌리는 도우미. 결과(check)만 모은다."""
+
+    def __init__(self, w, t=0):
+        self.w, self.t, self.out = w, t, []
+
+    def run(self, dets, sec=1, pir=None):
+        for _ in range(sec):
+            c = self.w.update(dets, now=self.t, pir=pir)[1]
+            if c and c["status"] != "BASELINE_SAVED":
+                self.out.append(c)
+            self.t += 1
+        return self
+
+    def checkout(self, rid):
+        self.w.request_check(rid, self.t)
+        return self
+
+
+def test_next_team_is_not_blamed_for_what_the_last_team_left():
+    """앞 팀이 컵을 두고 감 → 앞 팀 결과에 컵. 다음 팀은 입실 직전 빈 방(컵 있음)이 기준이라 깨끗."""
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([], 5).run([person()], 5).checkout(1).run([thing("cup")], SETTLE_SEC + 6)
+    assert [(c["reservationId"], c["trash"]) for c in r.out] == [(1, {"cup": 1})]
+    r.run([thing("cup")], 30).run([person(), thing("cup")], 5).checkout(2).run([thing("cup")], SETTLE_SEC + 6)
+    assert [(c["reservationId"], c["status"]) for c in r.out[1:]] == [(2, "CLEAN")]
+
+
+def test_break_in_the_middle_keeps_the_first_baseline():
+    """화장실에 다 같이 다녀와도 기준은 처음 입실 직전 빈 방 그대로 (그 사이 둔 컵도 잡힘)."""
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([], 5).run([person()], 3).run([thing("cup")], 20).run([person(), thing("cup")], 3)
+    r.checkout(7).run([thing("cup")], SETTLE_SEC + 6)
+    assert [(c["reservationId"], c["trash"]) for c in r.out] == [(7, {"cup": 1})]
+
+
+def test_no_empty_moment_means_no_result(capsys):
+    """방이 3초도 안 비고 사람이 보이면 기준이 없다. 결과는 SKIPPED라 서버로 안 간다 (어질러짐 신고가 받음)."""
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([], 2).run([person()], 5).checkout(3).run([thing("cup")], SETTLE_SEC + 6)
+    assert [c["status"] for c in r.out] == ["SKIPPED"] and "reservationId" not in r.out[0]
+    assert "기준이 없어" in check_message(r.out[0])
+
+
+def test_next_team_walks_in_before_the_check_skips_the_last_team(capsys):
+    """퇴실 알림 뒤 방이 3초는 비었지만 10초 전에 다음 팀이 들어오면: 앞 예약은 건너뛰고, 그 빈 방이 다음 기준."""
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([], 5).run([person()], 5).checkout(1).run([thing("cup")], 5)
+    r.run([person(), thing("cup")], 5)
+    assert r.out == [] and r.w.pending is None and "예약 1 확인 전에" in capsys.readouterr().out
+    r.checkout(2).run([thing("cup")], SETTLE_SEC + 6)
+    assert [(c["reservationId"], c["status"]) for c in r.out] == [(2, "CLEAN")]
+
+
+def test_expired_check_drops_that_teams_baseline():
+    """퇴실 뒤 10분 동안 방이 안 비면(연달아 예약) 앞 팀 기준을 버린다. 다음 팀은 기준 없음 → SKIPPED."""
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([], 5).run([person()], 5).checkout(1).run([person()], PENDING_MAX_SEC + 5)
+    assert r.w.entry is None
+    r.checkout(2).run([thing("cup")], SETTLE_SEC + 6)
+    assert [c["status"] for c in r.out] == ["SKIPPED"]
+
+
+def test_entry_baseline_survives_restart_and_is_deleted_after_check(tmp_path):
+    base = str(tmp_path / "room_baseline.json")
+    r = Room(RoomWatcher(1, on_checkout=True, baseline_path=base))
+    r.run([], 5).run([person()], 3)
+    entry = tmp_path / "room_baseline_entry.json"
+    assert json.loads(entry.read_text())["objects"] == {}
+    r2 = Room(RoomWatcher(1, on_checkout=True, baseline_path=base), t=100)  # 젯슨을 껐다 켬
+    r2.run([person()], 3).checkout(4).run([thing("cup")], SETTLE_SEC + 6)
+    assert [(c["reservationId"], c["trash"]) for c in r2.out] == [(4, {"cup": 1})]
+    assert not entry.exists()  # 보냈으면 지움
+
+
+def test_broken_entry_file_is_ignored(tmp_path, capsys):
+    base = tmp_path / "room_baseline.json"
+    (tmp_path / "room_baseline_entry.json").write_text("{broken")
+    w = RoomWatcher(1, on_checkout=True, baseline_path=str(base))
+    assert w.entry is None and "못 읽어서" in capsys.readouterr().out
+    assert not (tmp_path / "room_baseline_entry.json").exists()
+
+
+def test_practice_mode_does_not_keep_entry_baseline():
+    w = RoomWatcher(1)
+    for t in range(5):
+        w.update([], now=t)
+    w.update([person()], now=5)
+    assert w.entry is None and w.snapshot is None
 
 
 def test_tidy_body_matches_server_format():

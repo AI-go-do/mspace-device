@@ -10,7 +10,11 @@
      그래서 core를 바꾸지 않고도 "몇 명"이 서버에 남는다.
   2. 정리 확인: 서버가 "예약이 끝났다"고 하면(퇴실 모드) 또는 연습 모드에서 모두 나가고 30초가 지나면,
      빈 방에서 물건(컵·병·노트북·가방 …)을 찾는다. 퇴실 모드 결과는 core POST /api/rooms/{id}/tidy-checks로 보낸다.
-     처음 빈 방(깨끗한 상태)에서 본 물건과 종류별 개수로 비교해서 "늘어난 물건"만 남은 물건으로 본다.
+     퇴실 모드는 "사람이 처음 보이기 직전 빈 방"(한 장씩 0명이 연속 3초)을 그 예약의 기준으로 잡고(Q-22 B안),
+     퇴실 뒤 빈 방과 비교한다. 그래서 앞 팀이 두고 간 것을 다음 팀 탓으로 하지 않는다. 화장실 등으로 잠깐 비었다
+     다시 들어오면 처음 기준을 그대로 둔다. 방이 한 번도 안 비어 기준이 없으면 결과를 보내지 않는다(어질러짐 신고가 받음).
+     연습 모드는 처음 빈 방(깨끗한 상태)에서 본 물건과 비교한다.
+     기준과 종류별 개수로 비교해서 "늘어난 물건"만 남은 물건으로 본다.
      자리는 보지 않는다 (리모컨을 조금 옮겨도 잘못 잡지 않게). 방 비품(ROOM_ITEMS, 예: remote:1)은
      그 개수까지 있어도 없어도 괜찮다고 본다 (바구니에 넣어 안 보이거나 책상에 나와 있어도 됨).
      기준을 저장하면 "깨끗한 방 기준 저장"을 알리고, 기준이 없으면 결과 대신 지금 모습을 기준으로 저장한다.
@@ -23,7 +27,8 @@
 
 개인정보
   사진·영상은 저장하지도, 보내지도 않는다. 프레임은 메모리에서 세고 바로 버린다. 남는 건 숫자와 물건 이름뿐.
-  DESK_PHOTO=1을 켰을 때만 사람 0명일 때 찍은 깨끗한 책상 사진 한 장(책상 부분, 흑백)을 젯슨 안에 둔다. 서버로는 안 보낸다.
+  DESK_PHOTO=1을 켰을 때만 사람 0명일 때 찍은 책상 사진(책상 부분, 흑백·작게)을 젯슨 안에 둔다. 서버로는 안 보낸다.
+  퇴실 모드의 예약 기준 사진(입실 직전 빈 방 1장)은 그 예약 정리 확인이 끝나면 지운다 (docs v0.4.26, Q-22).
 
 모델
   YOLO_MODEL=yolov8n.onnx 처럼 ONNX 모델 파일을 주면 사람 + 물건 80종을 찾는다 (OpenCV DNN, 젯슨 기본 설치).
@@ -81,6 +86,8 @@ SMOOTH_FRAMES = 5      # 최근 5번 센 값의 가운데 값을 쓴다 (한 번
 EMPTY_CHECK_SEC = 30   # (연습 모드) 모두 나가고 30초 뒤에 정리 확인 (문 닫고 나가는 시간)
 SETTLE_SEC = 10        # (퇴실 모드) 퇴실 뒤 방이 10초 비어 있으면 확인 (나가는 사람이 찍히지 않게)
 PENDING_MAX_SEC = 600  # (퇴실 모드) 퇴실 뒤 10분 안에 방이 비지 않으면 그 예약 확인은 포기 (다음 사람 물건을 탓하지 않게)
+ENTRY_EMPTY_SEC = 3    # (퇴실 모드) 한 장씩 셌을 때 0명이 연속 3초면 "빈 방"으로 보고 다음 예약 기준 후보로 든다 (Q-22)
+SNAPSHOT_SEC = 60      # (퇴실 모드) 빈 방이 계속되면 후보를 1분마다 새로 찍는다 (햇빛·조명 변화 따라감)
 
 
 @dataclass(frozen=True)
@@ -315,7 +322,7 @@ class RoomWatcher:
     """찾은 목록을 받아서 (1) core에 보낼 재실 이벤트 (2) 정리 확인 결과를 만든다."""
 
     def __init__(self, room_id, check_objects=True, now=None, room_items=None, on_checkout=False,
-                 baseline_path=None, desk=None, labeler=None):
+                 baseline_path=None, desk=None, labeler=None, entry_desk=None):
         self.room_id = room_id
         # desk: 깨끗한 책상 사진 비교(desk_diff.DeskCompare, DESK_PHOTO=1). 모델이 모르는 물건도 "남음"으로 잡는다
         # labeler(frame, box): 달라진 곳에 이름 붙이기. 못 붙이면 None → "모르는 물건"
@@ -334,7 +341,14 @@ class RoomWatcher:
         self.had_people = False      # 정리 확인 전에 사람이 있었는지
         self.empty_since = None      # 0명이 된 시각
         self.baseline = None         # 깨끗한 빈 방에서 본 물건 종류별 개수 (처음 빈 방 또는 깨끗한 정리 확인 뒤)
+        # 예약 기준 (퇴실 모드, Q-22 B안): 사람이 처음 보이기 직전 빈 방. 퇴실 뒤 이것과 비교해 "그 예약 동안 생긴 것"만 본다
+        self.entry_desk = entry_desk  # 예약 기준 책상 사진 (DESK_PHOTO일 때). 정리 확인이 끝나면 지운다
+        self.entry_path = (os.path.splitext(baseline_path)[0] + "_entry.json") if baseline_path else None
+        self.raw_empty_since = None  # 한 장씩 셌을 때 0명이 된 시각 (가운데 값이 아니라 그 장 그대로)
+        self.snapshot = None         # 빈 방 후보 {"objects", "img", "known", "at"}. 메모리에만
+        self.entry = None            # 확정된 예약 기준 {"objects", "at"}
         self.load_baseline()
+        self.load_entry()
 
     def load_baseline(self):
         """저장해 둔 기준 파일이 있으면 읽는다. 없거나 깨졌거나 다른 방 것이면 새로 찍는다."""
@@ -368,6 +382,93 @@ class RoomWatcher:
         except OSError as e:  # 못 써도 카메라는 계속 (메모리엔 있음)
             print(f"기준 파일을 못 썼어요 ({self.baseline_path}: {e}). 다시 켜면 기준을 새로 찍어요")
 
+    def load_entry(self):
+        """젯슨이 꺼졌다 켜져도 예약 기준이 이어지게 파일에서 읽는다. 없거나 깨졌으면 기준 없음."""
+        if not self.entry_path or not os.path.exists(self.entry_path):
+            if self.entry_desk is not None and self.entry_desk.ready:
+                self.entry_desk.clear()  # 짝 없는 사진은 쓰지 않는다
+            return
+        try:
+            with open(self.entry_path, encoding="utf-8") as f:
+                saved = json.load(f)
+            if saved.get("roomId") != self.room_id or not isinstance(saved["objects"], dict):
+                raise ValueError("다른 방 기준")
+            objects = {str(k): int(v) for k, v in saved["objects"].items()}
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            print(f"예약 기준 파일을 못 읽어서 버려요 ({self.entry_path}: {e})")
+            self.clear_entry()
+            return
+        self.entry = {"objects": objects, "at": float("-inf")}  # 켜기 전에 잡은 것 = 어떤 퇴실 알림보다 먼저
+        print(f"저장된 예약 기준 불러옴 {self.room_id}번 방 ({saved.get('savedAt', '시각 모름')})")
+
+    def set_entry(self, snap, now, now_iso):
+        self.entry = {"objects": snap["objects"], "at": now}
+        if self.entry_desk is not None:
+            if snap["img"] is not None:
+                self.entry_desk.set_prepared(snap["img"], snap["known"])
+            else:
+                self.entry_desk.clear()
+        if self.entry_path:
+            record = {"roomId": self.room_id, "objects": snap["objects"],
+                      "savedAt": now_iso or datetime.now(KST).isoformat(timespec="seconds")}
+            try:
+                with open(self.entry_path + ".tmp", "w", encoding="utf-8") as f:
+                    json.dump(record, f, ensure_ascii=False)
+                os.replace(self.entry_path + ".tmp", self.entry_path)
+            except OSError as e:  # 못 써도 메모리엔 있음
+                print(f"예약 기준 파일을 못 썼어요 ({self.entry_path}: {e})")
+        n = sum(snap["objects"].values())
+        print(f"예약 기준 저장 {self.room_id}번 방: 입실 직전 빈 방 물건 {n}개"
+              f"{' (' + describe(snap['objects']) + ')' if n else ''}")
+
+    def clear_entry(self):
+        """예약 기준을 지운다 (정리 확인을 보냈거나, 그 예약 확인을 포기했을 때)."""
+        self.entry = None
+        if self.entry_desk is not None:
+            self.entry_desk.clear()
+        if self.entry_path and os.path.exists(self.entry_path):
+            try:
+                os.remove(self.entry_path)
+            except OSError as e:
+                print(f"예약 기준 파일을 못 지웠어요 ({self.entry_path}: {e})")
+
+    def track_entry(self, raw, pir, now, now_iso, detail, dets, photo):
+        """빈 방 후보를 들고 있다가, 사람이 처음 보이면 그 후보를 다음 예약 기준으로 확정한다.
+
+        QR 순간이 아니라 "사람이 보이기 직전"이라 QR 없이 들어와도, 바로 들어와도 기준이 잡힌다.
+        """
+        if raw > 0:
+            self.raw_empty_since = None
+            if self.snapshot is not None:
+                snap, self.snapshot = self.snapshot, None
+                self.confirm_entry(snap, now, now_iso)
+            return
+        if pir:  # 카메라엔 안 보여도 누가 있을 수 있다. 후보를 새로 찍지 않는다
+            self.raw_empty_since = None
+            return
+        if self.raw_empty_since is None:
+            self.raw_empty_since = now
+        if now - self.raw_empty_since < ENTRY_EMPTY_SEC:
+            return
+        if self.snapshot is not None and now - self.snapshot["at"] < SNAPSHOT_SEC:
+            return
+        seen = detail() if detail else dets
+        img = known = None
+        if self.entry_desk is not None and photo is not None:
+            img = self.entry_desk.look(photo())  # 책상 부분만 흑백·작게. 메모리에만
+            known = [d.box for d in self.objects(seen)]
+        self.snapshot = {"objects": self.count(seen), "img": img, "known": known, "at": now}
+
+    def confirm_entry(self, snap, now, now_iso):
+        pending_at = self.pending[1] if self.pending else None
+        if self.entry is not None and (pending_at is None or self.entry["at"] >= pending_at):
+            return  # 같은 예약 사람이 잠깐 나갔다 온 것 (화장실). 처음 기준을 그대로 둔다
+        if self.pending:
+            # 앞 예약이 끝났는데 방이 10초 비기 전에 다음 사람이 들어옴. 앞 예약은 결과를 내지 않는다 (신고가 받음)
+            print(f"정리 확인 {self.room_id}번 방: 예약 {self.pending[0]} 확인 전에 다음 사람이 들어와 건너뜀")
+            self.pending = None
+        self.set_entry(snap, now, now_iso)
+
     def people(self, dets):
         return sum(1 for d in dets if d.label == "person")
 
@@ -389,6 +490,8 @@ class RoomWatcher:
             self.sent_people, self.sent_occupied, self.sent_at = people, occupied, now
 
         check = None
+        if self.on_checkout and self.check_objects:
+            self.track_entry(self.people(dets), pir, now, now_iso, detail, dets, photo)
         if people > 0:
             self.had_people, self.empty_since = True, None
         elif pir:
@@ -414,6 +517,8 @@ class RoomWatcher:
                 self.had_people = False
         if self.on_checkout and self.pending and now - self.pending[1] >= PENDING_MAX_SEC:
             print(f"정리 확인 {self.room_id}번 방: 예약 {self.pending[0]} 퇴실 뒤 10분 동안 방이 비지 않아 건너뜀")
+            if self.entry is not None and self.entry["at"] < self.pending[1]:
+                self.clear_entry()  # 그 예약의 기준이었다. 다음 예약 탓으로 쓰지 않게 버린다
             self.pending = None
         return event, check
 
@@ -429,11 +534,16 @@ class RoomWatcher:
         self.had_people = False
         if not self.check_objects:
             return None
+        now_iso = now_iso or datetime.now(KST).isoformat(timespec="seconds")
+        if self.entry is None:
+            # 입실 전에 방이 3초도 비지 않아 기준이 없다. 누구 것인지 모르니 결과를 보내지 않는다 (어질러짐 신고가 받음)
+            return {"roomId": self.room_id, "status": "SKIPPED", "checkedAt": now_iso,
+                    "reason": f"예약 {reservation_id}: 입실 직전 빈 방 기준이 없어 결과를 보내지 않음"}
         seen = detail() if detail else dets
-        if self.baseline is None:
-            return self.save_baseline(seen, now_iso, reason="기준이 없어 지금 모습을 기준으로 저장", photo=photo)
-        check = self.check(seen, now_iso, photo=photo)
+        desk = self.entry_desk if self.entry_desk is not None and self.entry_desk.ready else None
+        check = self.check(seen, now_iso, photo=photo if desk else None, base=self.entry["objects"], desk=desk)
         check["reservationId"] = reservation_id
+        self.clear_entry()  # 보냈으면 지운다 (다음 예약은 다음 빈 방에서 새로)
         return check
 
     def event(self, people, pir, now_iso):
@@ -476,12 +586,13 @@ class RoomWatcher:
             items[d.label] = items.get(d.label, 0) + 1
         return items
 
-    def desk_items(self, frame, dets):
+    def desk_items(self, frame, dets, desk=None):
         """책상 사진 비교로 달라진 곳 중, 모델이 이미 찾은 물건·기준 때 있던 물건 자리가 아닌 것에 이름을 붙인다."""
-        changes = self.desk.changes(frame)
+        desk = desk or self.desk
+        changes = desk.changes(frame)
         if changes is None:
             return None  # 비교를 못 함 (기준 없음, 조명·카메라가 크게 바뀜). "달라진 곳 없음"과 구분
-        seen = [d.box for d in self.objects(dets)] + list(self.desk.known)
+        seen = [d.box for d in self.objects(dets)] + list(desk.known)
         items = {}
         for box in changes:
             if any(overlaps(box, b) for b in seen):
@@ -490,20 +601,23 @@ class RoomWatcher:
             items[label] = items.get(label, 0) + 1
         return items
 
-    def check(self, dets, now_iso, photo=None):
+    def check(self, dets, now_iso, photo=None, base=None, desk=None):
         """깨끗할 때보다 늘어난 물건만 골라 결과를 만든다 (종류별 개수, 자리는 보지 않음).
 
         책상 사진 비교(DESK_PHOTO)를 켜면 모델이 모르는 물건도 "모르는 물건"(치울 것)으로 더한다.
+        base·desk를 주면(퇴실 모드의 예약 기준) 그것과 비교하고, 깨끗한 방 기준은 건드리지 않는다.
         """
         if not self.check_objects:
             return None
-        base = self.baseline or {}
+        own = base is None  # 깨끗한 방 기준과 비교 (연습 모드)
+        base = (self.baseline or {}) if own else base
+        desk = self.desk if own else desk
         now_items = self.count(dets)
         extra = {}
         compared = False
-        if self.desk is not None and self.desk.ready and photo is not None:
+        if desk is not None and desk.ready and photo is not None:
             frame = photo()
-            found = self.desk_items(frame, dets)
+            found = self.desk_items(frame, dets, desk)
             del frame
             compared = found is not None
             extra = found or {}
@@ -518,9 +632,9 @@ class RoomWatcher:
             group = left if label in BELONGINGS else trash  # 이름 모름(unknown)·쓰레기는 치울 것
             group[label] = group.get(label, 0) + n
         status = "LEFT_ITEMS" if left else "NEEDS_CLEANING" if trash else "CLEAN"
-        if status == "CLEAN" and compared:  # 비교를 건너뛰었으면 물건이 있을 수 있어 사진을 바꾸지 않는다
+        if own and status == "CLEAN" and compared:  # 비교를 건너뛰었으면 물건이 있을 수 있어 사진을 바꾸지 않는다
             self.desk.set_base(photo(), self.objects(dets))  # 깨끗하면 책상 사진도 새로 (햇빛·조명이 천천히 바뀌는 것 따라감)
-        if status == "CLEAN":  # 깨끗하면 기준을 넓혀 둔다 (줄어든 건 기준에서 빼지 않음: 다시 나와도 괜찮게)
+        if own and status == "CLEAN":  # 깨끗하면 기준을 넓혀 둔다 (줄어든 건 기준에서 빼지 않음: 다시 나와도 괜찮게)
             widened = {k: max(base.get(k, 0), now_items.get(k, 0)) for k in set(base) | set(now_items)}
             if widened != base:
                 self.baseline = widened
@@ -566,6 +680,8 @@ def check_message(check):
         listed = f" ({describe(check['objects'])})" if n else ""
         why = f" - {check['reason']}" if check.get("reason") else ""
         return f"깨끗한 방 기준 저장 {check['roomId']}번 방: 물건 {n}개{listed}{why}"
+    if check["status"] == "SKIPPED":
+        return f"정리 확인 {check['roomId']}번 방: 건너뜀 - {check['reason']}"
     if check["status"] == "CLEAN":
         return f"정리 확인 {check['roomId']}번 방: 깨끗함"
     parts = []

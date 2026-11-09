@@ -391,10 +391,11 @@ class RoomWatcher:
         try:
             with open(self.entry_path, encoding="utf-8") as f:
                 saved = json.load(f)
-            if saved.get("roomId") != self.room_id or not isinstance(saved["objects"], dict):
-                raise ValueError("다른 방 기준")
+            if (not isinstance(saved, dict) or saved.get("roomId") != self.room_id
+                    or not isinstance(saved.get("objects"), dict)):
+                raise ValueError("다른 방 기준이거나 모양이 다름")
             objects = {str(k): int(v) for k, v in saved["objects"].items()}
-        except (OSError, ValueError, KeyError, TypeError) as e:
+        except (OSError, ValueError, KeyError, TypeError, OverflowError) as e:
             print(f"예약 기준 파일을 못 읽어서 버려요 ({self.entry_path}: {e})")
             self.clear_entry()
             return

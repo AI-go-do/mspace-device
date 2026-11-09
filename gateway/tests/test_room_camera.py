@@ -453,9 +453,12 @@ def test_entry_baseline_survives_restart_and_is_deleted_after_check(tmp_path):
     assert not entry.exists()  # 보냈으면 지움
 
 
-def test_broken_entry_file_is_ignored(tmp_path, capsys):
+@pytest.mark.parametrize("text", ["{broken", "null", "[]", '"x"', "1", '{"roomId": 2, "objects": {}}',
+                                  '{"roomId": 1, "objects": {"cup": Infinity}}'])
+def test_broken_entry_file_is_ignored(tmp_path, capsys, text):
+    """깨졌거나 모양이 다른 파일이면 켤 때 멈추지 않고 버린다."""
     base = tmp_path / "room_baseline.json"
-    (tmp_path / "room_baseline_entry.json").write_text("{broken")
+    (tmp_path / "room_baseline_entry.json").write_text(text)
     w = RoomWatcher(1, on_checkout=True, baseline_path=str(base))
     assert w.entry is None and "못 읽어서" in capsys.readouterr().out
     assert not (tmp_path / "room_baseline_entry.json").exists()

@@ -396,7 +396,9 @@ def capture_one(folder, cam, count_people, ask=input, out=print, save=None):
     memo = ask("메모 (예: 종이컵 1, 창가 쪽, 저녁 조명. 없으면 Enter) ").strip()
     os.makedirs(os.path.join(folder, name), exist_ok=True)
     for key, frame in shots.items():
-        save(os.path.join(folder, name, f"{key}.jpg"), frame)
+        path = os.path.join(folder, name, f"{key}.jpg")
+        if save(path, frame) is False:  # 정답 줄을 쓰기 전에 멈춘다 (사진 없는 문제가 생기지 않게)
+            raise SystemExit(f"사진을 저장하지 못했어요: {path} (폴더 권한·디스크 확인)")
     case = Case(name, CHOICES[choice], memo)
     append_answer(folder, case)
     out(f"저장: {folder}/{name} 정답 {KOREAN[case.answer]}")

@@ -242,3 +242,15 @@ def test_run_one_reads_result_line_from_child():
     assert calls[0][0] == ["score", "eval/tidy", "--json"] and calls[0][1] == {"PATH": "/bin", "YOLO_MODEL": "a.onnx"}
     broken = te.run_one("eval/tidy", cand, {}, run=lambda cmd, env, **kw: Done("", "Traceback\nFileNotFoundError: a"))
     assert broken == {"error": "FileNotFoundError: a"}
+
+
+def test_capture_stops_when_photo_not_saved(tmp_path):
+    class Cam:
+        def read(self):
+            return True, frame(0)
+
+    answers = iter(["", "", "1", ""])
+    with pytest.raises(SystemExit, match="저장하지 못했어요"):
+        te.capture_one(str(tmp_path), Cam(), lambda f: 0, ask=lambda p: next(answers), out=lambda s: None,
+                       save=lambda p, f: False)
+    assert not (tmp_path / "answers.csv").exists()

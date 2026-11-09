@@ -320,3 +320,30 @@ def test_gateway_gives_entry_desk_only_in_checkout_mode_with_desk_photo(monkeypa
     assert got[0].entry_path == str(tmp_path / "b_entry.json")
     assert got[1].entry_desk is None
     gateway.CAMERA_ROOMS.clear()  # 다른 테스트에 카메라 방이 남지 않게
+
+
+def test_entry_photo_and_counts_from_different_saves_are_not_mixed(tmp_path, capsys):
+    """새 사진을 쓴 뒤 개수 파일을 쓰기 전에 꺼지면, 켤 때 옛 개수 + 새 사진을 쓰지 않고 둘 다 버린다."""
+    base = str(tmp_path / "b.json")
+    entry = DeskCompare(AREA, path=str(tmp_path / "b_entry_desk.png"))
+    w = RoomWatcher(1, on_checkout=True, baseline_path=base, entry_desk=entry)
+    who = Detection("person", 0.9, (0, 0, 50, 100))
+    for t in range(5):
+        w.update([], now=t, photo=lambda: desk())
+    w.update([who], now=5, photo=lambda: desk())
+    assert json.loads((tmp_path / "b_entry.json").read_text())["deskSum"]
+    old_counts = (tmp_path / "b_entry.json").read_text()
+    entry.set_prepared(entry.look(desk(PAPER)))           # 다음 기준 사진만 쓰고 꺼졌다고 치자
+    (tmp_path / "b_entry.json").write_text(old_counts)
+
+    again = DeskCompare(AREA, path=str(tmp_path / "b_entry_desk.png"))
+    w2 = RoomWatcher(1, on_checkout=True, baseline_path=base, entry_desk=again)
+    assert w2.entry is None and not again.ready and "같은 때" in capsys.readouterr().out
+
+    ok = DeskCompare(AREA, path=str(tmp_path / "c_entry_desk.png"))
+    w3 = RoomWatcher(1, on_checkout=True, baseline_path=str(tmp_path / "c.json"), entry_desk=ok)
+    for t in range(5):
+        w3.update([], now=t, photo=lambda: desk())
+    w3.update([who], now=5, photo=lambda: desk())
+    ok2 = DeskCompare(AREA, path=str(tmp_path / "c_entry_desk.png"))
+    assert RoomWatcher(1, on_checkout=True, baseline_path=str(tmp_path / "c.json"), entry_desk=ok2).entry is not None

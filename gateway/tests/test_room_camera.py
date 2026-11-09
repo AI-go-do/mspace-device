@@ -441,6 +441,29 @@ def test_expired_check_drops_that_teams_baseline():
     assert [c["status"] for c in r.out] == ["SKIPPED"]
 
 
+def test_long_pir_before_anyone_is_seen_drops_the_candidate(capsys):
+    """카메라엔 안 보이는데 PIR이 오래 켜져 있다가(그 사이 컵을 둠) 사람이 보이면 그 전 후보는 쓰지 않는다."""
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([], 5).run([thing("cup")], 30, pir=True).run([person(), thing("cup")], 3, pir=True)
+    assert r.w.entry is None and "PIR이 오래" in capsys.readouterr().out
+    r.checkout(1).run([thing("cup")], SETTLE_SEC + 6)
+    assert [c["status"] for c in r.out] == ["SKIPPED"]  # 컵을 이 팀 탓으로 하지 않음
+
+
+def test_pir_just_before_the_camera_is_a_normal_entry():
+    """문 열고 들어오면 PIR이 카메라보다 1~2초 먼저 켜질 수 있다. 그건 보통 입실이라 기준을 잡는다."""
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([], 5).run([], 2, pir=True).run([person()], 3, pir=True)
+    assert r.w.entry is not None
+
+
+def test_candidate_is_retaken_when_room_is_empty_again_after_pir():
+    """PIR만 켜졌다 꺼지고 다시 3초 비면 후보를 바로 새로 찍는다 (그 사이 둔 컵이 기준에 들어감)."""
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([], 5).run([thing("cup")], 30, pir=True).run([thing("cup")], 5).run([person(), thing("cup")], 3)
+    assert r.w.entry["objects"] == {"cup": 1}
+
+
 def test_entry_baseline_survives_restart_and_is_deleted_after_check(tmp_path):
     base = str(tmp_path / "room_baseline.json")
     r = Room(RoomWatcher(1, on_checkout=True, baseline_path=base))

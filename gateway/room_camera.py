@@ -44,7 +44,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from desk_diff import desk_box
+from desk_diff import desk_box, fingerprint
 
 KST = timezone(timedelta(hours=9))
 
@@ -88,6 +88,8 @@ SETTLE_SEC = 10        # (퇴실 모드) 퇴실 뒤 방이 10초 비어 있으�
 PENDING_MAX_SEC = 600  # (퇴실 모드) 퇴실 뒤 10분 안에 방이 비지 않으면 그 예약 확인은 포기 (다음 사람 물건을 탓하지 않게)
 ENTRY_EMPTY_SEC = 3    # (퇴실 모드) 한 장씩 셌을 때 0명이 연속 3초면 "빈 방"으로 보고 다음 예약 기준 후보로 든다 (Q-22)
 SNAPSHOT_SEC = 60      # (퇴실 모드) 빈 방이 계속되면 후보를 1분마다 새로 찍는다 (햇빛·조명 변화 따라감)
+ENTRY_PIR_GRACE_SEC = 10  # PIR이 먼저 켜진 뒤 이 안에 카메라가 사람을 보면 보통 입실. 더 길면 카메라에 안 보인 사람이
+                          # 그동안 뭘 두었을 수 있어 후보를 쓰지 않는다
 
 
 @dataclass(frozen=True)
@@ -347,6 +349,7 @@ class RoomWatcher:
         self.raw_empty_since = None  # 한 장씩 셌을 때 0명이 된 시각 (가운데 값이 아니라 그 장 그대로)
         self.snapshot = None         # 빈 방 후보 {"objects", "img", "known", "at"}. 메모리에만
         self.entry = None            # 확정된 예약 기준 {"objects", "at"}
+        self.pir_since = None        # 후보를 찍은 뒤 카메라엔 0명인데 PIR이 처음 켜진 시각
         self.load_baseline()
         self.load_entry()
 
@@ -395,6 +398,11 @@ class RoomWatcher:
                     or not isinstance(saved.get("objects"), dict)):
                 raise ValueError("다른 방 기준이거나 모양이 다름")
             objects = {str(k): int(v) for k, v in saved["objects"].items()}
+            desk_sum = (fingerprint(self.entry_desk.base)
+                        if self.entry_desk is not None and self.entry_desk.ready else None)
+            if self.entry_desk is not None and saved.get("deskSum") != desk_sum:
+                # 사진을 바꾼 뒤 개수 파일을 쓰기 전에 꺼졌다. 옛 개수 + 새 사진을 섞어 쓰지 않는다
+                raise ValueError("책상 사진과 개수가 같은 때 저장된 것이 아님")
         except (OSError, ValueError, KeyError, TypeError, OverflowError) as e:
             print(f"예약 기준 파일을 못 읽어서 버려요 ({self.entry_path}: {e})")
             self.clear_entry()
@@ -412,6 +420,8 @@ class RoomWatcher:
         if self.entry_path:
             record = {"roomId": self.room_id, "objects": snap["objects"],
                       "savedAt": now_iso or datetime.now(KST).isoformat(timespec="seconds")}
+            if self.entry_desk is not None:  # 사진 지문을 같이 적어 같은 때 저장된 짝인지 켤 때 확인한다
+                record["deskSum"] = fingerprint(self.entry_desk.base) if self.entry_desk.ready else None
             try:
                 with open(self.entry_path + ".tmp", "w", encoding="utf-8") as f:
                     json.dump(record, f, ensure_ascii=False)
@@ -440,25 +450,33 @@ class RoomWatcher:
         """
         if raw > 0:
             self.raw_empty_since = None
+            pir_since, self.pir_since = self.pir_since, None
             if self.snapshot is not None:
                 snap, self.snapshot = self.snapshot, None
+                if pir_since is not None and now - pir_since > ENTRY_PIR_GRACE_SEC:
+                    # 카메라엔 안 보였지만 PIR이 오래 켜져 있었다. 그 사이 뭘 두었을 수 있어 이 후보는 버린다
+                    print(f"예약 기준 {self.room_id}번 방: 사람이 보이기 전 PIR이 오래 켜져 있어 후보를 쓰지 않음")
+                    return
                 self.confirm_entry(snap, now, now_iso)
             return
         if pir:  # 카메라엔 안 보여도 누가 있을 수 있다. 후보를 새로 찍지 않는다
             self.raw_empty_since = None
+            if self.pir_since is None and self.snapshot is not None:
+                self.pir_since = now
             return
         if self.raw_empty_since is None:
             self.raw_empty_since = now
         if now - self.raw_empty_since < ENTRY_EMPTY_SEC:
             return
-        if self.snapshot is not None and now - self.snapshot["at"] < SNAPSHOT_SEC:
-            return
+        if self.snapshot is not None and self.pir_since is None and now - self.snapshot["at"] < SNAPSHOT_SEC:
+            return  # (PIR이 켜졌던 후보는 다시 비면 바로 새로 찍는다)
         seen = detail() if detail else dets
         img = known = None
         if self.entry_desk is not None and photo is not None:
             img = self.entry_desk.look(photo())  # 책상 부분만 흑백·작게. 메모리에만
             known = [d.box for d in self.objects(seen)]
         self.snapshot = {"objects": self.count(seen), "img": img, "known": known, "at": now}
+        self.pir_since = None
 
     def confirm_entry(self, snap, now, now_iso):
         pending_at = self.pending[1] if self.pending else None

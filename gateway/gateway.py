@@ -444,8 +444,9 @@ def handle_occupancy(event, verifier, sensors=None):
     body = occupancy_body(event)
     state = "있음" if body["occupied"] else "없음"
     LAST_PIR[body["roomId"]] = (event["pir"], time.monotonic())  # 방 안 카메라가 있으면 카메라 이벤트에 같이 싣는다
+    LAST_LIGHT[body["roomId"]] = (event["light"], time.monotonic())  # 조도도 같이 싣는다 (기록용)
     if camera_alive(body["roomId"]):  # 이 방은 카메라가 PIR까지 합쳐서 보낸다 (두 장치가 번갈아 다른 값을 보내지 않게)
-        print(f"재실 {body['roomId']}번 방 PIR: {state} (카메라 이벤트에 합쳐 보냄)")
+        print(f"재실 {body['roomId']}번 방 PIR: {state}, 조도: {event['light']} (카메라 이벤트에 합쳐 보냄)")
         return None
     print(f"재실 {body['roomId']}번 방: {state} (pir={event['pir']}, 조도={event['light']})")
     if isinstance(verifier, DryRunVerifier):  # 연습 모드에서는 core에 보낼 모양을 그대로 보여 준다
@@ -456,6 +457,7 @@ def handle_occupancy(event, verifier, sensors=None):
 
 
 LAST_PIR = {}      # 방 번호 → (우노 PIR 마지막 값 0/1, 받은 시각)
+LAST_LIGHT = {}    # 방 번호 → (우노 조도 마지막 값 0~1023, 받은 시각)
 CAMERA_ROOMS = {}  # 방 번호 → 방 안 카메라가 마지막으로 사진을 잘 읽은 시각
 PIR_FRESH_SEC = 30     # 우노 PIR이 이보다 오래되면 안 쓴다 (우노가 멈췄는데 "있음"으로 고정되지 않게)
 CAMERA_FRESH_SEC = 30  # 카메라가 이보다 오래 사진을 못 읽으면 우노가 다시 재실을 보낸다 (core 끊김 판정 1분보다 짧게)
@@ -473,6 +475,24 @@ def fresh_pir(room, now=None):
     if got is None or (time.monotonic() if now is None else now) - got[1] >= PIR_FRESH_SEC:
         return None
     return got[0]
+
+
+def fresh_light(room, now=None):
+    """우노 조도 마지막 값. PIR과 같이 PIR_FRESH_SEC 넘게 새 값이 없으면 None."""
+    got = LAST_LIGHT.get(room)
+    if got is None or (time.monotonic() if now is None else now) - got[1] >= PIR_FRESH_SEC:
+        return None
+    return got[0]
+
+
+def with_light(push, room):
+    """카메라 재실 이벤트에 우노 조도를 sources.light로 붙여서 보낸다 (core는 기록만, 재실 판단엔 안 씀)."""
+    def send(body):
+        light = fresh_light(room)
+        if body.get("kind") == "OCCUPANCY" and light is not None:
+            body = {**body, "sources": {**body.get("sources", {}), "light": light}}
+        push(body)
+    return send
 
 
 # sensorType별 처리기 표. 새 센서 줄은 여기에 한 줄씩 추가한다
@@ -638,7 +658,8 @@ def start_room_camera(config, sensors):
     else:
         print("정리 확인: 연습 모드 (모두 나가고 30초 뒤 확인, 서버로 안 보냄)")
     t = threading.Thread(target=room_camera.run_room_camera,
-                         args=(watcher, cam, detector, camera_push(config, sensors), lambda: fresh_pir(room)),
+                         args=(watcher, cam, detector, with_light(camera_push(config, sensors), room),
+                               lambda: fresh_pir(room)),
                          kwargs={"preview": start_preview(config.preview_port, config.preview_host),
                                  "on_frame": lambda: CAMERA_ROOMS.__setitem__(room, time.monotonic()),
                                  "send_check": send_check},

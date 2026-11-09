@@ -24,9 +24,11 @@ def thing(label, x=200, y=200):
 def clean_globals():
     gateway.CAMERA_ROOMS.clear()
     gateway.LAST_PIR.clear()
+    gateway.LAST_LIGHT.clear()
     yield
     gateway.CAMERA_ROOMS.clear()
     gateway.LAST_PIR.clear()
+    gateway.LAST_LIGHT.clear()
 
 
 # ---- 모델 출력 ----
@@ -1026,3 +1028,30 @@ def test_preview_gets_desk_area_in_pixels():
         run_room_camera(RoomWatcher(1), Cam(), D(), lambda e: None,
                         clock=iter(range(100)).__next__, sleep=lambda s: None, preview=P())
     assert got == [(100, 50, 100, 50)]
+
+
+def test_camera_event_carries_uno_light():
+    """카메라가 켜져 있어도 우노 조도가 카메라 재실 이벤트 sources.light로 간다."""
+    sent, got = [], []
+
+    class Sender:
+        def push(self, b):
+            sent.append(b)
+
+    gateway.CAMERA_ROOMS[1] = gateway.time.monotonic()
+    line = json.dumps({"eventId": "1-1-1", "roomId": 1, "sensorType": "occupancy", "pir": 0, "light": 321})
+    gateway.handle_line(line, object(), Sender())
+    assert sent == []  # 우노는 따로 안 보내고
+    push = gateway.with_light(got.append, 1)
+    push({"kind": "OCCUPANCY", "sources": {"camera": True, "people": 1}})
+    push({"kind": "OTHER"})
+    assert got[0]["sources"] == {"camera": True, "people": 1, "light": 321}
+    assert got[1] == {"kind": "OTHER"}
+
+
+def test_light_dropped_when_uno_stale():
+    got = []
+    gateway.LAST_LIGHT[1] = (500, gateway.time.monotonic() - 60)  # 우노가 30초 넘게 조용함
+    gateway.with_light(got.append, 1)({"kind": "OCCUPANCY", "sources": {"camera": True}})
+    assert got[0]["sources"] == {"camera": True}
+    assert gateway.fresh_light(2) is None

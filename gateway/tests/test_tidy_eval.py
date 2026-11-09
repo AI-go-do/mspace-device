@@ -230,8 +230,8 @@ def test_run_one_reads_result_line_from_child():
     calls = []
 
     class Done:
-        def __init__(self, stdout, stderr=""):
-            self.stdout, self.stderr = stdout, stderr
+        def __init__(self, stdout, stderr="", returncode=0):
+            self.stdout, self.stderr, self.returncode = stdout, stderr, returncode
 
     def run(cmd, env, **kw):
         calls.append((cmd[-3:], env))
@@ -240,8 +240,17 @@ def test_run_one_reads_result_line_from_child():
     cand = te.Candidate("A", {"YOLO_MODEL": "a.onnx"})
     assert te.run_one("eval/tidy", cand, {"PATH": "/bin"}, run=run) == {"accuracy": 1.0}
     assert calls[0][0] == ["score", "eval/tidy", "--json"] and calls[0][1] == {"PATH": "/bin", "YOLO_MODEL": "a.onnx"}
-    broken = te.run_one("eval/tidy", cand, {}, run=lambda cmd, env, **kw: Done("", "Traceback\nFileNotFoundError: a"))
+    broken = te.run_one("eval/tidy", cand, {}, run=lambda cmd, env, **kw: Done("", "Traceback\nFileNotFoundError: a", 1))
     assert broken == {"error": "FileNotFoundError: a"}
+    # 결과 줄을 낸 뒤 끝에서 실패하면 그 결과를 믿지 않는다
+    late = Done(te.RESULT_MARK + "{}\n", "Traceback\nOSError: 디스크", 1)
+    assert te.run_one("eval/tidy", cand, {}, run=lambda cmd, env, **kw: late) == {"error": "OSError: 디스크"}
+
+    def slow(cmd, env, timeout, **kw):
+        import subprocess
+        raise subprocess.TimeoutExpired(cmd, timeout)
+
+    assert "60초 안에 안 끝남" in te.run_one("eval/tidy", cand, {"TIDY_TIMEOUT": "60"}, run=slow)["error"]
 
 
 def test_capture_stops_when_photo_not_saved(tmp_path):

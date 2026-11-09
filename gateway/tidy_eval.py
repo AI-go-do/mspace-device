@@ -272,15 +272,23 @@ def license_of(env):
 
 
 def run_one(folder, candidate, base_env, run=None):
-    """후보 하나를 따로 띄운 프로그램에서 채점한다 (모델 올리기 시간·메모리를 후보마다 깨끗하게 재려고)."""
+    """후보 하나를 따로 띄운 프로그램에서 채점한다 (모델 올리기 시간·메모리를 후보마다 깨끗하게 재려고).
+
+    TIDY_TIMEOUT(초, 기본 1800)이 지나도 안 끝나면 그 후보는 실패로 두고 다음 후보로 넘어간다.
+    """
     import subprocess
     run = run or subprocess.run
     env = {**base_env, **candidate.env}
-    done = run([sys.executable, os.path.abspath(__file__), "score", folder, "--json"],
-               env=env, capture_output=True, text=True, check=False)
-    for line in reversed(done.stdout.splitlines()):
-        if line.startswith(RESULT_MARK):
-            return json.loads(line[len(RESULT_MARK):])
+    timeout = float(env.get("TIDY_TIMEOUT") or 1800)
+    try:
+        done = run([sys.executable, os.path.abspath(__file__), "score", folder, "--json"],
+                   env=env, capture_output=True, text=True, check=False, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {"error": f"{timeout:.0f}초 안에 안 끝남 (TIDY_TIMEOUT으로 늘릴 수 있어요)"}
+    if done.returncode == 0:
+        for line in reversed(done.stdout.splitlines()):
+            if line.startswith(RESULT_MARK):
+                return json.loads(line[len(RESULT_MARK):])
     tail = (done.stderr or done.stdout).strip().splitlines()[-1:] or ["알 수 없음"]
     return {"error": tail[0]}
 

@@ -203,7 +203,7 @@ v8s + 책상   | YOLO_MODEL=gateway/yolov8s.onnx DESK_PHOTO=1 DESK_AREA=0.25,0.2
 | 메모리 최대 · 모델 올리기 | 젯슨에서 그 후보가 쓴 메모리(GPU 포함), 모델을 불러와 첫 장을 보기까지 걸린 시간 |
 | 라이선스 | 모델 파일 이름으로 알려 줘요. YOLOv8·YOLO11·YOLO-World는 AGPL-3.0이라 배포할 땐 확인이 필요해요 |
 
-표는 `eval/tidy/compare_<날짜>.md`에도 저장돼요. 아래 실험 기록에 붙여요.
+표는 `eval/tidy/compare_<날짜>.md`에도 저장돼요. 아래 실험 기록에 붙여요. 한 후보가 `TIDY_TIMEOUT`(초, 기본 1800) 안에 안 끝나면 실패로 두고 다음 후보로 넘어가요.
 
 ### 교육장 MQTT 센서 → 방 CO2·온도·습도 (시연용, 기본 꺼짐)
 

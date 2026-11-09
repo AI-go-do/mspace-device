@@ -107,7 +107,7 @@ def judge(before, after, find, room_items=None, desk=None, labeler=None, clock=t
     find(frame): 정리 확인 때 쓰는 "자세히 찾기" (detect_detailed). before = 그 예약의 기준(입실 직전 빈 방).
     """
     import room_camera
-    watcher = room_camera.RoomWatcher(0, room_items=room_items, labeler=labeler)
+    watcher = room_camera.RoomWatcher(0, check_objects=True, room_items=room_items, labeler=labeler)
     seen = find(before)
     base = watcher.count(seen)
     if desk is not None:
@@ -116,6 +116,8 @@ def judge(before, after, find, room_items=None, desk=None, labeler=None, clock=t
     found = find(after)
     check = watcher.check(found, "", photo=(lambda: after) if desk is not None else None, base=base, desk=desk)
     seconds = clock() - started
+    if check is None:
+        raise RuntimeError("정리 확인 결과가 비어 있어요 (RoomWatcher.check)")
     check["people"] = watcher.people(found)
     return check, seconds
 
@@ -177,6 +179,7 @@ def save_result(folder, result, candidate):
     record = {"at": datetime.now(KST).isoformat(timespec="seconds"), "candidate": candidate,
               **{k: v for k, v in result.items() if k != "rows"},
               "wrong": [r["case"] for r in result["rows"] if not r["ok"]]}
+    os.makedirs(folder, exist_ok=True)
     with open(os.path.join(folder, "results.jsonl"), "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 

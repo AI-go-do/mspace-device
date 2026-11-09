@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
 import statistics
 import sys
@@ -215,6 +216,13 @@ def run_score(folder, env, out=print, as_json=False, clock=time.perf_counter):
     if config.desk_photo and not config.desk_area:
         out("DESK_PHOTO=1은 DESK_AREA가 있어야 해요. 책상 사진 비교 없이 채점해요")
     labeler = room_camera.make_labeler(detector, config.label_model) if use_desk else None
+    first_seen = []
+
+    def timed_find(img):  # 모델을 불러와 첫 장을 보기까지 걸린 시간을 잰다
+        seen = find(img)
+        if not first_seen:
+            first_seen.append(clock())
+        return seen
 
     def run_case(case):
         before = cv2.imread(os.path.join(folder, case.name, "before.jpg"))
@@ -223,12 +231,13 @@ def run_score(folder, env, out=print, as_json=False, clock=time.perf_counter):
             if img is None:
                 raise SystemExit(f"{case.name}/{key}를 못 읽었어요 (파일이 깨졌을 수 있어요). 다시 찍거나 answers.csv에서 빼요")
         desk = desk_diff.DeskCompare(config.desk_area) if use_desk else None  # 메모리에만 (파일 안 씀)
-        return judge(before, after, find, config.room_items, desk, labeler)
+        return judge(before, after, timed_find, config.room_items, desk, labeler)
 
-    run_case(cases[0])  # 처음 한 번은 모델 준비로 느리다. 시간에 넣지 않고 "모델 올리기"에 넣는다
-    load_seconds = clock() - loading
+    run_case(cases[0])  # 처음 한 번은 모델 준비로 느리다. 시간에 넣지 않고, 첫 장까지를 "모델 올리기"로 둔다
+    load_seconds = first_seen[0] - loading
     result = score(cases, run_case)
     result["loadSeconds"] = round(load_seconds, 1)
+    result["skipped"] = problems  # 건너뛴 문제. 비교표에 같이 적어 문제집이 다른 걸 알아보게 한다
     result["memoryMB"] = peak_memory_mb()
     candidate = candidate_name(env)
     report(result, candidate, out)
@@ -286,7 +295,7 @@ def run_one(folder, candidate, base_env, run=None):
         timeout = float(env.get("TIDY_TIMEOUT") or 1800)
     except ValueError:
         timeout = 1800.0
-    if not timeout > 0:  # 0 이하·NaN이면 기본값
+    if not math.isfinite(timeout) or timeout <= 0:  # 0 이하·NaN·inf면 기본값
         timeout = 1800.0
     try:
         done = run([sys.executable, os.path.abspath(__file__), "score", folder, "--json"],
@@ -343,7 +352,8 @@ def compare_table(rows):
             ok, total = r["byAnswer"][a]
             parts.append(f"{ok / total:.0%}" if total else "-")
         memory = f"{r['memoryMB']:.0f}MB" if r.get("memoryMB") is not None else "-"
-        lines.append(f"| {row['verdict']} | {row['name']} | **{r['accuracy']:.1%}** ({' / '.join(parts)}) "
+        name = row["name"] + (f" ({len(r['skipped'])}문제 건너뜀)" if r.get("skipped") else "")
+        lines.append(f"| {row['verdict']} | {name} | **{r['accuracy']:.1%}** ({' / '.join(parts)}) "
                      f"| {r['serious']} | {r['medianSeconds']:.2f}초 ({r['maxSeconds']:.2f}초) | {memory} "
                      f"| {r['loadSeconds']:.1f}초 | {row['license']} |")
     return "\n".join(lines)
@@ -358,7 +368,7 @@ def run_compare(folder, env, out=print, run_candidate=None):
     for i, c in enumerate(candidates, 1):
         out(f"[{i}/{len(candidates)}] {c.name} 채점 중...")
         result = run_candidate(c)
-        rows.append({"name": c.name, "result": result, "verdict": verdict(result), "license": license_of(c.env)})
+        rows.append({"name": c.name, "result": result, "verdict": verdict(result), "license": license_of({**env, **c.env})})
     rows = rank(rows)
     cases = next((r["result"]["cases"] for r in rows if "error" not in r["result"]), 0)
     table = compare_table(rows)

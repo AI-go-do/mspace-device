@@ -275,7 +275,33 @@ def test_run_one_uses_default_timeout_for_bad_value():
         seen.append(timeout)
         return Done()
 
-    for bad in ("abc", "0", "-5"):
+    for bad in ("abc", "0", "-5", "inf"):
         te.run_one("eval/tidy", te.Candidate("a", {"TIDY_TIMEOUT": bad}), {}, run=run)
     te.run_one("eval/tidy", te.Candidate("a", {"TIDY_TIMEOUT": "60"}), {}, run=run)
-    assert seen == [1800.0, 1800.0, 1800.0, 60.0]
+    assert seen == [1800.0, 1800.0, 1800.0, 1800.0, 60.0]
+
+
+def test_skipped_cases_show_in_result_and_table(tmp_path, monkeypatch):
+    """건너뛴 문제는 결과와 비교표에 남는다. 모델 올리기는 첫 장을 볼 때까지만 잰다."""
+    import cv2
+    import room_camera
+    (tmp_path / "001").mkdir()
+    cv2.imwrite(str(tmp_path / "001" / "before.jpg"), frame(0))
+    cv2.imwrite(str(tmp_path / "001" / "after.jpg"), frame(0))
+    te.append_answer(str(tmp_path), te.Case("001", "CLEAN"))
+    te.append_answer(str(tmp_path), te.Case("002", "CLEAN"))  # 사진 없음 → 건너뜀
+    ticks = iter(range(100))
+
+    class Fake:
+        finds_objects = True
+
+        def detect(self, f):
+            return []
+
+    monkeypatch.setattr(room_camera, "make_detector", lambda model, area: Fake())
+    result = te.run_score(str(tmp_path), {"YOLO_MODEL": "m.onnx"}, out=lambda s: None,
+                          clock=lambda: next(ticks))
+    assert len(result["skipped"]) == 1 and result["cases"] == 1
+    assert result["loadSeconds"] == 1  # 시작 0 → 첫 장 1 (둘째 장까지 기다리지 않음)
+    row = {"name": "v8s", "result": result, "verdict": "후보", "license": "AGPL-3.0 (Ultralytics)"}
+    assert "v8s (1문제 건너뜀)" in te.compare_table([row])

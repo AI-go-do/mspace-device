@@ -309,3 +309,20 @@ def test_start_room_env_wiring():
 def test_start_room_env_needs_host(capsys):
     assert gateway.start_room_env(gateway.Config(mqtt_room=1), None, start_thread=False) is None
     assert "MQTT_HOST" in capsys.readouterr().out
+
+
+def test_value_arriving_while_summarizing_is_sent_next_time():
+    """평균을 내는 사이 새 CO2가 오면 그 표시가 지워지지 않고 다음 전송에 들어간다."""
+    env, _, _ = make()
+    env.on_message("t", uplink("a", 1, co2=500), received=T0)
+    real = env.summary
+
+    def summary_with_arrival(now):
+        s = real(now)
+        env.on_message("t", uplink("b", 1, co2=900), received=T0 + 1)  # 평균 낸 직후 도착
+        return s
+
+    env.summary = summary_with_arrival
+    assert env.tick(T0 + 1)["ppm"] == 500
+    env.summary = real
+    assert env.tick(T0 + 61)["ppm"] == 700

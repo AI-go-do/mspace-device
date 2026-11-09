@@ -182,8 +182,11 @@ class RoomEnv:
         with self.lock:
             if not self.fresh:
                 return None
+            self.fresh = False  # 먼저 내린다. 평균을 내는 사이 온 새 값은 다시 True로 올려 다음 번에 보낸다
         s = self.summary(now)
         if s is None:
+            with self.lock:
+                self.fresh = True  # 보낼 CO2가 아직 없으니 표시를 되돌린다
             return None
         body = {
             "eventId": str(uuid.uuid4()),
@@ -198,8 +201,6 @@ class RoomEnv:
             body["temperatureC"] = s["temperatureC"]
         if s["humidityPct"] is not None:
             body["humidityPct"] = s["humidityPct"]
-        with self.lock:
-            self.fresh = False
         self.sent_at = now
         self.log(f"환경 {self.room_id}번 방 ({self.location} 센서 {s['devices']}대 평균): CO2 {s['ppm']}ppm"
                  + (f", {s['temperatureC']}℃" if s["temperatureC"] is not None else "")

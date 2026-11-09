@@ -14,6 +14,9 @@
     ROOM_CAMERA=2 YOLO_MODEL=gateway/yolov8s.onnx ~/mspace-venv/bin/python gateway/tidy_eval.py capture
 채점 (게이트웨이와 같은 설정 이름을 쓴다: YOLO_MODEL, DESK_AREA, DESK_PHOTO, LABEL_MODEL, ROOM_ITEMS):
     YOLO_MODEL=gateway/yolov8s.onnx DESK_PHOTO=1 DESK_AREA=... ~/mspace-venv/bin/python gateway/tidy_eval.py score
+여러 후보 한 번에 비교 (eval/tidy/candidates.txt에 한 줄에 하나: `이름 | YOLO_MODEL=... DESK_PHOTO=1`):
+    ~/mspace-venv/bin/python gateway/tidy_eval.py compare
+    → 후보마다 따로 띄워 채점하고 정확도·심각 오류·시간(최대)·메모리·모델 올리기·라이선스·판단 표를 만든다
 """
 from __future__ import annotations
 
@@ -32,6 +35,10 @@ CHOICES = {"1": "CLEAN", "2": "NEEDS_CLEANING", "3": "LEFT_ITEMS"}
 GOAL_ACCURACY = 0.95
 GOAL_SECONDS = 1.0
 DEFAULT_DIR = "eval/tidy"
+RESULT_MARK = "TIDY_RESULT "
+# 모델 파일 이름 → 라이선스 (포트폴리오·배포 때 확인용). 모르는 모델은 "확인 필요"
+LICENSES = (("world", "AGPL-3.0 (Ultralytics)"), ("yolov8", "AGPL-3.0 (Ultralytics)"),
+            ("yolo11", "AGPL-3.0 (Ultralytics)"), ("rtdetr", "Apache-2.0"), ("yolox", "Apache-2.0"))
 KST = timezone(timedelta(hours=9))
 
 
@@ -127,10 +134,11 @@ def score(cases, run_case):
     right = sum(r["ok"] for r in rows)
     serious = sum(r["serious"] for r in rows)
     median = statistics.median(r["seconds"] for r in rows) if rows else 0.0
+    slowest = max((r["seconds"] for r in rows), default=0.0)
     by_answer = {a: [sum(r["ok"] for r in rows if r["answer"] == a), sum(r["answer"] == a for r in rows)]
                  for a in ANSWERS}
     return {"cases": n, "right": right, "accuracy": right / n if n else 0.0, "serious": serious,
-            "medianSeconds": round(median, 3), "byAnswer": by_answer, "rows": rows,
+            "medianSeconds": round(median, 3), "maxSeconds": round(slowest, 3), "byAnswer": by_answer, "rows": rows,
             "passed": bool(n) and right / n >= GOAL_ACCURACY and serious == 0 and median <= GOAL_SECONDS}
 
 
@@ -173,7 +181,17 @@ def save_result(folder, result, candidate):
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def run_score(folder, env, out=print):
+def peak_memory_mb():
+    """이 프로그램이 지금까지 쓴 메모리 최대 (MB). 젯슨은 GPU와 메모리를 같이 써서 모델 메모리도 여기 들어간다."""
+    try:
+        import resource
+    except ImportError:  # 윈도우
+        return None
+    kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return round(kb / (1024 * 1024 if sys.platform == "darwin" else 1024), 1)  # 맥은 바이트, 리눅스는 KB
+
+
+def run_score(folder, env, out=print, as_json=False, clock=time.perf_counter):
     import cv2
     import desk_diff
     import room_camera
@@ -187,6 +205,7 @@ def run_score(folder, env, out=print):
     config = gateway.load_config(env)
     if not config.yolo_model:
         raise SystemExit("YOLO_MODEL을 넣어요. 예: YOLO_MODEL=gateway/yolov8s.onnx")
+    loading = clock()
     detector = room_camera.make_detector(config.yolo_model, config.desk_area)
     find = getattr(detector, "detect_detailed", detector.detect)
     use_desk = config.desk_photo and config.desk_area
@@ -203,13 +222,138 @@ def run_score(folder, env, out=print):
         desk = desk_diff.DeskCompare(config.desk_area) if use_desk else None  # 메모리에만 (파일 안 씀)
         return judge(before, after, find, config.room_items, desk, labeler)
 
-    if cases:
-        run_case(cases[0])  # 처음 한 번은 모델 준비로 느리다. 시간에 넣지 않게 한 번 돌려 둔다
+    run_case(cases[0])  # 처음 한 번은 모델 준비로 느리다. 시간에 넣지 않고 "모델 올리기"에 넣는다
+    load_seconds = clock() - loading
     result = score(cases, run_case)
+    result["loadSeconds"] = round(load_seconds, 1)
+    result["memoryMB"] = peak_memory_mb()
     candidate = candidate_name(env)
     report(result, candidate, out)
     save_result(folder, result, candidate)
+    if as_json:  # compare가 읽는 줄
+        summary = {k: v for k, v in result.items() if k != "rows"}
+        summary["wrong"] = [r["case"] for r in result["rows"] if not r["ok"]]
+        out(RESULT_MARK + json.dumps(summary, ensure_ascii=False))
     return result
+
+
+# ---------- 여러 후보 한 번에 비교 ----------
+
+@dataclass
+class Candidate:
+    name: str
+    env: dict
+
+
+def read_candidates(folder):
+    """candidates.txt: 한 줄에 후보 하나. `이름 | YOLO_MODEL=... DESK_PHOTO=1`. #으로 시작하면 건너뜀."""
+    path = os.path.join(folder, "candidates.txt")
+    if not os.path.exists(path):
+        raise SystemExit(f"{path}가 없어요. 예: v8s 지금 | YOLO_MODEL=gateway/yolov8s.onnx")
+    found = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            name, _, settings = line.partition("|")
+            pairs = [p.split("=", 1) for p in settings.split() if "=" in p]
+            if name.strip() and pairs:
+                found.append(Candidate(name.strip(), {k: v for k, v in pairs}))
+            else:
+                print(f"후보 줄 형식이 이상해서 건너뛰어요: {line!r}")
+    return found
+
+
+def license_of(env):
+    models = " ".join(env.get(k, "") for k in ("YOLO_MODEL", "LABEL_MODEL")).lower()
+    names = sorted({lic for key, lic in LICENSES if key in models})
+    return ", ".join(names) or "확인 필요"
+
+
+def run_one(folder, candidate, base_env, run=None):
+    """후보 하나를 따로 띄운 프로그램에서 채점한다 (모델 올리기 시간·메모리를 후보마다 깨끗하게 재려고)."""
+    import subprocess
+    run = run or subprocess.run
+    env = {**base_env, **candidate.env}
+    done = run([sys.executable, os.path.abspath(__file__), "score", folder, "--json"],
+               env=env, capture_output=True, text=True, check=False)
+    for line in reversed(done.stdout.splitlines()):
+        if line.startswith(RESULT_MARK):
+            return json.loads(line[len(RESULT_MARK):])
+    tail = (done.stderr or done.stdout).strip().splitlines()[-1:] or ["알 수 없음"]
+    return {"error": tail[0]}
+
+
+def verdict(result):
+    """채택(기준을 넘은 것 중 가장 좋음) / 후보(기준 넘음) / 탈락(이유)."""
+    if "error" in result:
+        return "실패"
+    why = []
+    if result["accuracy"] < GOAL_ACCURACY:
+        why.append("정확도")
+    if result["serious"]:
+        why.append("심각 오류")
+    if result["medianSeconds"] > GOAL_SECONDS:
+        why.append("시간")
+    return "후보" if not why else "탈락 (" + ", ".join(why) + ")"
+
+
+def rank(rows):
+    """기준을 넘은 것 → 정확도 높은 순 → 심각 오류 적은 순 → 빠른 순. 맨 위 후보를 채택으로 바꾼다."""
+    def key(row):
+        r = row["result"]
+        if "error" in r:
+            return (2, 0, 0, 0)
+        return (0 if row["verdict"] == "후보" else 1, -r["accuracy"], r["serious"], r["medianSeconds"])
+    rows = sorted(rows, key=key)
+    if rows and rows[0]["verdict"] == "후보":
+        rows[0]["verdict"] = "채택"
+    return rows
+
+
+def compare_table(rows):
+    """비교표 (마크다운). README 실험 기록·포트폴리오에 그대로 붙인다."""
+    head = ("| 판단 | 후보 | 정확도 (깨끗함 / 치울 것 / 두고 감) | 심각 오류 | 사진당 시간 (최대) "
+            "| 메모리 최대 | 모델 올리기 | 라이선스 |")
+    lines = [head, "|---|---|---|---|---|---|---|---|"]
+    for row in rows:
+        r = row["result"]
+        if "error" in r:
+            lines.append(f"| 실패 | {row['name']} | {r['error']} | | | | | {row['license']} |")
+            continue
+        parts = []
+        for a in ANSWERS:
+            ok, total = r["byAnswer"][a]
+            parts.append(f"{ok / total:.0%}" if total else "-")
+        memory = f"{r['memoryMB']:.0f}MB" if r.get("memoryMB") is not None else "-"
+        lines.append(f"| {row['verdict']} | {row['name']} | **{r['accuracy']:.1%}** ({' / '.join(parts)}) "
+                     f"| {r['serious']} | {r['medianSeconds']:.2f}초 ({r['maxSeconds']:.2f}초) | {memory} "
+                     f"| {r['loadSeconds']:.1f}초 | {row['license']} |")
+    return "\n".join(lines)
+
+
+def run_compare(folder, env, out=print, run_candidate=None):
+    candidates = read_candidates(folder)
+    if not candidates:
+        raise SystemExit("candidates.txt에 후보가 없어요")
+    run_candidate = run_candidate or (lambda c: run_one(folder, c, dict(env)))
+    rows = []
+    for i, c in enumerate(candidates, 1):
+        out(f"[{i}/{len(candidates)}] {c.name} 채점 중...")
+        result = run_candidate(c)
+        rows.append({"name": c.name, "result": result, "verdict": verdict(result), "license": license_of(c.env)})
+    rows = rank(rows)
+    cases = next((r["result"]["cases"] for r in rows if "error" not in r["result"]), 0)
+    table = compare_table(rows)
+    text = (f"## 정리 확인 후보 비교 ({datetime.now(KST):%Y-%m-%d %H:%M}, 문제 {cases}개)\n\n"
+            f"목표: 정확도 {GOAL_ACCURACY:.0%} 이상 · 심각 오류 0 · 사진당 {GOAL_SECONDS:.0f}초 안\n\n{table}\n")
+    out(text)
+    path = os.path.join(folder, f"compare_{datetime.now(KST):%m%d_%H%M}.md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    out(f"저장: {path} (README 실험 기록에 붙여요)")
+    return rows
 
 
 # ---------- 찍기 ----------
@@ -279,13 +423,16 @@ def run_capture(folder, env):
 def main(argv=None, env=None):
     argv = sys.argv[1:] if argv is None else argv
     env = os.environ if env is None else env
-    if not argv or argv[0] not in ("capture", "score"):
-        raise SystemExit("사용법: tidy_eval.py capture|score [문제집 폴더, 기본 eval/tidy]")
-    folder = argv[1] if len(argv) > 1 else DEFAULT_DIR
+    if not argv or argv[0] not in ("capture", "score", "compare"):
+        raise SystemExit("사용법: tidy_eval.py capture|score|compare [문제집 폴더, 기본 eval/tidy]")
+    args = [a for a in argv[1:] if not a.startswith("--")]
+    folder = args[0] if args else DEFAULT_DIR
     if argv[0] == "capture":
         run_capture(folder, env)
+    elif argv[0] == "compare":
+        run_compare(folder, env)
     else:
-        run_score(folder, env)
+        run_score(folder, env, as_json="--json" in argv)
 
 
 if __name__ == "__main__":

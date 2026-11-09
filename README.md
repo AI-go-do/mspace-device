@@ -182,6 +182,29 @@ YOLO_MODEL=gateway/yolov8s.onnx DESK_PHOTO=1 DESK_AREA=0.25,0.22,0.64,0.83 ~/msp
 - 채점하면 정확도·심각한 오류·시간, 틀린 문제와 그때 찾은 것을 보여 주고, 아래 **실험 기록** 표에 붙일 한 줄을 만들어 줘요. 매번 `eval/tidy/results.jsonl`에도 남아요
 - 설정을 맞추는 데 쓴 사진과 채점 사진은 나눠요. 같은 사진으로 맞추고 채점하면 점수가 실제보다 높게 나와요
 
+**여러 후보를 한 번에 비교 (`compare`)**: `eval/tidy/candidates.txt`에 후보를 한 줄에 하나씩 적고 돌리면, 후보마다 따로 띄워 채점해서 한 표로 보여 줘요.
+
+```text
+# eval/tidy/candidates.txt  (이름 | 게이트웨이와 같은 설정)
+v8n          | YOLO_MODEL=gateway/yolov8n.onnx
+v8s (지금)   | YOLO_MODEL=gateway/yolov8s.onnx
+v8s + 책상   | YOLO_MODEL=gateway/yolov8s.onnx DESK_PHOTO=1 DESK_AREA=0.25,0.22,0.64,0.83
+```
+
+```bash
+~/mspace-venv/bin/python gateway/tidy_eval.py compare
+```
+
+| 칸 | 뜻 |
+|---|---|
+| 판단 | 채택(기준을 넘은 것 중 가장 좋음) / 후보(기준 넘음) / 탈락(못 넘은 기준) / 실패(모델 파일 없음 등) |
+| 정확도 | 전체, 그리고 정답별(깨끗함 / 치울 것 / 두고 감) 맞힌 비율 |
+| 심각 오류 · 사진당 시간 | 위 기준과 같음. 시간은 중앙값(최대) |
+| 메모리 최대 · 모델 올리기 | 젯슨에서 그 후보가 쓴 메모리(GPU 포함), 모델을 불러와 첫 장을 보기까지 걸린 시간 |
+| 라이선스 | 모델 파일 이름으로 알려 줘요. YOLOv8·YOLO11·YOLO-World는 AGPL-3.0이라 배포할 땐 확인이 필요해요 |
+
+표는 `eval/tidy/compare_<날짜>.md`에도 저장돼요. 아래 실험 기록에 붙여요.
+
 ### 교육장 MQTT 센서 → 방 CO2·온도·습도 (시연용, 기본 꺼짐)
 
 실습실에 이미 있는 센서(CO2·온도·습도)를 M-SPACE 방으로 치고 써요 (docs Q-21). 젯슨이 교육장 MQTT를 **구독만** 하고, 고른 공간 센서들의 평균을 1분마다 core `POST /api/sensor-events`(`kind: CO2` + `temperatureC`·`humidityPct`)로 보내요. 실제 방에 센서를 달면 설정만 바꾸면 돼요.
@@ -333,7 +356,7 @@ echo ch341 | sudo tee /etc/modules-load.d/ch341.conf
 | `qr_door.py` | 문 앞 웹캠 QR 입실 (`QR_CAMERA`). `QrDoor`가 QR 글자 → 같은 확인기 → OK/NO, `run_camera()`가 카메라에서 QR을 찾음 |
 | `room_camera.py` | 방 안 웹캠 (`ROOM_CAMERA`). `RoomWatcher`가 사람 수 → 재실 이벤트, 빈 방이 되면 정리 확인. `YoloDetector`(모델 있을 때) / `HogPersonDetector`(없을 때) |
 | `room_env.py` | 교육장 MQTT 센서 (`MQTT_ROOM`). `RoomEnv`가 업링크 → 중복·미래 시각 정리 → 기기별 최근 값 평균 → 1분마다 CO2 이벤트, `make_client()`는 구독만 하는 paho 클라이언트 |
-| `tidy_eval.py` | 정리 확인 채점. `capture`로 시험 사진 쌍과 정답을 모으고, `score`로 지금 설정의 정확도·심각한 오류·시간을 잼 |
+| `tidy_eval.py` | 정리 확인 채점. `capture`로 시험 사진 쌍과 정답을 모으고, `score`로 지금 설정의 정확도·심각한 오류·시간을 재고, `compare`로 여러 후보를 한 표로 비교 |
 
 ### 테스트
 
@@ -394,7 +417,7 @@ pytest --cov --cov-report=term-missing   # 우노·서버 없이 가짜 시리�
 
 ## 9. 실험 기록 (품질 개선)
 
-후보를 채점할 때마다 한 줄씩 남겨요(`tidy_eval.py score`가 줄을 만들어 줘요). 무엇을 바꿔서 몇 % 좋아졌는지가 남고, 채택하지 않은 후보도 지우지 않아요. 같은 문제집끼리만 비교하고, 문제집을 바꾸면 기준선부터 다시 재요.
+후보를 채점할 때마다 한 줄씩 남겨요(`tidy_eval.py score`가 줄을, `compare`가 비교표를 만들어 줘요). 무엇을 바꿔서 몇 % 좋아졌는지가 남고, 채택하지 않은 후보도 지우지 않아요. 같은 문제집끼리만 비교하고, 문제집을 바꾸면 기준선부터 다시 재요.
 
 목표: 정확도 95% 이상 · 심각한 오류 0 · 사진당 1초 안 (젯슨)
 

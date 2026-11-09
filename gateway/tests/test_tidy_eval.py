@@ -148,6 +148,11 @@ def test_run_score_end_to_end(tmp_path, monkeypatch):
     result = te.run_score(str(tmp_path), {"YOLO_MODEL": "m.onnx"}, out=lines.append)
     assert result["right"] == 2 and result["passed"] is True
     assert (tmp_path / "results.jsonl").exists() and any("통과" == line for line in lines)
+    assert result["loadSeconds"] >= 0 and "maxSeconds" in result
+    lines.clear()
+    te.run_score(str(tmp_path), {"YOLO_MODEL": "m.onnx"}, out=lines.append, as_json=True)
+    mark = [line for line in lines if line.startswith(te.RESULT_MARK)]
+    assert len(mark) == 1 and json.loads(mark[0][len(te.RESULT_MARK):])["right"] == 2
     with pytest.raises(SystemExit):
         te.run_score(str(tmp_path), {}, out=lines.append)
 
@@ -168,3 +173,72 @@ def test_run_score_stops_on_broken_photo(tmp_path, monkeypatch):
     monkeypatch.setattr(room_camera, "make_detector", lambda model, area: Fake())
     with pytest.raises(SystemExit, match="001/before.jpg"):
         te.run_score(str(tmp_path), {"YOLO_MODEL": "m.onnx"}, out=lambda s: None)
+
+
+def result_of(accuracy, serious=0, median=0.5, by=None):
+    return {"cases": 40, "accuracy": accuracy, "serious": serious, "medianSeconds": median, "maxSeconds": median * 2,
+            "loadSeconds": 3.2, "memoryMB": 812.4,
+            "byAnswer": by or {"CLEAN": [10, 10], "NEEDS_CLEANING": [19, 20], "LEFT_ITEMS": [0, 0]}}
+
+
+def test_read_candidates(tmp_path):
+    (tmp_path / "candidates.txt").write_text(
+        "# 주석\nv8s 지금 | YOLO_MODEL=gateway/yolov8s.onnx\n\nv8s+책상 | YOLO_MODEL=a.onnx DESK_PHOTO=1\n이상한 줄\n",
+        encoding="utf-8")
+    found = te.read_candidates(str(tmp_path))
+    assert [(c.name, c.env) for c in found] == [("v8s 지금", {"YOLO_MODEL": "gateway/yolov8s.onnx"}),
+                                                ("v8s+책상", {"YOLO_MODEL": "a.onnx", "DESK_PHOTO": "1"})]
+    with pytest.raises(SystemExit):
+        te.read_candidates(str(tmp_path / "없음"))
+
+
+def test_license_and_verdict():
+    assert te.license_of({"YOLO_MODEL": "gateway/yolov8s.onnx"}) == "AGPL-3.0 (Ultralytics)"
+    assert te.license_of({"YOLO_MODEL": "rtdetr-l.onnx"}) == "Apache-2.0"
+    assert te.license_of({"YOLO_MODEL": "my.onnx"}) == "확인 필요"
+    assert te.verdict(result_of(0.97)) == "후보"
+    assert te.verdict(result_of(0.90, serious=2, median=1.4)) == "탈락 (정확도, 심각 오류, 시간)"
+    assert te.verdict({"error": "x"}) == "실패"
+
+
+def test_rank_picks_best_passing_candidate():
+    rows = [{"name": "빠름", "verdict": "후보", "result": result_of(0.96, median=0.3)},
+            {"name": "정확", "verdict": "후보", "result": result_of(0.98, median=0.8)},
+            {"name": "더 정확하지만 심각 오류", "verdict": "탈락 (심각 오류)", "result": result_of(0.99, serious=1)},
+            {"name": "고장", "verdict": "실패", "result": {"error": "모델 없음"}}]
+    ranked = te.rank(rows)
+    assert [r["name"] for r in ranked] == ["정확", "빠름", "더 정확하지만 심각 오류", "고장"]
+    assert ranked[0]["verdict"] == "채택" and ranked[1]["verdict"] == "후보"
+    assert te.rank([{"name": "x", "verdict": "탈락 (정확도)", "result": result_of(0.5)}])[0]["verdict"] != "채택"
+
+
+def test_compare_writes_table(tmp_path):
+    (tmp_path / "candidates.txt").write_text("A | YOLO_MODEL=yolov8n.onnx\nB | YOLO_MODEL=yolo11s.onnx\n"
+                                             "C | YOLO_MODEL=없는.onnx\n", encoding="utf-8")
+    results = {"A": result_of(0.92), "B": result_of(0.975), "C": {"error": "모델 파일이 없어요"}}
+    lines = []
+    rows = te.run_compare(str(tmp_path), {}, out=lines.append, run_candidate=lambda c: results[c.name])
+    assert [r["name"] for r in rows] == ["B", "A", "C"]
+    text = "\n".join(lines)
+    assert "| 채택 | B | **97.5%** (100% / 95% / -) | 0 | 0.50초 (1.00초) | 812MB | 3.2초 | AGPL-3.0" in text
+    assert "| 탈락 (정확도) | A |" in text and "| 실패 | C | 모델 파일이 없어요 |" in text
+    saved = list(tmp_path.glob("compare_*.md"))
+    assert len(saved) == 1 and "문제 40개" in saved[0].read_text(encoding="utf-8")
+
+
+def test_run_one_reads_result_line_from_child():
+    calls = []
+
+    class Done:
+        def __init__(self, stdout, stderr=""):
+            self.stdout, self.stderr = stdout, stderr
+
+    def run(cmd, env, **kw):
+        calls.append((cmd[-3:], env))
+        return Done("채점 중\n" + te.RESULT_MARK + json.dumps({"accuracy": 1.0}) + "\n")
+
+    cand = te.Candidate("A", {"YOLO_MODEL": "a.onnx"})
+    assert te.run_one("eval/tidy", cand, {"PATH": "/bin"}, run=run) == {"accuracy": 1.0}
+    assert calls[0][0] == ["score", "eval/tidy", "--json"] and calls[0][1] == {"PATH": "/bin", "YOLO_MODEL": "a.onnx"}
+    broken = te.run_one("eval/tidy", cand, {}, run=lambda cmd, env, **kw: Done("", "Traceback\nFileNotFoundError: a"))
+    assert broken == {"error": "FileNotFoundError: a"}

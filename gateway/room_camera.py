@@ -487,6 +487,12 @@ class RoomWatcher:
         self.pir_since = None
 
     def confirm_entry(self, snap, now, now_iso):
+        if self.recheck_base or self.recheck_pending:
+            # 앞 예약 퇴실 뒤 누가 들어왔다 (다음 팀·워크인·앞 팀이 가지러 옴). 그 뒤 물건은 누구 것인지 모르니
+            # 앞 예약 다시 확인은 하지 않는다 (잘못된 경고를 막음, 다음 팀 입실 때 서버가 빼는 것과 같은 규칙)
+            rid = (self.recheck_base or {}).get("reservationId") or self.recheck_pending[0]
+            print(f"정리 확인 {self.room_id}번 방: 예약 {rid} 퇴실 뒤 사람이 들어와 다시 확인은 하지 않음")
+            self.recheck_base = self.recheck_pending = None
         pending_at = self.pending[1] if self.pending else None
         if self.entry is not None and (pending_at is None or self.entry["at"] >= pending_at):
             return  # 같은 예약 사람이 잠깐 나갔다 온 것 (화장실). 처음 기준을 그대로 둔다
@@ -569,6 +575,11 @@ class RoomWatcher:
             self.recheck_pending = None
         if self.recheck_base and self.recheck_base["reservationId"] == reservation_id:
             self.recheck_base = None
+
+    def postpone_recheck(self, reservation_id):
+        """서버가 같은 예약의 다시 확인 시각을 바꿨다: 기다리던 요청만 빼고 기준은 둔다 (새 시각에 다시 부름)."""
+        if self.recheck_pending and self.recheck_pending[0] == reservation_id:
+            self.recheck_pending = None
 
     def checkout_check(self, dets, now, now_iso, detail, photo=None):
         if (self.pending is None and self.recheck_pending is None) or now - self.empty_since < SETTLE_SEC:

@@ -369,10 +369,11 @@ class CheckoutPoller:
     10차(두고 간 물건 2시간): 서버가 recheck {reservationId, at}를 내려 주면, at이 지난 뒤 처음 물을 때
     on_recheck(예약 번호)를 한 번 부른다. 퇴실 뒤 다음 팀이 입실해 서버가 recheck를 빼면 부르지 않고,
     이미 불렀어도 on_recheck_gone(예약 번호)으로 아직 못 한 다시 확인을 취소한다.
+    같은 예약의 at이 바뀌면(core 설정이 바뀜) on_recheck_moved(예약 번호)로 기다리던 요청만 빼고 새 시각에 다시 부른다.
     """
 
     def __init__(self, server, token, room, on_checkout, every=POLL_SEC, get=None, on_recheck=None, now=None,
-                 on_recheck_gone=None):
+                 on_recheck_gone=None, on_recheck_moved=None):
         self.url = f"{server}/api/rooms/{room}/current"
         self.headers = {"Authorization": f"Bearer {token}"}
         self.on_checkout = on_checkout
@@ -383,9 +384,10 @@ class CheckoutPoller:
         self.failing = False
         self.on_recheck = on_recheck
         self.now = now or time.time
-        self.rechecked = set()  # 이미 다시 확인을 부른 예약 번호 (서버가 계속 내려 줘도 한 번만)
+        self.rechecked = set()  # 이미 다시 확인을 부른 (예약 번호, 시각) (서버가 계속 내려 줘도 한 번만)
         self.on_recheck_gone = on_recheck_gone
-        self.waiting = None     # 서버가 마지막으로 내려 준 다시 확인 예약 번호
+        self.on_recheck_moved = on_recheck_moved
+        self.waiting = None     # 서버가 마지막으로 내려 준 다시 확인 (예약 번호, 시각)
 
     def poll_once(self):
         try:
@@ -419,15 +421,18 @@ class CheckoutPoller:
         if self.on_recheck is None:
             return
         rid = recheck[0] if recheck else None
-        if self.waiting is not None and self.waiting != rid and self.on_recheck_gone:
-            self.on_recheck_gone(self.waiting)  # 서버가 뺐다: 아직 방이 안 비어 못 한 다시 확인은 취소
-        self.waiting = rid
+        old = self.waiting
+        if old is not None and old[0] != rid and self.on_recheck_gone:
+            self.on_recheck_gone(old[0])  # 서버가 뺐다: 아직 방이 안 비어 못 한 다시 확인은 취소
+        elif old is not None and old != recheck and old in self.rechecked and self.on_recheck_moved:
+            self.on_recheck_moved(rid)  # 같은 예약인데 시각이 늦춰짐: 기다리던 요청만 빼고 새 시각에 다시
+        self.waiting = recheck
         if recheck is None:
             return
         at = recheck[1]
-        if rid in self.rechecked or self.now() < at + RECHECK_MARGIN_SEC:
+        if recheck in self.rechecked or self.now() < at + RECHECK_MARGIN_SEC:
             return
-        self.rechecked.add(rid)
+        self.rechecked.add(recheck)
         print(f"[퇴실 확인] 예약 {rid} 2시간 뒤 다시 확인 → 방이 비면 확인")
         self.on_recheck(rid)
 
@@ -765,7 +770,8 @@ def start_room_camera(config, sensors):
         CheckoutPoller(config.server, config.device_token, room,
                        lambda rid: watcher.request_check(rid, time.monotonic()),
                        on_recheck=lambda rid: watcher.request_check(rid, time.monotonic(), "RECHECK"),
-                       on_recheck_gone=watcher.cancel_recheck).start()
+                       on_recheck_gone=watcher.cancel_recheck,
+                       on_recheck_moved=watcher.postpone_recheck).start()
         print("정리 확인: 퇴실하면 확인 (서버 예약 상태를 10초마다 확인). "
               "기준은 사람이 처음 보이기 직전 3초 빈 방 (그 예약 동안 생긴 것만 봄)")
     else:

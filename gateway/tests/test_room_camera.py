@@ -590,6 +590,29 @@ def test_recheck_does_not_replace_waiting_first_check():
         (1, "FIRST", "LEFT_ITEMS"), (2, "FIRST", "CLEAN"), (None, None, "SKIPPED")]
 
 
+def test_someone_entering_after_checkout_cancels_recheck(capsys):
+    """다시 확인 전에 누가 들어오면(워크인 등) 그 뒤 물건은 누구 것인지 몰라 앞 예약은 다시 확인하지 않는다."""
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([], 5).run([person()], 5).checkout(1).run([thing("umbrella")], SETTLE_SEC + 6)
+    assert r.w.recheck_base is not None
+    r.run([thing("umbrella")], 5).run([person(), thing("umbrella")], 3)  # 누가 들어옴
+    assert r.w.recheck_base is None and "다시 확인은 하지 않음" in capsys.readouterr().out
+    r.run([thing("umbrella"), thing("laptop")], 5)  # 그 사람이 노트북 두고 나감
+    r.w.request_check(1, r.t, "RECHECK")
+    r.run([thing("umbrella"), thing("laptop")], SETTLE_SEC + 6)
+    assert [(c.get("phase"), c["status"]) for c in r.out] == [("FIRST", "LEFT_ITEMS"), (None, "SKIPPED")]
+
+
+def test_postpone_recheck_keeps_base():
+    w = RoomWatcher(1, on_checkout=True)
+    w.recheck_base = {"reservationId": 1, "objects": {}}
+    w.request_check(1, 0, "RECHECK")
+    w.postpone_recheck(2)
+    assert w.recheck_pending == (1, 0)
+    w.postpone_recheck(1)
+    assert w.recheck_pending is None and w.recheck_base is not None
+
+
 def test_cancel_recheck_drops_only_that_reservation():
     w = RoomWatcher(1, on_checkout=True)
     w.request_check(1, 0, "RECHECK")
@@ -1014,6 +1037,25 @@ def test_checkout_poller_cancels_recheck_when_server_removes_it():
     clock[0] = at + gateway.RECHECK_MARGIN_SEC + 1
     p.poll_once()
     assert fired == [] and gone == [5]
+
+
+def test_checkout_poller_follows_moved_recheck_time():
+    """같은 예약의 at이 늦춰지면 기다리던 요청만 빼고, 새 시각이 지나면 다시 부른다."""
+    first = {"reservationId": 5, "at": "2026-11-10T14:00:00+09:00"}
+    later = {"reservationId": 5, "at": "2026-11-10T15:00:00+09:00"}
+    at1, at2 = gateway.parse_recheck(first)[1], gateway.parse_recheck(later)[1]
+    clock = [at1 + gateway.RECHECK_MARGIN_SEC]
+    answers = [FakeResp(200, {"lastEnded": {"reservationId": 5}, "recheck": first})] + \
+        [FakeResp(200, {"lastEnded": {"reservationId": 5}, "recheck": later})] * 2
+    fired, moved, gone = [], [], []
+    p = gateway.CheckoutPoller("https://x", "t", 1, lambda rid: None, get=lambda url, **kw: answers.pop(0),
+                               on_recheck=fired.append, on_recheck_gone=gone.append,
+                               on_recheck_moved=moved.append, now=lambda: clock[0])
+    p.poll_once()  # 옛 시각으로 부름
+    p.poll_once()  # 시각이 늦춰짐 → 기다리던 요청만 뺌
+    clock[0] = at2 + gateway.RECHECK_MARGIN_SEC
+    p.poll_once()  # 새 시각 지남 → 다시 부름
+    assert fired == [5, 5] and moved == [5] and gone == []
 
 
 def test_checkout_poller_rechecks_once_after_time():

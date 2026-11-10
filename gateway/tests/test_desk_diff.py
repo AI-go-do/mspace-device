@@ -123,6 +123,12 @@ def test_unknown_things_become_cleaning_and_named_ones_left_items():
     assert room_camera.check_message(check) == "정리 확인 1번 방: 두고 간 물건 보조배터리 1 / 치울 것 모르는 물건 1"
 
 
+def test_moved_chair_is_not_trash():
+    w = RoomWatcher(1, desk=DeskCompare(AREA), labeler=lambda frame, box: "chair")
+    check = visit(w, [], desk(PAPER))
+    assert check["status"] == "CLEAN" and check["trash"] == {}  # 의자 자리 바뀜은 정리 대상이 아님
+
+
 def test_desk_skips_things_the_model_already_counted_and_moved_room_items():
     w = RoomWatcher(1, desk=DeskCompare(AREA), room_items={"remote": 1})
     phone = Detection("cell phone", 0.7, (900, 400, 40, 80))

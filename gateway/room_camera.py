@@ -335,7 +335,10 @@ class RoomWatcher:
         self.baseline_path = baseline_path  # 기준을 파일에 적어 두면 껐다 켜도 남는다. None이면 메모리에만
         # on_checkout: 서버가 "예약이 끝났다"고 알려 줄 때만 확인한다 (request_check). 아니면 30초 빈 방 (연습 모드)
         self.on_checkout = on_checkout
-        self.pending = None          # (예약 번호, 알게 된 시각, FIRST|RECHECK): 아직 확인 못 한 예약
+        self.pending = None          # (예약 번호, 알게 된 시각, "FIRST"): 퇴실했는데 아직 확인 못 한 예약
+        # 2시간 뒤 다시 확인 대기 (예약 번호, 알게 된 시각). pending과 따로 둔다: 지금 방에 있는 사람의
+        # 예약 기준(entry)은 이것 때문에 지우거나 바꾸지 않는다
+        self.recheck_pending = None
         # 첫 확인(FIRST)에서 물건이 남았던 예약의 기준 {"reservationId", "objects"}. 2시간 뒤 다시 확인(RECHECK) 때
         # 이것과 비교한다 (10차: 2시간 안에 안 가져가면 경고). 메모리에만: 젯슨이 꺼지면 다시 확인을 건너뛰고 경고도 없음
         self.room_items = dict(room_items or {})  # 방 비품: {"remote": 1} = 리모컨 0~1개는 괜찮음
@@ -544,6 +547,10 @@ class RoomWatcher:
             if self.entry is not None and self.entry["at"] < self.pending[1]:
                 self.clear_entry()  # 그 예약의 기준이었다. 다음 예약 탓으로 쓰지 않게 버린다
             self.pending = None
+        if self.on_checkout and self.recheck_pending and now - self.recheck_pending[1] >= PENDING_MAX_SEC:
+            print(f"정리 확인 {self.room_id}번 방: 예약 {self.recheck_pending[0]} 다시 확인 시각 뒤 10분 동안 "
+                  "방이 비지 않아 건너뜀")
+            self.cancel_recheck(self.recheck_pending[0])
         return event, check
 
     def request_check(self, reservation_id, now, phase="FIRST"):
@@ -551,19 +558,31 @@ class RoomWatcher:
 
         방이 비면(사람 0, PIR 없음) 확인한다.
         """
-        self.pending = (reservation_id, now, phase)
+        if phase == "RECHECK":
+            self.recheck_pending = (reservation_id, now)
+        else:
+            self.pending = (reservation_id, now, "FIRST")
+
+    def cancel_recheck(self, reservation_id):
+        """서버가 recheck를 뺐다(그 사이 다음 팀이 입실) 등: 그 예약은 다시 확인하지 않는다. 첫 확인(FIRST)은 그대로."""
+        if self.recheck_pending and self.recheck_pending[0] == reservation_id:
+            self.recheck_pending = None
+        if self.recheck_base and self.recheck_base["reservationId"] == reservation_id:
+            self.recheck_base = None
 
     def checkout_check(self, dets, now, now_iso, detail, photo=None):
-        if self.pending is None or now - self.empty_since < SETTLE_SEC:
+        if (self.pending is None and self.recheck_pending is None) or now - self.empty_since < SETTLE_SEC:
             return None
-        reservation_id, _, phase = self.pending
+        now_iso = now_iso or datetime.now(KST).isoformat(timespec="seconds")
+        if self.pending is None:  # 퇴실 확인이 먼저. 그게 없을 때만 2시간 뒤 다시 확인
+            reservation_id, _ = self.recheck_pending
+            self.recheck_pending = None
+            return self.recheck(reservation_id, dets, now_iso, detail) if self.check_objects else None
+        reservation_id = self.pending[0]
         self.pending = None
         self.had_people = False
         if not self.check_objects:
             return None
-        now_iso = now_iso or datetime.now(KST).isoformat(timespec="seconds")
-        if phase == "RECHECK":
-            return self.recheck(reservation_id, dets, now_iso, detail)
         if self.entry is None:
             # 입실 전에 방이 3초도 비지 않아 기준이 없다. 누구 것인지 모르니 결과를 보내지 않는다 (어질러짐 신고가 받음)
             return {"roomId": self.room_id, "status": "SKIPPED", "checkedAt": now_iso,

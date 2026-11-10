@@ -563,6 +563,43 @@ def test_recheck_without_base_is_skipped():
     assert r.out[1]["status"] == "SKIPPED" and "reservationId" not in r.out[1]
 
 
+def test_recheck_wait_keeps_current_entry(capsys):
+    """다시 확인을 기다리는 동안 누가 방에 계속 있어도, 그 사람의 예약 기준은 지우거나 바꾸지 않는다."""
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([], 5).run([person()], 5).checkout(1).run([thing("umbrella")], SETTLE_SEC + 6)
+    r.run([thing("umbrella")], 5).run([person(), thing("umbrella")], 3)  # 다음 사람 입실: 새 기준
+    entry = dict(r.w.entry)
+    r.w.request_check(1, r.t, "RECHECK")
+    r.run([person(), thing("umbrella")], PENDING_MAX_SEC + 5)  # 10분 넘게 안 빔
+    assert r.w.recheck_pending is None and r.w.entry == entry and "다시 확인 시각 뒤 10분" in capsys.readouterr().out
+    assert [c["phase"] for c in r.out] == ["FIRST"]
+
+
+def test_recheck_does_not_replace_waiting_first_check():
+    """퇴실 확인(FIRST)을 기다리는 중에 다시 확인이 와도 퇴실 확인을 덮지 않는다. 퇴실 확인이 먼저.
+
+    (예약 1 뒤에 다른 팀이 들어왔으면 서버는 다시 확인을 주지 않으니, 1의 다시 확인은 기준 없이 건너뛴다)
+    """
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([], 5).run([person()], 5).checkout(1).run([thing("umbrella")], SETTLE_SEC + 6)
+    r.run([thing("umbrella")], 5).run([person(), thing("umbrella")], 3)
+    r.checkout(2)
+    r.w.request_check(1, r.t, "RECHECK")
+    r.run([thing("umbrella")], SETTLE_SEC + 6).run([thing("umbrella")], SETTLE_SEC + 6)
+    assert [(c.get("reservationId"), c.get("phase"), c["status"]) for c in r.out] == [
+        (1, "FIRST", "LEFT_ITEMS"), (2, "FIRST", "CLEAN"), (None, None, "SKIPPED")]
+
+
+def test_cancel_recheck_drops_only_that_reservation():
+    w = RoomWatcher(1, on_checkout=True)
+    w.request_check(1, 0, "RECHECK")
+    w.cancel_recheck(2)
+    assert w.recheck_pending == (1, 0)
+    w.request_check(3, 0)
+    w.cancel_recheck(1)
+    assert w.recheck_pending is None and w.pending == (3, 0, "FIRST")
+
+
 def test_run_room_camera_sends_only_reservation_checks(monkeypatch):
     sent = []
 
@@ -962,6 +999,21 @@ def test_checkout_poller_survives_errors_and_warns_once(capsys):
     out = capsys.readouterr().out
     assert out.count("못 물어요") == 1 and "다시 됨" in out
     assert fired == [2]
+
+
+def test_checkout_poller_cancels_recheck_when_server_removes_it():
+    """다음 팀이 입실해 서버가 recheck를 빼면, 시각이 지나도 부르지 않고 기다리던 다시 확인은 취소한다."""
+    body = {"lastEnded": {"reservationId": 5}, "recheck": {"reservationId": 5, "at": "2026-11-10T14:00:00+09:00"}}
+    at = gateway.parse_recheck(body["recheck"])[1]
+    clock = [at - 30]
+    answers = [FakeResp(200, body), FakeResp(200, {"lastEnded": {"reservationId": 5}, "recheck": None})]
+    fired, gone = [], []
+    p = gateway.CheckoutPoller("https://x", "t", 1, lambda rid: None, get=lambda url, **kw: answers.pop(0),
+                               on_recheck=fired.append, on_recheck_gone=gone.append, now=lambda: clock[0])
+    p.poll_once()
+    clock[0] = at + gateway.RECHECK_MARGIN_SEC + 1
+    p.poll_once()
+    assert fired == [] and gone == [5]
 
 
 def test_checkout_poller_rechecks_once_after_time():

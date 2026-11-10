@@ -248,7 +248,7 @@ MQTT_HOST=localhost MQTT_ROOMS=가상-1:1,가상-2:2,가상-3:3 SEND_SENSORS=1 Q
   YOLO_MODEL=gateway/yolov8s.onnx ~/mspace-venv/bin/python gateway/gateway.py
 ```
 
-- 방마다 센서 2대, 사람 수가 몇 분마다 바뀌고 그에 따라 CO2·온도·습도가 천천히 움직여요
+- 방마다 센서 1대, 사람 수가 몇 분마다 바뀌고 그에 따라 CO2·온도·습도가 천천히 움직여요
 - CO2는 `FAKE_CO2_MAX`(기본 950)를 넘지 않아요. 1000ppm 3분 연속이면 서버가 실제 예약자에게 환기 알림을 보내서요
 - `MQTT_ROOMS`는 `공간 이름:방 번호`를 쉼표로 이어요. 진짜 센서로 돌아갈 때는 `MQTT_HOST`·`MQTT_ROOMS`를 빼고 평소처럼 켜요
 - 방마다 core에 `sensor-<방 번호>`로 보내요. `막힘(403 …)`이 뜨면 그 장치 이름이 서버에 등록돼 있는지 확인해요

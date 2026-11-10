@@ -12,7 +12,7 @@ def test_uplinks_look_like_real_sensors():
     """가짜 업링크를 진짜 센서 읽는 코드가 그대로 읽는다."""
     s = fake.RoomState(2, people=2, co2=700)
     out = fake.uplinks(s, 1_700_000_000.0, random.Random(1))
-    assert len(out) == 2
+    assert len(out) == 1  # 방 하나에 센서 하나
     topic, payload = out[0]
     assert topic.startswith("application/fake/device/") and topic.endswith("/event/up")
     r = room_env.parse_uplink(payload, 1_700_000_000.0)
@@ -57,7 +57,7 @@ def test_run_publishes_every_room():
             sent.append((topic, qos))
 
     fake.run(Client(), [1, 3], random.Random(0), clock=lambda: 1_700_000_000.0, sleep=lambda s: None, rounds=2)
-    assert len(sent) == 2 * 2 * 2 and all(q == 1 for _, q in sent)
+    assert len(sent) == 2 * 2 and all(q == 1 for _, q in sent)  # 방 2개 × 2번
     assert fake.parse_rooms("1, 2,x,3") == [1, 2, 3]
 
 

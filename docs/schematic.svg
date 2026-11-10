@@ -29,18 +29,11 @@
       <path class="s" d="M174 96 H150" stroke="#1f9a4c"/>
       <text class="net" x="146" y="100" text-anchor="end" style="fill:#2b3a8a">GND</text>
       <text class="st" x="186" y="120" text-anchor="middle" style="fill:#1f9a4c">초록</text>
+      <text class="st" x="186" y="138" text-anchor="middle" style="fill:#5b6b66">QR 결과 LED</text>
     </g>
 
-    <!-- 키패드 D11..D4 -->
-    <rect x="40" y="116" width="110" height="288" rx="6" fill="none" stroke="#c77d0a" stroke-width="2"/>
-    <text class="sb" x="95" y="270" text-anchor="middle">4x4</text>
-    <text class="sb" x="95" y="288" text-anchor="middle">키패드</text>
-    <g stroke="#c77d0a" class="s">
-      <path d="M150 132 H300"/><path d="M150 168 H300"/><path d="M150 204 H300"/><path d="M150 240 H300"/><path d="M150 276 H300"/><path d="M150 312 H300"/><path d="M150 348 H300"/><path d="M150 384 H300"/>
-    </g>
-    <g class="sm" text-anchor="end" style="font-size:11px">
-      <text x="146" y="136">R1·1</text><text x="146" y="172">R2·2</text><text x="146" y="208">R3·3</text><text x="146" y="244">R4·4</text><text x="146" y="280">C1·5</text><text x="146" y="316">C2·6</text><text x="146" y="352">C3·7</text><text x="146" y="388">C4·8</text>
-    </g>
+    <!-- D11~D4 비움: 키패드는 11/10에 뺌 (입실은 문 앞 카메라 QR) -->
+    <text class="st" x="290" y="260" text-anchor="end" style="fill:#5b6b66">D11~D4 비움 (키패드 뺌)</text>
 
     <!-- D3 비움: 레이더는 ESP32에 단다 (docs/wiring-esp32.png) -->
 

@@ -5,7 +5,7 @@
 진짜 센서가 살아나면 MQTT_HOST만 원래 주소로 되돌리면 된다.
 
 - 젯슨 안 브로커(localhost)에만 올린다. 다른 팀도 쓰는 교육장 브로커에는 절대 올리지 않는다
-- 방마다 센서 2대. 사람 수가 몇 분마다 바뀌고, 사람이 있으면 CO2가 천천히 오르고 없으면 바깥 공기(약 420ppm)로 내려간다
+- 방마다 센서 1대. 사람 수가 몇 분마다 바뀌고, 사람이 있으면 CO2가 천천히 오르고 없으면 바깥 공기(약 420ppm)로 내려간다
 - CO2는 FAKE_CO2_MAX(기본 950)를 넘지 않는다. 1000ppm 3분 연속이면 core가 실제 예약자에게 환기 알림을 보내기 때문
 
 실행 (젯슨, 게이트웨이와 다른 터미널):
@@ -23,8 +23,8 @@ from datetime import datetime, timezone
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 OUTDOOR_CO2 = 420.0
 PERIOD_SEC = 60
-DEVICES_PER_ROOM = 2
-POINTS = ("앞쪽", "뒤쪽")
+DEVICES_PER_ROOM = 1  # M-SPACE 방 하나에 센서 하나
+POINTS = ("방",)
 
 
 def location_name(room):
@@ -62,7 +62,7 @@ def step(state, rng, co2_max=950.0):
 
 
 def uplinks(state, now, rng, co2_max=950.0):
-    """방 하나의 센서 2대 업링크 [(토픽, JSON 바이트)]. 센서마다 값이 조금씩 다르다 (CO2는 상한을 넘지 않게)."""
+    """방 하나의 센서 업링크 [(토픽, JSON 바이트)]. 측정 흔들림을 조금 더한다 (CO2는 상한을 넘지 않게)."""
     out = []
     for i in range(DEVICES_PER_ROOM):
         dev = dev_eui(state.room, i)

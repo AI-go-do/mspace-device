@@ -307,7 +307,7 @@ def test_gateway_gives_entry_desk_only_in_checkout_mode_with_desk_photo(monkeypa
             return []
 
     got = []
-    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None: Det())
+    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None: Det())
     monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
     monkeypatch.setattr(gateway.SensorSender, "start", lambda self: self)
     monkeypatch.setattr(gateway.CheckoutPoller, "start", lambda self: self)

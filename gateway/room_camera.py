@@ -88,6 +88,8 @@ SETTLE_SEC = 10        # (퇴실 모드) 퇴실 뒤 방이 10초 비어 있으�
 PENDING_MAX_SEC = 600  # (퇴실 모드) 퇴실 뒤 10분 안에 방이 비지 않으면 그 예약 확인은 포기 (다음 사람 물건을 탓하지 않게)
 ENTRY_EMPTY_SEC = 3    # (퇴실 모드) 한 장씩 셌을 때 0명이 연속 3초면 "빈 방"으로 보고 다음 예약 기준 후보로 든다 (Q-22)
 SNAPSHOT_SEC = 60      # (퇴실 모드) 빈 방이 계속되면 후보를 1분마다 새로 찍는다 (햇빛·조명 변화 따라감)
+DESK_DIFF_CONF = 0.5   # 책상 사진 비교로 찾은 물건의 확신도. 모델 점수가 없어서 core 경고 기준(기본 0.8)보다 낮게 둔다
+                       # → 알림은 가도 이것만으로 경고는 안 간다 (잘못 본 그림자·빛으로 경고하지 않게)
 ENTRY_PIR_GRACE_SEC = 10  # PIR이 먼저 켜진 뒤 이 안에 카메라가 사람을 보면 보통 입실. 더 길면 카메라에 안 보인 사람이
                           # 그동안 뭘 두었을 수 있어 후보를 쓰지 않는다
 
@@ -333,7 +335,12 @@ class RoomWatcher:
         self.baseline_path = baseline_path  # 기준을 파일에 적어 두면 껐다 켜도 남는다. None이면 메모리에만
         # on_checkout: 서버가 "예약이 끝났다"고 알려 줄 때만 확인한다 (request_check). 아니면 30초 빈 방 (연습 모드)
         self.on_checkout = on_checkout
-        self.pending = None          # (예약 번호, 알게 된 시각): 퇴실했는데 아직 확인 못 한 예약
+        self.pending = None          # (예약 번호, 알게 된 시각, "FIRST"): 퇴실했는데 아직 확인 못 한 예약
+        # 3시간 뒤 다시 확인 대기 (예약 번호, 알게 된 시각). pending과 따로 둔다: 지금 방에 있는 사람의
+        # 예약 기준(entry)은 이것 때문에 지우거나 바꾸지 않는다
+        self.recheck_pending = None
+        # 첫 확인(FIRST)에서 물건이 남았던 예약의 기준 {"reservationId", "objects"}. 3시간 뒤 다시 확인(RECHECK) 때
+        # 이것과 비교한다 (10차·core #113: 3시간 안에 안 가져가면 경고). 메모리에만: 젯슨이 꺼지면 다시 확인을 건너뛰고 경고도 없음
         self.room_items = dict(room_items or {})  # 방 비품: {"remote": 1} = 리모컨 0~1개는 괜찮음
         self.check_objects = check_objects
         self.counts = deque(maxlen=SMOOTH_FRAMES)
@@ -350,6 +357,7 @@ class RoomWatcher:
         self.snapshot = None         # 빈 방 후보 {"objects", "img", "known", "at"}. 메모리에만
         self.entry = None            # 확정된 예약 기준 {"objects", "at"}
         self.pir_since = None        # 후보를 찍은 뒤 카메라엔 0명인데 PIR이 처음 켜진 시각
+        self.recheck_base = None
         self.load_baseline()
         self.load_entry()
 
@@ -453,6 +461,7 @@ class RoomWatcher:
             pir_since, self.pir_since = self.pir_since, None
             if self.snapshot is not None:
                 snap, self.snapshot = self.snapshot, None
+                self.drop_recheck_on_entry()  # 빈 방 뒤 사람이 들어옴: 후보를 쓰든 버리든 앞 예약 다시 확인은 안 함
                 if pir_since is not None and now - pir_since > ENTRY_PIR_GRACE_SEC:
                     # 카메라엔 안 보였지만 PIR이 오래 켜져 있었다. 그 사이 뭘 두었을 수 있어 이 후보는 버린다
                     print(f"예약 기준 {self.room_id}번 방: 사람이 보이기 전 PIR이 오래 켜져 있어 후보를 쓰지 않음")
@@ -477,6 +486,14 @@ class RoomWatcher:
             known = [d.box for d in self.objects(seen)]
         self.snapshot = {"objects": self.count(seen), "img": img, "known": known, "at": now}
         self.pir_since = None
+
+    def drop_recheck_on_entry(self):
+        """앞 예약 퇴실 뒤 누가 들어왔다 (다음 팀·워크인·앞 팀이 가지러 옴). 그 뒤 물건은 누구 것인지 모르니
+        앞 예약 다시 확인은 하지 않는다 (잘못된 경고를 막음, 다음 팀 입실 때 서버가 빼는 것과 같은 규칙)."""
+        if self.recheck_base or self.recheck_pending:
+            rid = (self.recheck_base or {}).get("reservationId") or self.recheck_pending[0]
+            print(f"정리 확인 {self.room_id}번 방: 예약 {rid} 퇴실 뒤 사람이 들어와 다시 확인은 하지 않음")
+            self.recheck_base = self.recheck_pending = None
 
     def confirm_entry(self, snap, now, now_iso):
         pending_at = self.pending[1] if self.pending else None
@@ -539,21 +556,47 @@ class RoomWatcher:
             if self.entry is not None and self.entry["at"] < self.pending[1]:
                 self.clear_entry()  # 그 예약의 기준이었다. 다음 예약 탓으로 쓰지 않게 버린다
             self.pending = None
+        if self.on_checkout and self.recheck_pending and now - self.recheck_pending[1] >= PENDING_MAX_SEC:
+            print(f"정리 확인 {self.room_id}번 방: 예약 {self.recheck_pending[0]} 다시 확인 시각 뒤 10분 동안 "
+                  "방이 비지 않아 건너뜀")
+            self.cancel_recheck(self.recheck_pending[0])
         return event, check
 
-    def request_check(self, reservation_id, now):
-        """서버에서 예약이 끝났다는 걸 알았을 때 부른다. 방이 비면(사람 0, PIR 없음) 확인한다."""
-        self.pending = (reservation_id, now)
+    def request_check(self, reservation_id, now, phase="FIRST"):
+        """서버에서 예약이 끝났다(FIRST)거나 다시 확인할 때가 됐다(RECHECK)고 알았을 때 부른다.
+
+        방이 비면(사람 0, PIR 없음) 확인한다.
+        """
+        if phase == "RECHECK":
+            self.recheck_pending = (reservation_id, now)
+        else:
+            self.pending = (reservation_id, now, "FIRST")
+
+    def cancel_recheck(self, reservation_id):
+        """서버가 recheck를 뺐다(그 사이 다음 팀이 입실) 등: 그 예약은 다시 확인하지 않는다. 첫 확인(FIRST)은 그대로."""
+        if self.recheck_pending and self.recheck_pending[0] == reservation_id:
+            self.recheck_pending = None
+        if self.recheck_base and self.recheck_base["reservationId"] == reservation_id:
+            self.recheck_base = None
+
+    def postpone_recheck(self, reservation_id):
+        """서버가 같은 예약의 다시 확인 시각을 바꿨다: 기다리던 요청만 빼고 기준은 둔다 (새 시각에 다시 부름)."""
+        if self.recheck_pending and self.recheck_pending[0] == reservation_id:
+            self.recheck_pending = None
 
     def checkout_check(self, dets, now, now_iso, detail, photo=None):
-        if self.pending is None or now - self.empty_since < SETTLE_SEC:
+        if (self.pending is None and self.recheck_pending is None) or now - self.empty_since < SETTLE_SEC:
             return None
-        reservation_id, _ = self.pending
+        now_iso = now_iso or datetime.now(KST).isoformat(timespec="seconds")
+        if self.pending is None:  # 퇴실 확인이 먼저. 그게 없을 때만 3시간 뒤 다시 확인
+            reservation_id, _ = self.recheck_pending
+            self.recheck_pending = None
+            return self.recheck(reservation_id, dets, now_iso, detail) if self.check_objects else None
+        reservation_id = self.pending[0]
         self.pending = None
         self.had_people = False
         if not self.check_objects:
             return None
-        now_iso = now_iso or datetime.now(KST).isoformat(timespec="seconds")
         if self.entry is None:
             # 입실 전에 방이 3초도 비지 않아 기준이 없다. 누구 것인지 모르니 결과를 보내지 않는다 (어질러짐 신고가 받음)
             return {"roomId": self.room_id, "status": "SKIPPED", "checkedAt": now_iso,
@@ -562,7 +605,27 @@ class RoomWatcher:
         desk = self.entry_desk if self.entry_desk is not None and self.entry_desk.ready else None
         check = self.check(seen, now_iso, photo=photo if desk else None, base=self.entry["objects"], desk=desk)
         check["reservationId"] = reservation_id
+        check["phase"] = "FIRST"
+        # 물건이 남았으면 3시간 뒤 다시 확인할 때 쓰게 기준 개수만 남긴다 (책상 사진은 지움)
+        self.recheck_base = ({"reservationId": reservation_id, "objects": dict(self.entry["objects"])}
+                             if check["status"] != "CLEAN" else None)
         self.clear_entry()  # 보냈으면 지운다 (다음 예약은 다음 빈 방에서 새로)
+        return check
+
+    def recheck(self, reservation_id, dets, now_iso, detail):
+        """3시간 뒤 다시 확인 (RECHECK). 첫 확인 때와 같은 기준(입실 직전 빈 방)과 개수로만 비교한다.
+
+        책상 사진 비교는 하지 않는다 (사진은 첫 확인 뒤 지움). 그래서 사진 비교로만 찾았던 물건은 여기서
+        안 잡혀 경고가 안 간다 (잘못 경고하지 않는 쪽).
+        """
+        base, self.recheck_base = self.recheck_base, None
+        if base is None or base["reservationId"] != reservation_id:
+            return {"roomId": self.room_id, "status": "SKIPPED", "checkedAt": now_iso,
+                    "reason": f"예약 {reservation_id}: 다시 확인할 기준이 없어 결과를 보내지 않음 (첫 확인이 깨끗했거나 젯슨이 꺼졌다 켜짐)"}
+        seen = detail() if detail else dets
+        check = self.check(seen, now_iso, base=base["objects"])
+        check["reservationId"] = reservation_id
+        check["phase"] = "RECHECK"
         return check
 
     def event(self, people, pir, now_iso):
@@ -597,6 +660,13 @@ class RoomWatcher:
 
     def objects(self, dets):
         return [d for d in dets if d.label in TRASH or d.label in BELONGINGS]
+
+    def scores(self, dets):
+        """정리 확인에 쓰는 물건의 확신도를 종류별로, 낮은 것부터. {"cup": [0.41, 0.77]}"""
+        out = {}
+        for d in self.objects(dets):
+            out.setdefault(d.label, []).append(round(float(d.score), 2))
+        return {k: sorted(v) for k, v in out.items()}
 
     def count(self, dets):
         """정리 확인에 쓰는 물건만 종류별로 센다. {"cup": 2, "remote": 1}"""
@@ -642,14 +712,18 @@ class RoomWatcher:
             extra = found or {}
             if not compared:
                 print(f"정리 확인 {self.room_id}번 방: 책상 사진 비교를 건너뜀 (조명·카메라가 크게 바뀜)")
-        trash, left = {}, {}
+        trash, left, confidence = {}, {}, {}
+        scores = self.scores(dets)
         for label, n in now_items.items():
             more = n - max(base.get(label, 0), self.room_items.get(label, 0))  # 방 비품은 그 개수까지 괜찮음
             if more > 0:
                 (trash if label in TRASH else left)[label] = more
+                # 어느 것이 새로 생긴 건지 모르니 점수가 낮은 쪽부터 쓴다 (확신도를 부풀려 잘못 경고하지 않게)
+                confidence[label] = scores[label][:more]
         for label, n in extra.items():  # 책상 사진 비교로 찾은 것: 자리가 새로 생긴 것이라 기준 개수와 빼지 않는다
             group = left if label in BELONGINGS else trash  # 이름 모름(unknown)·쓰레기는 치울 것
             group[label] = group.get(label, 0) + n
+            confidence[label] = confidence.get(label, []) + [DESK_DIFF_CONF] * n
         status = "LEFT_ITEMS" if left else "NEEDS_CLEANING" if trash else "CLEAN"
         if own and status == "CLEAN" and compared:  # 비교를 건너뛰었으면 물건이 있을 수 있어 사진을 바꾸지 않는다
             self.desk.set_base(photo(), self.objects(dets))  # 깨끗하면 책상 사진도 새로 (햇빛·조명이 천천히 바뀌는 것 따라감)
@@ -663,32 +737,38 @@ class RoomWatcher:
             "status": status,
             "trash": trash,
             "leftItems": left,
+            "confidence": confidence,  # {이름: [물건마다 확신도 0~1]}. 서버 items에 같이 실린다
             "checkedAt": now_iso or datetime.now(KST).isoformat(timespec="seconds"),
         }
 
 
 
-# 서버(core #81, docs api 6-3)가 받는 "두고 간 귀중품". 여기 없는 물건(책 등)은 items에만 넣는다
-SERVER_LEFT_ITEMS = {"backpack": "BAG", "handbag": "BAG", "suitcase": "BAG", "cell phone": "PHONE", "laptop": "LAPTOP"}
 MAX_SERVER_ITEMS = 20
 
 
 def tidy_body(check, device_id, event_id=None):
-    """정리 확인 결과를 서버 POST /api/rooms/{roomId}/tidy-checks 형식으로 바꾼다.
+    """정리 확인 결과를 서버 POST /api/rooms/{roomId}/tidy-checks 형식으로 바꾼다 (10차, 11/10 지영과 맞춤).
 
-    장치 결과 3가지 → 서버 2가지: 치울 것이 있으면 NEEDS_CLEANING(자동 신고), 아니면 CLEAN.
-    두고 간 물건은 따로 leftItems (가방·휴대폰·노트북만 서버가 받는다).
+    10차: 쓰레기든 물건이든 종류 구분 없이 "두고 감". 장치 결과(치울 것·두고 간 물건) → 서버 2가지:
+    남은 것이 하나라도 있으면 LEFT_ITEMS, 없으면 CLEAN.
+    items = 물건마다 {"name": 모델 이름(영어), "confidence": 0~1}. 한글 바꾸기·경고 기준(확신도)은 core가 한다.
+    phase = FIRST(퇴실 직후, 알림만) | RECHECK(3시간 뒤, 그래도 남았으면 core가 경고).
     """
     found = {**check["leftItems"], **check["trash"]}
-    items = [label for label, n in sorted(found.items()) for _ in range(n)][:MAX_SERVER_ITEMS]
-    left = sorted({SERVER_LEFT_ITEMS[k] for k in check["leftItems"] if k in SERVER_LEFT_ITEMS})
+    conf = check.get("confidence", {})
+    items = []
+    for label, n in sorted(found.items()):
+        scores = list(conf.get(label, []))
+        scores += [DESK_DIFF_CONF] * (n - len(scores))  # 점수가 없으면 경고 기준보다 낮은 값
+        items += [{"name": label, "confidence": c} for c in scores[:n]]
+    items.sort(key=lambda i: -i["confidence"])  # 20개가 넘으면 확신이 큰 것부터 남긴다
     return {
         "eventId": event_id or str(uuid.uuid4()),
         "reservationId": check["reservationId"],
         "deviceId": device_id,
-        "result": "NEEDS_CLEANING" if check["trash"] else "CLEAN",
-        "items": items,
-        "leftItems": left,
+        "phase": check.get("phase", "FIRST"),
+        "result": "LEFT_ITEMS" if found else "CLEAN",
+        "items": items[:MAX_SERVER_ITEMS],
         "observedAt": check["checkedAt"],
     }
 
@@ -701,14 +781,15 @@ def check_message(check):
         return f"깨끗한 방 기준 저장 {check['roomId']}번 방: 물건 {n}개{listed}{why}"
     if check["status"] == "SKIPPED":
         return f"정리 확인 {check['roomId']}번 방: 건너뜀 - {check['reason']}"
+    again = " (3시간 뒤 다시 확인)" if check.get("phase") == "RECHECK" else ""
     if check["status"] == "CLEAN":
-        return f"정리 확인 {check['roomId']}번 방: 깨끗함"
+        return f"정리 확인 {check['roomId']}번 방{again}: 깨끗함"
     parts = []
     if check["leftItems"]:
         parts.append("두고 간 물건 " + describe(check["leftItems"]))
     if check["trash"]:
         parts.append("치울 것 " + describe(check["trash"]))
-    return f"정리 확인 {check['roomId']}번 방: " + " / ".join(parts)
+    return f"정리 확인 {check['roomId']}번 방{again}: " + " / ".join(parts)
 
 
 # ---------- 카메라 루프 ----------

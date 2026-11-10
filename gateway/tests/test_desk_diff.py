@@ -42,6 +42,33 @@ def test_light_change_is_not_a_thing():
     assert match_light(base, base).mean() == pytest.approx(base.mean(), abs=1)
 
 
+def side_light(img, strength=-0.4):
+    """책상 한쪽에 부드러운 그늘 (블라인드·문을 여닫아 한쪽만 어두워짐)."""
+    yy, xx = np.mgrid[0:img.shape[0], 0:img.shape[1]].astype(np.float32)
+    glow = 1 + strength * np.exp(-((xx - 700) ** 2 + (yy - 450) ** 2) / (2 * 120.0 ** 2))
+    return np.clip(img.astype(np.float32) * glow[..., None], 0, 255).astype(np.uint8)
+
+
+def test_local_light_ignores_one_sided_light_but_still_finds_things():
+    base, _ = prepare(desk(), AREA)
+    lit, _ = prepare(side_light(desk()), AREA)
+    assert find_changes(base, lit)  # 전체 밝기만 맞추면 한쪽 그늘을 물건으로 잘못 봄
+    assert find_changes(base, lit, light="local") == []
+    found = find_changes(base, prepare(side_light(desk(PHONE)), AREA)[0], light="local")
+    assert len(found) == 1
+
+
+def test_desk_settings_come_from_env(capsys):
+    import desk_diff
+    import gateway
+    config = gateway.load_config({"DESK_THRESH": "50", "DESK_MIN_AREA": "0.004", "DESK_LIGHT": "local", "PORT": "x"})
+    d = DeskCompare(AREA, **desk_diff.settings(config))
+    assert d.tune == {"thresh": 50, "min_area": 0.004, "light": "local"}
+    config = gateway.load_config({"DESK_THRESH": "999", "DESK_MIN_AREA": "abc", "PORT": "x"})
+    assert (config.desk_thresh, config.desk_min_area, config.desk_light) == (35, 0.0012, "mean")
+    assert "DESK_THRESH가 이상해서" in capsys.readouterr().out
+
+
 def test_whole_desk_changed_means_camera_moved():
     base, _ = prepare(desk(), AREA)
     moved = np.roll(desk(), 300, axis=1)

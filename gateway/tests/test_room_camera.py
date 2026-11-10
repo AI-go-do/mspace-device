@@ -969,13 +969,15 @@ def test_checkout_poller_rechecks_once_after_time():
     body = {"lastEnded": {"reservationId": 5}, "recheck": {"reservationId": 5, "at": "2026-11-10T14:00:00+09:00"}}
     at = gateway.parse_recheck(body["recheck"])[1]
     clock = [at - 30]
-    answers = [FakeResp(200, body), FakeResp(200, body), FakeResp(200, body), FakeResp(200, {"lastEnded": None})]
+    answers = [FakeResp(200, body)] * 4 + [FakeResp(200, {"lastEnded": None})]
     fired = []
     p = gateway.CheckoutPoller("https://x", "t", 1, lambda rid: None, get=lambda url, **kw: answers.pop(0),
                                on_recheck=fired.append, now=lambda: clock[0])
     p.poll_once()           # 아직 시각 전
-    clock[0] = at + 1
-    p.poll_once()           # 지남 → 부름
+    clock[0] = at + gateway.RECHECK_MARGIN_SEC - 1
+    p.poll_once()           # 시각은 지났지만 여유(시계 차이) 안 → 아직
+    clock[0] = at + gateway.RECHECK_MARGIN_SEC
+    p.poll_once()           # 여유까지 지남 → 부름
     p.poll_once()           # 같은 예약은 한 번만
     p.poll_once()
     assert fired == [5]

@@ -356,6 +356,7 @@ class SensorSender:
 # ---------- 퇴실 알기 (정리 확인을 예약이 끝났을 때만 하려고) ----------
 
 POLL_SEC = 10  # 10초마다 서버에 "지금 이 방 예약 상태"를 묻는다 (core #81 GET /api/rooms/{id}/current)
+RECHECK_MARGIN_SEC = 60  # 다시 확인은 at보다 1분 늦게. 젯슨 시계가 core보다 조금 빨라도 TOO_EARLY(409)로 버려지지 않게
 TIDY_DROP = SENSOR_DROP | {404}  # 404 = 다른 방 예약이거나 서버에 아직 API가 없음 → 다시 보내도 같다
 
 
@@ -414,7 +415,7 @@ class CheckoutPoller:
         if self.on_recheck is None or recheck is None:
             return
         rid, at = recheck
-        if rid in self.rechecked or self.now() < at:
+        if rid in self.rechecked or self.now() < at + RECHECK_MARGIN_SEC:
             return
         self.rechecked.add(rid)
         print(f"[퇴실 확인] 예약 {rid} 2시간 뒤 다시 확인 → 방이 비면 확인")

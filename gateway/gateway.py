@@ -84,6 +84,7 @@ class Config:
     yolo_model: str | None = None          # YOLO ONNX 모델 파일. 없으면 사람만 세는 기본 방식(HOG)
     room_items: dict = field(default_factory=dict)  # 방 비품 {"remote": 1}: 그 개수까지는 있어도 없어도 괜찮음
     desk_area: tuple | None = None         # 책상 부분 (x1, y1, x2, y2) 화면 비율. 정리 확인 때 책상만 확대해서 한 번 더 본다
+    floor_area: tuple | None = None        # 바닥 부분 (x1, y1, x2, y2) 화면 비율. 정리 확인 때 바닥도 확대해서 한 번 더 본다
     desk_photo: bool = False               # True면 깨끗한 책상 사진(사람 0명일 때)을 젯슨에만 두고 퇴실 뒤 책상과 비교
     desk_thresh: int = 35                  # 책상 비교: 밝기 차이가 이보다 크면 "달라짐" (DESK_THRESH, 1~255)
     desk_min_area: float = 0.0012          # 책상 비교: 책상 넓이의 이 비율보다 작은 차이는 무시 (DESK_MIN_AREA)
@@ -134,6 +135,7 @@ def load_config(env=None):
         preview_host=env.get("PREVIEW_HOST") or Config.preview_host,
         room_items=parse_room_items(env.get("ROOM_ITEMS", "")),
         desk_area=parse_desk_area(env.get("DESK_AREA", "")),
+        floor_area=parse_desk_area(env.get("FLOOR_AREA", ""), "FLOOR_AREA"),
         desk_photo=env.get("DESK_PHOTO") == "1",
         desk_thresh=parse_number(env, "DESK_THRESH", Config.desk_thresh, 1, 255, int),
         desk_min_area=parse_number(env, "DESK_MIN_AREA", Config.desk_min_area, 0.0, 0.3, float),
@@ -217,7 +219,7 @@ def parse_number(env, key, default, low, high, kind):
     return default
 
 
-def parse_desk_area(text):
+def parse_desk_area(text, key="DESK_AREA"):
     """DESK_AREA="0.25,0.22,0.64,0.83" → (0.25, 0.22, 0.64, 0.83). 화면 왼쪽 위 x·y, 오른쪽 아래 x·y 비율(0~1).
 
     비우면 None(책상 확대 안 함). 틀리면 알려 주고 None.
@@ -230,7 +232,7 @@ def parse_desk_area(text):
         x1 = y1 = x2 = y2 = -1.0
     if 0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1:
         return (x1, y1, x2, y2)
-    print(f"DESK_AREA가 이상해서 책상 확대는 꺼요: {text!r} (예: 0.25,0.22,0.64,0.83 = 왼쪽 위 x,y, 오른쪽 아래 x,y 비율)")
+    print(f"{key}가 이상해서 그 부분 확대는 꺼요: {text!r} (예: 0.25,0.22,0.64,0.83 = 왼쪽 위 x,y, 오른쪽 아래 x,y 비율)")
     return None
 
 
@@ -774,7 +776,7 @@ def start_room_camera(config, sensors):
     import room_camera  # 켤 때만 불러온다 (OpenCV는 젯슨에만 있으면 됨)
     room = config.room_camera_room
     CAMERA_ROOMS[room] = time.monotonic()  # 켤 때 한 번 잡고, 이후 사진을 읽을 때마다 새로 적는다
-    detector = room_camera.make_detector(config.yolo_model, config.desk_area)
+    detector = room_camera.make_detector(config.yolo_model, config.desk_area, config.floor_area)
     on_checkout = sensors is not None  # 서버로 보내는 중이면 "퇴실하면 확인", 아니면(연습) "30초 빈 방"
     desk, labeler = desk_compare(config, detector)
     entry_desk = None

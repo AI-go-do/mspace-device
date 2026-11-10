@@ -386,7 +386,7 @@ def run_compare(folder, env, out=print, run_candidate=None):
     path = os.path.join(folder, f"compare_{datetime.now(KST):%m%d_%H%M}.md")
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
-    out(f"저장: {path} (README 9절 \"채점 기록\" 맨 위에 붙여요. 최신이 위)")
+    out(f"저장: {path} (README 9절 \"비교표 원본\" 맨 위에 붙여요. 최신이 위)")
     return rows
 
 

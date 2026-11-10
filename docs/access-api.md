@@ -1,7 +1,7 @@
 # 출입(QR) ↔ core 통신 형식 (FR-ACC-001)
 
 > 상태: **초안** · 작성 수연 · 확인 지영(core), 재웅(장치 토큰·요구사항 명세)
-> core 쪽 공식 명세는 docs 저장소 [`api/README.md` 6장](https://github.com/AI-go-do/docs/blob/main/api/README.md#6-출입-키패드)이에요 (core `develop`에 구현됨). 이 문서는 **장치 쪽**(젯슨 게이트웨이·우노)이 그 API를 어떻게 쓰는지 정리해요.
+> core 쪽 공식 명세는 docs 저장소 [`api/README.md` 6장](https://github.com/AI-go-do/docs/blob/main/api/README.md#6-출입-qr)이에요 (core `develop`에 구현됨). 이 문서는 **장치 쪽**(젯슨 게이트웨이·우노)이 그 API를 어떻게 쓰는지 정리해요.
 > 11/10: 키패드는 빼고 **문 앞 카메라 QR 입실 하나**만 써요. core API는 그대로예요.
 > ✅ = 코드에 이미 있음 / 🟡 = 제안, 확인 필요
 

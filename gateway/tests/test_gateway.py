@@ -164,7 +164,7 @@ def test_dry_run_verifier_opens_only_123456(capsys):
 def test_keypad_line_is_ignored(run):
     """키패드는 뺐다(11/10). 예전 우노가 keypad 줄을 보내도 서버에 묻지 않고, 깨진 줄도 건너뛴다."""
     line = json.dumps({"eventId": "1-1-1", "roomId": 1, "sensorType": "keypad", "code": "123456", "ms": 1})
-    written, sent = run([line, "", "hello", '{"code":"654321"', occ_line()], dry_run=True, token=None)
+    written, sent = run([line, "", "hello", '{"code":"654321"', occ_line()])  # 진짜 서버 모드: 요청이 있었다면 sent에 남는다
     assert written == [] and sent == []
 
 

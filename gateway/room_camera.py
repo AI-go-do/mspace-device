@@ -70,6 +70,9 @@ BELONGINGS = {"backpack", "handbag", "suitcase", "umbrella", "laptop", "cell pho
 TRASH |= {"paper", "can", "snack bag", "plastic bag", "tissue", "food container"}
 BELONGINGS |= {"wallet", "credit card", "power bank", "earphone case", "tumbler", "pencil case", "glasses",
                "remote control"}
+# 방에 원래 있는 가구·시설. 책상 사진 비교로 달라진 곳에 이 이름이 붙으면 의자를 빼 둔 것 같은 자리 바뀜이라 세지 않는다
+FURNITURE = {"chair", "couch", "bench", "bed", "dining table", "tv", "potted plant", "clock", "refrigerator",
+             "sink", "toilet", "oven", "microwave"}
 UNKNOWN = "unknown"  # 책상 사진 비교로 달라졌는데 이름을 못 붙인 것 → 치울 것(확인 필요)으로 본다
 KOREAN = {"bottle": "병", "cup": "컵", "wine glass": "잔", "bowl": "그릇", "fork": "포크", "knife": "칼",
           "spoon": "숟가락", "banana": "바나나", "apple": "사과", "sandwich": "샌드위치", "orange": "귤",
@@ -689,6 +692,8 @@ class RoomWatcher:
             if any(overlaps(box, b) for b in seen):
                 continue  # 이미 개수로 센 물건이거나, 원래 있던 물건(리모컨)을 옮겨서 생긴 빈자리
             label = (self.labeler(frame, box) if self.labeler else None) or UNKNOWN
+            if label in FURNITURE:
+                continue  # 의자를 빼 두거나 넣은 자리 (가구는 정리 대상이 아님)
             items[label] = items.get(label, 0) + 1
         return items
 

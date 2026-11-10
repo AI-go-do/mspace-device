@@ -541,7 +541,7 @@ def test_left_items_are_checked_again_after_two_hours():
     r.w.request_check(1, r.t, "RECHECK")
     r.run([thing("umbrella")], SETTLE_SEC + 6)
     assert [(c["reservationId"], c["phase"], c["leftItems"]) for c in r.out[1:]] == [(1, "RECHECK", {"umbrella": 1})]
-    assert "2시간 뒤 다시 확인" in check_message(r.out[1]) and r.w.recheck_base is None
+    assert "3시간 뒤 다시 확인" in check_message(r.out[1]) and r.w.recheck_base is None
 
 
 def test_recheck_clean_when_taken_back():

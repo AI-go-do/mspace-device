@@ -366,7 +366,7 @@ class CheckoutPoller:
     켠 직후 처음 본 lastEnded는 이미 지난 일이라 기억만 하고 부르지 않는다.
     서버에 못 닿으면 기다렸다 다시 묻는다 (그동안 정리 확인은 미뤄질 뿐 틀리지 않는다).
 
-    10차(두고 간 물건 2시간): 서버가 recheck {reservationId, at}를 내려 주면, at이 지난 뒤 처음 물을 때
+    10차(두고 간 물건, 지금 3시간): 서버가 recheck {reservationId, at}를 내려 주면, at이 지난 뒤 처음 물을 때
     on_recheck(예약 번호)를 한 번 부른다. 퇴실 뒤 다음 팀이 입실해 서버가 recheck를 빼면 부르지 않고,
     이미 불렀어도 on_recheck_gone(예약 번호)으로 아직 못 한 다시 확인을 취소한다.
     같은 예약의 at이 바뀌면(core 설정이 바뀜) on_recheck_moved(예약 번호)로 기다리던 요청만 빼고 새 시각에 다시 부른다.
@@ -433,7 +433,7 @@ class CheckoutPoller:
         if recheck in self.rechecked or self.now() < at + RECHECK_MARGIN_SEC:
             return
         self.rechecked.add(recheck)
-        print(f"[퇴실 확인] 예약 {rid} 2시간 뒤 다시 확인 → 방이 비면 확인")
+        print(f"[퇴실 확인] 예약 {rid} 3시간 뒤 다시 확인 → 방이 비면 확인")
         self.on_recheck(rid)
 
     def run_forever(self):

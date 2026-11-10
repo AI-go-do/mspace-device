@@ -336,11 +336,11 @@ class RoomWatcher:
         # on_checkout: 서버가 "예약이 끝났다"고 알려 줄 때만 확인한다 (request_check). 아니면 30초 빈 방 (연습 모드)
         self.on_checkout = on_checkout
         self.pending = None          # (예약 번호, 알게 된 시각, "FIRST"): 퇴실했는데 아직 확인 못 한 예약
-        # 2시간 뒤 다시 확인 대기 (예약 번호, 알게 된 시각). pending과 따로 둔다: 지금 방에 있는 사람의
+        # 3시간 뒤 다시 확인 대기 (예약 번호, 알게 된 시각). pending과 따로 둔다: 지금 방에 있는 사람의
         # 예약 기준(entry)은 이것 때문에 지우거나 바꾸지 않는다
         self.recheck_pending = None
-        # 첫 확인(FIRST)에서 물건이 남았던 예약의 기준 {"reservationId", "objects"}. 2시간 뒤 다시 확인(RECHECK) 때
-        # 이것과 비교한다 (10차: 2시간 안에 안 가져가면 경고). 메모리에만: 젯슨이 꺼지면 다시 확인을 건너뛰고 경고도 없음
+        # 첫 확인(FIRST)에서 물건이 남았던 예약의 기준 {"reservationId", "objects"}. 3시간 뒤 다시 확인(RECHECK) 때
+        # 이것과 비교한다 (10차·core #113: 3시간 안에 안 가져가면 경고). 메모리에만: 젯슨이 꺼지면 다시 확인을 건너뛰고 경고도 없음
         self.room_items = dict(room_items or {})  # 방 비품: {"remote": 1} = 리모컨 0~1개는 괜찮음
         self.check_objects = check_objects
         self.counts = deque(maxlen=SMOOTH_FRAMES)
@@ -585,7 +585,7 @@ class RoomWatcher:
         if (self.pending is None and self.recheck_pending is None) or now - self.empty_since < SETTLE_SEC:
             return None
         now_iso = now_iso or datetime.now(KST).isoformat(timespec="seconds")
-        if self.pending is None:  # 퇴실 확인이 먼저. 그게 없을 때만 2시간 뒤 다시 확인
+        if self.pending is None:  # 퇴실 확인이 먼저. 그게 없을 때만 3시간 뒤 다시 확인
             reservation_id, _ = self.recheck_pending
             self.recheck_pending = None
             return self.recheck(reservation_id, dets, now_iso, detail) if self.check_objects else None
@@ -603,14 +603,14 @@ class RoomWatcher:
         check = self.check(seen, now_iso, photo=photo if desk else None, base=self.entry["objects"], desk=desk)
         check["reservationId"] = reservation_id
         check["phase"] = "FIRST"
-        # 물건이 남았으면 2시간 뒤 다시 확인할 때 쓰게 기준 개수만 남긴다 (책상 사진은 지움)
+        # 물건이 남았으면 3시간 뒤 다시 확인할 때 쓰게 기준 개수만 남긴다 (책상 사진은 지움)
         self.recheck_base = ({"reservationId": reservation_id, "objects": dict(self.entry["objects"])}
                              if check["status"] != "CLEAN" else None)
         self.clear_entry()  # 보냈으면 지운다 (다음 예약은 다음 빈 방에서 새로)
         return check
 
     def recheck(self, reservation_id, dets, now_iso, detail):
-        """2시간 뒤 다시 확인 (RECHECK). 첫 확인 때와 같은 기준(입실 직전 빈 방)과 개수로만 비교한다.
+        """3시간 뒤 다시 확인 (RECHECK). 첫 확인 때와 같은 기준(입실 직전 빈 방)과 개수로만 비교한다.
 
         책상 사진 비교는 하지 않는다 (사진은 첫 확인 뒤 지움). 그래서 사진 비교로만 찾았던 물건은 여기서
         안 잡혀 경고가 안 간다 (잘못 경고하지 않는 쪽).
@@ -749,7 +749,7 @@ def tidy_body(check, device_id, event_id=None):
     10차: 쓰레기든 물건이든 종류 구분 없이 "두고 감". 장치 결과(치울 것·두고 간 물건) → 서버 2가지:
     남은 것이 하나라도 있으면 LEFT_ITEMS, 없으면 CLEAN.
     items = 물건마다 {"name": 모델 이름(영어), "confidence": 0~1}. 한글 바꾸기·경고 기준(확신도)은 core가 한다.
-    phase = FIRST(퇴실 직후, 알림만) | RECHECK(2시간 뒤, 그래도 남았으면 core가 경고).
+    phase = FIRST(퇴실 직후, 알림만) | RECHECK(3시간 뒤, 그래도 남았으면 core가 경고).
     """
     found = {**check["leftItems"], **check["trash"]}
     conf = check.get("confidence", {})
@@ -778,7 +778,7 @@ def check_message(check):
         return f"깨끗한 방 기준 저장 {check['roomId']}번 방: 물건 {n}개{listed}{why}"
     if check["status"] == "SKIPPED":
         return f"정리 확인 {check['roomId']}번 방: 건너뜀 - {check['reason']}"
-    again = " (2시간 뒤 다시 확인)" if check.get("phase") == "RECHECK" else ""
+    again = " (3시간 뒤 다시 확인)" if check.get("phase") == "RECHECK" else ""
     if check["status"] == "CLEAN":
         return f"정리 확인 {check['roomId']}번 방{again}: 깨끗함"
     parts = []

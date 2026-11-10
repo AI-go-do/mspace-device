@@ -1,74 +1,38 @@
-// M-SPACE 방 장치 (우노용) - 키패드 체크인 (FR-ACC-001) + 재실 센서 (FR-DEV-101)
-// 키패드로 받은 6자리 번호를 JSON 한 줄로 USB 시리얼에 출력하고,
-// 중계(노트북·젯슨)에서 오는 OK/NO 응답으로 LED를 켠다.
-// PIR·조도 값은 바뀔 때와 10초마다 JSON 한 줄로 출력한다. PIR은 마지막 움직임 뒤 2분간 "있음"을 유지한다.
-// 번호가 맞는지는 서버가 판단한다. 장치는 번호를 저장하지 않는다.
-// 필요 라이브러리: Keypad (Arduino IDE > 라이브러리 관리 > "Keypad" by Mark Stanley)
+// M-SPACE 방 장치 (우노용) - 재실 센서 (FR-DEV-101) + 입실 결과 LED
+// PIR·조도 값은 바뀔 때와 10초마다 JSON 한 줄로 USB 시리얼에 출력한다. PIR은 마지막 움직임 뒤 2분간 "있음"을 유지한다.
+// 중계(노트북·젯슨)가 문 앞 QR 입실 결과를 OK/NO 한 줄로 보내면 LED를 켠다 (판단은 서버만 한다).
+// 키패드 체크인은 11/10에 뺐다 (QR 입실만 씀). 그래서 Keypad 라이브러리도 필요 없다.
 //
 // 배선
-//   4x4 키패드  : 행 R1~R4 -> D11,D10,D9,D8 / 열 C1~C4 -> D7,D6,D5,D4
-//                 (선에 R·C 라벨이 있으면 라벨 기준. 순서가 C4~C1, R1~R4인 키패드도 있다)
 //   LED 초록    : D12 -> 220Ω -> LED -> GND
 //   LED 빨강    : D13 -> 220Ω -> LED -> GND
 //   PIR(SR501)  : VCC -> 5V, GND -> GND, OUT -> D2
 //   조도(CDS)   : 5V -> CDS -> A0 -> 10kΩ -> GND  (CDS와 10kΩ 사이를 A0에)
 // (레이더는 ESP32 쪽에 단다: firmware/esp32_room_node)
 
-#include <Keypad.h>
 #include <EEPROM.h>
 
 // ---------- 설정값 (방·배선이 바뀌면 여기만 고친다) ----------
 const int ROOM_ID = 1;        // 이 장치가 달린 방 번호. 서버의 방 id와 같아야 한다. 방마다 복제할 때 이것만 바꾼다
-const int PIN_LED_OK = 12;    // 초록 LED 핀. 번호가 맞으면 켠다
-const int PIN_LED_NO = 13;    // 빨강 LED 핀. 번호가 틀리면 켠다
+const int PIN_LED_OK = 12;    // 초록 LED 핀. 입실이 열리면 켠다
+const int PIN_LED_NO = 13;    // 빨강 LED 핀. 거부되면 켠다
 const unsigned long LED_MS = 1500;  // LED를 켜 두는 시간 (ms)
-const unsigned long BLINK_MS = 200;     // "확인 중" 깜빡임 간격 (ms). 서버 답을 기다리는 동안 초록 LED를 깜빡인다
-const unsigned long WAIT_MAX_MS = 9000; // 답을 기다리는 최대 시간 (ms). 게이트웨이는 최악 7초 안에 답하므로 넉넉히 9초
 const int PIN_PIR = 2;        // PIR OUT 핀. 움직임이 있으면 1(HIGH), 없으면 0
 const int PIN_CDS = A0;       // 조도 센서 핀. 0~1023, 밝을수록 큼 (위 배선 기준)
 const unsigned long SENSOR_BEAT_MS = 10000; // 값이 그대로여도 10초마다 보낸다. core가 "센서가 살아 있다"를 알 수 있게 (1분 안 오면 끊김)
 const int LIGHT_DELTA = 50;   // 조도가 50 이상 바뀌면 바로 보낸다. 작은 흔들림마다 보내지 않으려고
 const unsigned long PIR_HOLD_MS = 120000; // 마지막 움직임 뒤 2분은 "있음"으로 본다. PIR은 가만히 있는 사람을 못 봐서 (FR-DEV-103 "헷갈리면 있음")
 
-// ---------- 키패드 ----------
-const byte ROWS = 4, COLS = 4;  // 키패드 크기: 4행 4열
-char keys[ROWS][COLS] = {       // 키패드에 실제로 적힌 글자 배치 (눌린 위치 -> 글자)
-  {'1','2','3','A'},
-  {'4','5','6','B'},
-  {'7','8','9','C'},
-  {'*','0','#','D'}
-};
-byte rowPins[ROWS] = {11, 10, 9, 8};  // 키패드 행1~4가 꽂힌 우노 핀. 숫자가 다르게 찍히면 이 순서만 바꾼다
-byte colPins[COLS] = {7, 6, 5, 4};    // 키패드 열1~4가 꽂힌 우노 핀
-Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);  // 위 설정으로 만든 키패드 객체
-
 // ---------- 실행 중에 바뀌는 값 ----------
 unsigned long bootId;      // 부팅 횟수. 켤 때마다 1씩 늘려 EEPROM에 저장한다. 재부팅으로 seq가 0부터 다시 시작해도 eventId가 겹치지 않게
 unsigned long seq = 0;     // 이벤트 순서 번호. 보낼 때마다 1씩 늘어난다
-String code = "";          // 지금까지 누른 숫자. 6자리 + #이면 서버로 보내고 비운다
 int ledPin = -1;           // 지금 켜져 있는 LED 핀. 꺼져 있으면 -1
 unsigned long ledOnAt = 0; // LED를 켠 시각 (millis 기준)
-bool waiting = false;      // 서버 답을 기다리는 중인지. 기다리는 동안 초록 LED를 깜빡인다
-unsigned long waitStart = 0; // 기다리기 시작한 시각 (millis 기준)
 int lastPir = -1;          // 마지막으로 보낸 PIR 값. 처음엔 -1이라 첫 값은 무조건 보낸다
 int lastLight = -1000;     // 마지막으로 보낸 조도 값. 처음엔 차이가 커서 무조건 보낸다
 unsigned long lastSensorAt = 0; // 마지막으로 센서 값을 보낸 시각 (millis 기준)
 unsigned long lastMotionAt = 0; // PIR이 마지막으로 움직임(HIGH)을 본 시각 (millis 기준)
 bool motionSeen = false;        // 켜진 뒤 움직임을 한 번이라도 봤는지 (처음부터 2분간 "있음"이 되지 않게)
-
-// 키패드 번호 한 줄 출력
-// 예: {"eventId":"1-48213-18","roomId":1,"sensorType":"keypad","code":"123456","ms":12890}
-//   eventId = 방번호-bootId-seq  (게이트웨이가 UUID로 바꿔 서버에 보내고, 서버가 이 값으로 중복을 거른다)
-//   ms      = 우노가 켜진 뒤 지난 시간. 우노엔 시계가 없다
-void sendCode(const String& c) {
-  seq++;
-  Serial.print("{\"eventId\":\"");
-  Serial.print(ROOM_ID); Serial.print('-'); Serial.print(bootId); Serial.print('-'); Serial.print(seq);
-  Serial.print("\",\"roomId\":"); Serial.print(ROOM_ID);
-  Serial.print(",\"sensorType\":\"keypad\",\"code\":\""); Serial.print(c);
-  Serial.print("\",\"ms\":"); Serial.print(millis());
-  Serial.println("}");
-}
 
 // 재실 센서 한 줄 출력
 // 예: {"eventId":"1-48213-19","roomId":1,"sensorType":"occupancy","pir":1,"light":512,"ms":13000}
@@ -85,14 +49,12 @@ void sendSensors(int pir, int light) {
 }
 
 // loop()마다 불러서 센서를 읽는다. PIR이 바뀌었거나, 조도가 크게 바뀌었거나, 10초가 지났으면 보낸다
-// 키패드 번호를 기다리는 중에는 보내지 않는다 (게이트웨이가 서버 답을 기다리는 중이라 줄이 밀리지 않게)
 // pir 값은 "PIR이 지금 HIGH이거나, 마지막 움직임 뒤 2분이 안 지났으면 1"이다
 void updateSensors() {
-  if (digitalRead(PIN_PIR) == HIGH) {  // 기다리는 중에도 움직임은 기억해 둔다
+  if (digitalRead(PIN_PIR) == HIGH) {
     lastMotionAt = millis();
     motionSeen = true;
   }
-  if (waiting) return;
   if (motionSeen && millis() - lastMotionAt >= PIR_HOLD_MS) motionSeen = false;  // 유지 시간이 끝나면 잊는다 (49일 뒤 millis 되감김 대비)
   int pir = motionSeen ? 1 : 0;
   int light = analogRead(PIN_CDS);
@@ -105,39 +67,12 @@ void updateSensors() {
   }
 }
 
-// LED를 켜고 켠 시각만 기억한다. delay()로 멈추지 않아서 그동안에도 키 입력을 계속 받는다
+// LED를 켜고 켠 시각만 기억한다. delay()로 멈추지 않아서 그동안에도 센서를 계속 읽는다
 void ledOn(int pin) {
   if (ledPin >= 0) digitalWrite(ledPin, LOW);  // 다른 LED가 켜져 있으면 끄고 새로 켠다
   digitalWrite(pin, HIGH);
   ledPin = pin;
   ledOnAt = millis();
-}
-
-// 번호를 보낸 직후 부른다. 켜져 있던 결과 LED를 끄고 "확인 중" 깜빡임을 시작한다
-void startWaiting() {
-  if (ledPin >= 0) digitalWrite(ledPin, LOW);
-  ledPin = -1;
-  waiting = true;
-  waitStart = millis();
-}
-
-// 답이 오면(또는 너무 오래 걸리면) 깜빡임을 멈춘다
-void stopWaiting() {
-  waiting = false;
-  digitalWrite(PIN_LED_OK, LOW);
-}
-
-// loop()마다 불러서 기다리는 중이면 초록 LED를 BLINK_MS마다 켰다 껐다 한다
-// WAIT_MAX_MS가 지나도 답이 없으면(USB 빠짐, 게이트웨이 꺼짐) 빨강 LED로 거부를 알린다
-void updateWaiting() {
-  if (!waiting) return;
-  unsigned long waited = millis() - waitStart;  // 빼서 비교하므로 millis()가 0으로 돌아가도 맞다
-  if (waited >= WAIT_MAX_MS) {
-    stopWaiting();
-    ledOn(PIN_LED_NO);
-    return;
-  }
-  digitalWrite(PIN_LED_OK, (waited / BLINK_MS) % 2 == 0 ? HIGH : LOW);  // 짝수 칸이면 켜고 홀수 칸이면 끈다
 }
 
 // loop()마다 불러서 LED_MS가 지났으면 끈다
@@ -151,7 +86,7 @@ void updateLed() {
 
 void setup() {
   Serial.begin(115200);         // 중계와 통신 속도. gateway.py의 115200과 같아야 한다
-  Serial.setTimeout(50);        // 응답 한 줄을 기다리는 시간. 길면 그동안 키패드를 못 읽는다 (기본 1초)
+  Serial.setTimeout(50);        // 응답 한 줄을 기다리는 시간. 길면 그동안 센서를 못 읽는다 (기본 1초)
   pinMode(PIN_LED_OK, OUTPUT);  // LED 핀은 쓰기
   pinMode(PIN_LED_NO, OUTPUT);
   pinMode(PIN_PIR, INPUT);      // 센서 핀은 읽기
@@ -167,29 +102,13 @@ void setup() {
 
 void loop() {
   updateLed();      // 켜 둔 LED가 1.5초 지났으면 끈다 (기다리지 않고 확인만 한다)
-  updateWaiting();  // 서버 답을 기다리는 중이면 초록 LED를 깜빡인다
   updateSensors();  // PIR·조도가 바뀌었거나 10초 지났으면 보낸다
 
-  // 키패드: 숫자 6자리 입력 후 #으로 전송, *로 지우기
-  char k = keypad.getKey();  // 방금 눌린 키. 안 눌렸으면 0
-  if (k) {
-    if (k == '#' && waiting) {
-      code = "";  // 확인 중에는 #을 무시한다. 번호가 두 번 가거나 앞 답이 뒤 기다림을 끝내는 걸 막는다
-    }
-    else if (k == '#') {
-      if (code.length() == 6) { sendCode(code); startWaiting(); }  // 6자리일 때만 서버에 확인하고, 답 올 때까지 깜빡인다
-      else ledOn(PIN_LED_NO);                  // 6자리가 아니면 빨강 LED로 잘못 눌렀다고 알린다
-      code = "";
-    }
-    else if (k == '*') { code = ""; }                                     // 처음부터 다시 입력
-    else if (k >= '0' && k <= '9' && code.length() < 6) { code += k; }   // 숫자만, 최대 6자리까지 모은다 (A~D는 무시)
-  }
-
-  // 중계 응답: "OK" 또는 "NO" 한 줄
+  // 중계 응답 (문 앞 QR 입실 결과): "OK" 또는 "NO" 한 줄
   if (Serial.available()) {
     String reply = Serial.readStringUntil('\n');  // 중계가 보낸 한 줄
     reply.trim();                                 // 앞뒤 공백·줄바꿈 제거
-    if (reply == "OK") { stopWaiting(); ledOn(PIN_LED_OK); }
-    else if (reply == "NO") { stopWaiting(); ledOn(PIN_LED_NO); }
+    if (reply == "OK") ledOn(PIN_LED_OK);
+    else if (reply == "NO") ledOn(PIN_LED_NO);
   }
 }

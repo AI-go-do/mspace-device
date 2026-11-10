@@ -41,7 +41,7 @@ def test_parse_qr(text, expected):
     assert parse_qr(text, 1) == expected
 
 
-def test_opened_sends_same_fields_as_keypad():
+def test_opened_sends_access_verify_fields():
     v = FakeVerifier({"result": "OPENED"})
     assert QrDoor(v, 1).handle("123456") == b"OK\n"
     body = v.bodies[0]

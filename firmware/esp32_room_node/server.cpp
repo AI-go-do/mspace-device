@@ -34,7 +34,7 @@ static bool isLocalHost(const String& url) {
 
 void begin() {
   if (DRY_RUN) {
-    Serial.println("[서버] DRY_RUN: 서버에 안 보내고 화면에만 찍어요 (키패드는 123456만 열림)");
+    Serial.println("[서버] DRY_RUN: 서버에 안 보내고 화면에만 찍어요");
     current = MODE_DRY_RUN;
     return;
   }
@@ -61,7 +61,7 @@ void begin() {
     Serial.println("[서버] 막힘: SERVER_URL이 비었거나 http(s)://로 시작하지 않아요");
   }
   if (current == MODE_BLOCKED) {
-    Serial.println("[서버] 재실 이벤트는 큐에 모으기만 하고, 키패드는 모두 거부해요. secrets.h를 고치고 다시 올려 주세요");
+    Serial.println("[서버] 재실 이벤트는 큐에 모으기만 해요. secrets.h를 고치고 다시 올려 주세요");
   }
 }
 

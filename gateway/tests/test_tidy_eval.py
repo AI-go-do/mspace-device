@@ -209,7 +209,25 @@ def test_rank_picks_best_passing_candidate():
     ranked = te.rank(rows)
     assert [r["name"] for r in ranked] == ["정확", "빠름", "더 정확하지만 심각 오류", "고장"]
     assert ranked[0]["verdict"] == "채택" and ranked[1]["verdict"] == "후보"
-    assert te.rank([{"name": "x", "verdict": "탈락 (정확도)", "result": result_of(0.5)}])[0]["verdict"] != "채택"
+    assert te.rank([{"name": "x", "verdict": "탈락 (정확도)", "result": result_of(0.5)}])[0]["verdict"] == "채택 (기준 미달: 정확도)"
+
+
+def test_rank_marks_best_even_when_nobody_passes():
+    rows = [{"name": "낮음", "verdict": "탈락 (정확도)", "result": result_of(0.70)},
+            {"name": "높음", "verdict": "탈락 (정확도)", "result": result_of(0.85)},
+            {"name": "고장", "verdict": "실패", "result": {"error": "모델 없음"}}]
+    ranked = te.rank(rows)
+    assert [r["verdict"] for r in ranked] == ["채택 (기준 미달: 정확도)", "탈락 (정확도)", "실패"]
+    assert te.rank([{"name": "고장", "verdict": "실패", "result": {"error": "x"}}])[0]["verdict"] == "실패"
+
+
+def test_score_splits_serious_into_false_alarm_and_missed():
+    cases = [te.Case("001", "CLEAN", ""), te.Case("002", "LEFT_ITEMS", ""), te.Case("003", "NEEDS_CLEANING", "")]
+    got = {"001": "LEFT_ITEMS", "002": "CLEAN", "003": "LEFT_ITEMS"}
+    result = te.score(cases, lambda c: ({"status": got[c.name]}, 0.1))
+    assert (result["serious"], result["falseAlarm"], result["missed"]) == (2, 1, 1)
+    row = {"name": "v8s", "result": {**result, "loadSeconds": 1.0, "memoryMB": None}, "verdict": "탈락", "license": "-"}
+    assert "| 2 (1 / 1) |" in te.compare_table([row])
 
 
 def test_compare_writes_table(tmp_path):
@@ -220,8 +238,9 @@ def test_compare_writes_table(tmp_path):
     rows = te.run_compare(str(tmp_path), {}, out=lines.append, run_candidate=lambda c: results[c.name])
     assert [r["name"] for r in rows] == ["B", "A", "C"]
     text = "\n".join(lines)
-    assert "| 채택 | B | **97.5%** (100% / 95% / -) | 0 | 0.50초 (1.00초) | 812MB | 3.2초 | AGPL-3.0" in text
-    assert "| 탈락 (정확도) | A |" in text and "| 실패 | C | 모델 파일이 없어요 |" in text
+    assert "**채택:** B · 정확도 97.5% · 심각 오류 0 · 사진당 0.50초 · 메모리 812MB" in text
+    assert "| 1 | 채택 | B | **97.5%** (100% / 95% / -) | 0 | 0.50초 (1.00초) | 812MB | 3.2초 | AGPL-3.0" in text
+    assert "| 2 | 탈락 (정확도) | A |" in text and "| 3 | 실패 | C | 모델 파일이 없어요 |" in text
     saved = list(tmp_path.glob("compare_*.md"))
     assert len(saved) == 1 and "문제 40개" in saved[0].read_text(encoding="utf-8")
 
@@ -305,3 +324,7 @@ def test_skipped_cases_show_in_result_and_table(tmp_path, monkeypatch):
     assert result["loadSeconds"] == 1  # 시작 0 → 첫 장 1 (둘째 장까지 기다리지 않음)
     row = {"name": "v8s", "result": result, "verdict": "후보", "license": "AGPL-3.0 (Ultralytics)"}
     assert "v8s (1문제 건너뜀)" in te.compare_table([row])
+
+
+def test_chosen_line_when_all_failed():
+    assert te.chosen_line([{"name": "x", "verdict": "실패", "result": {"error": "e"}}]) == "**채택:** 없음 (모든 후보 실패)"

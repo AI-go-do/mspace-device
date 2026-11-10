@@ -1201,6 +1201,19 @@ def test_yolo_detailed_adds_desk_only_when_set():
     assert both.calls == 15  # 바닥(FLOOR_AREA)도 바닥+바닥 4조각
 
 
+def test_tiny_area_skips_empty_tiles():
+    seen = []
+
+    def detect(img):
+        assert img.shape[0] > 0 and img.shape[1] > 0  # 빈 사진은 모델에 넣지 않음
+        seen.append(img.shape[:2])
+        return []
+
+    detect_tiled = room_camera.detect_tiled
+    assert detect_tiled(detect, np.zeros((1, 1, 3), dtype=np.uint8)) == []
+    assert seen == [(1, 1)]  # 전체 한 장만 보고 조각은 건너뜀
+
+
 def test_preview_gets_desk_area_in_pixels():
     got = []
 

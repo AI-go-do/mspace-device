@@ -461,6 +461,7 @@ class RoomWatcher:
             pir_since, self.pir_since = self.pir_since, None
             if self.snapshot is not None:
                 snap, self.snapshot = self.snapshot, None
+                self.drop_recheck_on_entry()  # 빈 방 뒤 사람이 들어옴: 후보를 쓰든 버리든 앞 예약 다시 확인은 안 함
                 if pir_since is not None and now - pir_since > ENTRY_PIR_GRACE_SEC:
                     # 카메라엔 안 보였지만 PIR이 오래 켜져 있었다. 그 사이 뭘 두었을 수 있어 이 후보는 버린다
                     print(f"예약 기준 {self.room_id}번 방: 사람이 보이기 전 PIR이 오래 켜져 있어 후보를 쓰지 않음")
@@ -486,13 +487,15 @@ class RoomWatcher:
         self.snapshot = {"objects": self.count(seen), "img": img, "known": known, "at": now}
         self.pir_since = None
 
-    def confirm_entry(self, snap, now, now_iso):
+    def drop_recheck_on_entry(self):
+        """앞 예약 퇴실 뒤 누가 들어왔다 (다음 팀·워크인·앞 팀이 가지러 옴). 그 뒤 물건은 누구 것인지 모르니
+        앞 예약 다시 확인은 하지 않는다 (잘못된 경고를 막음, 다음 팀 입실 때 서버가 빼는 것과 같은 규칙)."""
         if self.recheck_base or self.recheck_pending:
-            # 앞 예약 퇴실 뒤 누가 들어왔다 (다음 팀·워크인·앞 팀이 가지러 옴). 그 뒤 물건은 누구 것인지 모르니
-            # 앞 예약 다시 확인은 하지 않는다 (잘못된 경고를 막음, 다음 팀 입실 때 서버가 빼는 것과 같은 규칙)
             rid = (self.recheck_base or {}).get("reservationId") or self.recheck_pending[0]
             print(f"정리 확인 {self.room_id}번 방: 예약 {rid} 퇴실 뒤 사람이 들어와 다시 확인은 하지 않음")
             self.recheck_base = self.recheck_pending = None
+
+    def confirm_entry(self, snap, now, now_iso):
         pending_at = self.pending[1] if self.pending else None
         if self.entry is not None and (pending_at is None or self.entry["at"] >= pending_at):
             return  # 같은 예약 사람이 잠깐 나갔다 온 것 (화장실). 처음 기준을 그대로 둔다

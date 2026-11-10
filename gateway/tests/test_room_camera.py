@@ -603,6 +603,17 @@ def test_someone_entering_after_checkout_cancels_recheck(capsys):
     assert [(c.get("phase"), c["status"]) for c in r.out] == [("FIRST", "LEFT_ITEMS"), (None, "SKIPPED")]
 
 
+def test_long_pir_entry_also_cancels_recheck(capsys):
+    """PIR이 오래 켜졌다가 사람이 보여 후보를 버리는 길에서도 앞 예약 다시 확인은 취소한다."""
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([], 5).run([person()], 5).checkout(1).run([thing("umbrella")], SETTLE_SEC + 6)
+    assert r.w.recheck_base is not None
+    r.run([thing("umbrella")], 5).run([thing("umbrella")], 30, pir=True)
+    r.run([person(), thing("umbrella")], 3, pir=True)
+    out = capsys.readouterr().out
+    assert "PIR이 오래" in out and "다시 확인은 하지 않음" in out and r.w.recheck_base is None
+
+
 def test_postpone_recheck_keeps_base():
     w = RoomWatcher(1, on_checkout=True)
     w.recheck_base = {"reservationId": 1, "objects": {}}

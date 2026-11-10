@@ -1,49 +1,45 @@
-# 키패드 ↔ core 통신 형식 (FR-ACC-001)
+# 출입(QR) ↔ core 통신 형식 (FR-ACC-001)
 
 > 상태: **초안** · 작성 수연 · 확인 지영(core), 재웅(장치 토큰·요구사항 명세)
-> core 쪽 공식 명세는 docs 저장소 [`api/README.md` 6장](https://github.com/AI-go-do/docs/blob/main/api/README.md#6-출입-키패드)이에요 (core `develop`에 구현됨). 이 문서는 **장치 쪽**(우노·게이트웨이)이 그 API를 어떻게 쓰는지 정리해요.
-> 4차 회의(11/3) 할 일 "키패드 ↔ core 통신 형식 문서로 남기기". 지금까지 코드에만 있던 약속을 한곳에 모았다.
+> core 쪽 공식 명세는 docs 저장소 [`api/README.md` 6장](https://github.com/AI-go-do/docs/blob/main/api/README.md#6-출입-qr)이에요 (core `develop`에 구현됨). 이 문서는 **장치 쪽**(젯슨 게이트웨이·우노)이 그 API를 어떻게 쓰는지 정리해요.
+> 11/10: 키패드는 빼고 **문 앞 카메라 QR 입실 하나**만 써요. core API는 그대로예요.
 > ✅ = 코드에 이미 있음 / 🟡 = 제안, 확인 필요
 
 ## 1. 전체 흐름
 
 ```mermaid
 sequenceDiagram
-    participant K as 키패드
-    participant U as 우노 (펌웨어)
-    participant G as 게이트웨이 (젯슨)
+    participant P as 학생 폰 (QR)
+    participant W as 문 앞 웹캠
+    participant G as 게이트웨이 (젯슨, qr_door.py)
     participant C as core
-    K->>U: 123456 #
-    U->>G: 시리얼 JSON 한 줄
+    participant U as 우노 (LED)
+    P->>W: QR 비추기 (6자리 입실 번호)
+    W->>G: 사진
     G->>C: POST /api/access/verify (장치 토큰)
     C-->>G: OPENED / DENIED
-    G-->>U: OK / NO
-    U->>K: 초록 / 빨강 LED
+    G->>U: OK / NO (USB 시리얼)
+    U->>U: 초록 / 빨강 LED
 ```
 
 - **판단은 core만 한다.** 장치는 번호를 저장하지 않고, 맞는지 모른다.
 - **애매하면 거부한다.** 서버가 답이 없거나 이상한 답이면 게이트웨이는 `NO`를 보낸다.
 
-## 2. 우노 → 게이트웨이 (USB 시리얼) ✅
+## 2. QR 안의 글자 ✅
 
-속도 `115200`, 한 줄에 JSON 하나, 끝은 줄바꿈(`\n`).
+| 글자 | 뜻 |
+|---|---|
+| `123456` | 입실 번호 6자리만. 방은 `QR_ROOM_ID`(기본 1) |
+| `MSPACE:1:123456` | 방 번호까지. 다른 방 QR이면 서버에 묻지 않고 거부 |
 
-```json
-{"eventId":"1-1000002-3","roomId":1,"sensorType":"keypad","code":"123456","ms":12890}
-```
+나중에 core가 "30초마다 바뀌는 QR"을 주면 `parse_qr()`만 바꾸면 돼요.
 
-| 필드 | 형식 | 뜻 |
-|---|---|---|
-| `eventId` | 글자, `방-bootId-seq` | 이벤트 고유 번호. 아래 4장 |
-| `roomId` | 정수 | 방 번호 (펌웨어 `ROOM_ID`) |
-| `sensorType` | 글자 | `keypad`(번호 입력) 또는 `occupancy`(재실 센서, 아래) |
-| `code` | 글자, 숫자 6자리 | 입력한 번호. `0`으로 시작해도 안 사라지게 글자로 보낸다 |
-| `ms` | 정수 | 우노가 켜진 뒤 지난 ms. 우노엔 시계가 없어서 참고용 |
+## 2-1. 우노 ↔ 게이트웨이 (USB 시리얼) ✅
 
-게이트웨이 → 우노 답: `OK\n`(열림, 초록 LED) 또는 `NO\n`(거부, 빨강 LED).
+속도 `115200`, 한 줄에 하나, 끝은 줄바꿈(`\n`).
 
-재실 센서 줄 (FR-DEV-101). 게이트웨이는 답하지 않는다.
-보내는 때: PIR 값이 바뀔 때, 조도가 50(`LIGHT_DELTA`) 넘게 바뀔 때, 바뀌지 않아도 10초마다. 키패드 답(`OK`/`NO`)을 기다리는 동안은 보내지 않고, 답이 온 뒤 이어서 보낸다:
+- 게이트웨이 → 우노: `OK\n`(열림, 초록 LED) 또는 `NO\n`(거부, 빨강 LED).
+- 우노 → 게이트웨이: 재실 센서 줄 (FR-DEV-101). 게이트웨이는 답하지 않는다. PIR 값이 바뀔 때, 조도가 50(`LIGHT_DELTA`) 넘게 바뀔 때, 바뀌지 않아도 10초마다 보낸다:
 
 ```json
 {"eventId":"1-1000002-4","roomId":1,"sensorType":"occupancy","pir":1,"light":512,"ms":13000}
@@ -51,10 +47,12 @@ sequenceDiagram
 
 | 필드 | 형식 | 뜻 |
 |---|---|---|
+| `eventId` | 글자, `방-bootId-seq` | 이벤트 고유 번호. 아래 4장 |
 | `pir` | 정수 `0`·`1` | PIR이 사람을 봤으면 1 |
 | `light` | 정수 `0`~`1023` | 조도 센서 값 (A0) |
+| `ms` | 정수 | 우노가 켜진 뒤 지난 ms. 우노엔 시계가 없어서 참고용 |
 
-게이트웨이는 이 줄을 core 재실 이벤트(`kind: OCCUPANCY`, `occupied`, `sources`, `observedAt`)로 바꾼다. core 쪽 형식은 `docs/sensor-events-api.md`(PR #23).
+게이트웨이는 이 줄을 core 재실 이벤트(`kind: OCCUPANCY`, `occupied`, `sources`, `observedAt`)로 바꾼다. core 쪽 형식은 `docs/sensor-events-api.md`.
 
 ## 3. 게이트웨이 → core: `POST /api/access/verify`
 
@@ -65,19 +63,19 @@ POST /api/access/verify
 Authorization: Bearer <장치 토큰>
 Content-Type: application/json
 
-{"eventId":"67e130b8-f207-50cb-8d21-46c7ff5ac2a5","roomId":1,"deviceId":"keypad-1","code":"123456"}
+{"eventId":"67e130b8-f207-50cb-8d21-46c7ff5ac2a5","roomId":1,"deviceId":"qr-1","code":"123456"}
 ```
 
 | 필드 | 형식 | 뜻 |
 |---|---|---|
-| `eventId` | 글자 1~64자 | 우노 `eventId`를 UUID(36자)로 바꾼 값. 중복 거르기용 (4장) |
+| `eventId` | 글자 1~64자 | QR을 찍을 때마다 새 UUID(36자). 중복 거르기용 (4장) |
 | `roomId` | 정수 | 방 번호 |
-| `deviceId` | 글자 50자 이하 (선택) | `keypad-<roomId>`. 방마다 키패드 1개 |
-| `code` | 글자, 숫자 6자리 | 입력한 번호 |
+| `deviceId` | 글자 50자 이하 (선택) | `qr-<roomId>`. 방마다 문 앞 QR 카메라 1개 |
+| `code` | 글자, 숫자 6자리 | QR에서 읽은 번호. `0`으로 시작해도 안 사라지게 글자로 보낸다 |
 
 - 요구사항 FR-ACC-001에는 `{roomId, code}`만 적혀 있다. `eventId`·`deviceId`는 지영과 따로 맞춘 것이고 TEAM.md의 `AccessEvent(eventId, roomId, deviceId, ...)`와 같은 이름이다. 🟡 **요구사항 문장도 4개 필드로 고칠지 확인 (재웅, 요구사항 명세 담당)**
 - 토큰이 지나가는 길이라 **실제 서버는 HTTPS로만** 부른다. `http://`는 노트북·젯슨 안에서 테스트할 때만 쓴다(게이트웨이는 원격 `http://` 주소면 시작하지 않는다, `is_safe_server()`). 🟡 **개발·운영 서버 HTTPS 주소 확인 (재웅)**
-- 장치 토큰은 사람 로그인 토큰(JWT)과 **다른 종류**다. 키패드는 번호 확인만 할 수 있고 예약을 만들 수 없다. 값은 젯슨 `.env`에만 둔다. 🟡 **토큰 발급·형식은 재웅 담당 (4차 회의)**
+- 장치 토큰은 사람 로그인 토큰(JWT)과 **다른 종류**다. 장치는 번호 확인만 할 수 있고 예약을 만들 수 없다. 값은 젯슨 `.env`에만 둔다. 🟡 **토큰 발급·형식은 재웅 담당 (4차 회의)**
 
 ### 응답
 
@@ -98,7 +96,7 @@ Content-Type: application/json
 - 이미 입실한 사람은 끝 시각 전까지 같은 번호로 다시 열 수 있다 (`OPENED`, 체크인은 다시 안 함).
 - `400`은 `eventId`·`roomId` 문제일 때만이다. `code` 형식이 틀리면 `400`이 아니라 `WRONG_CODE`다.
 - 게이트웨이는 `OPENED`가 아니면 모두 `NO`로 처리한다. 그래서 `reason` 이름이 바뀌어도 장치는 안 깨진다. `reason`은 로그와 나중에 LED 표시를 다르게 할 때 쓴다.
-- 5회 잠금은 core가 센다 (`LOCKED`). 장치는 재부팅되면 횟수를 잃고, 키패드가 여러 대여도 core는 하나라서 이 방식이 맞다.
+- 5회 잠금은 core가 센다 (`LOCKED`). 장치는 재부팅되면 횟수를 잃고, 장치가 여러 대여도 core는 하나라서 이 방식이 맞다.
 
 ### 오류 (판단 전에 막힌 경우)
 
@@ -112,9 +110,8 @@ Content-Type: application/json
 
 ## 4. eventId와 중복 거르기
 
-- 우노가 `방-bootId-seq`로 만든다. `seq`는 켜진 뒤 몇 번째 입력, `bootId`는 몇 번째로 켜졌는지(EEPROM에 저장, 켤 때마다 +1).
-- `bootId`는 **따로 보내는 필드가 아니라 eventId 안에 들어 있다.** 재부팅으로 `seq`가 1부터 다시 시작해도 `bootId`가 달라서 eventId가 안 겹친다.
-- 게이트웨이가 `uuid5(uuid5(NAMESPACE_DNS, "mspace-device"), "1-1000002-3")`으로 UUID를 만든다. 같은 입력이면 항상 같은 UUID라서 재전송해도 eventId가 같다.
+- QR은 찍을 때마다 게이트웨이가 새 UUID(`uuid4`)를 만든다. 서버 오류로 다시 보낼 때는 **같은 body(같은 eventId)** 로 보낸다.
+- 우노 재실 줄의 eventId는 `방-bootId-seq`. `bootId`는 몇 번째로 켜졌는지(EEPROM, 켤 때마다 +1)라서 재부팅해도 안 겹친다. 게이트웨이가 이걸 `uuid5`로 UUID로 바꿔 core에 보낸다.
 - core는 같은 eventId가 다시 와도 한 번만 처리하고, **처음 결과를 그대로 돌려준다** ✅ (core `access_event` 표에 eventId별 `result`·`reason` 저장). 그래서 재전송해도 체크인이 두 번 되지 않고 잠금 횟수도 다시 세지 않는다.
 - 🟡 **보관 기간**: 지금은 지우는 작업이 없어 계속 남는다. 재전송은 최대 약 7초 안에 끝나므로 하루 지나면 지워도 된다고 제안 (지영 답 기다림).
 

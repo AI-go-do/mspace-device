@@ -1,7 +1,7 @@
-"""문 앞 웹캠으로 QR 입실 (FR-ACC-001의 다른 입력 방식)
+"""문 앞 웹캠으로 QR 입실 (FR-ACC-001. 11/10부터 입실은 QR 하나, 키패드는 뺐다)
 
-학생 폰 화면의 QR을 문 앞 웹캠이 읽어서, 키패드와 같은 core API(POST /api/access/verify)로 확인한다.
-결과는 우노에 OK/NO로 보내 같은 LED(초록/빨강)를 켠다. 판단은 core만 한다 (키패드와 같음).
+학생 폰 화면의 QR을 문 앞 웹캠이 읽어서, core API(POST /api/access/verify)로 확인한다.
+결과는 우노에 OK/NO로 보내 LED(초록/빨강)를 켠다. 판단은 core만 한다.
 
 QR 안에 넣는 글자 (둘 중 하나):
   123456                 입실 번호 6자리만. 방은 QR_ROOM_ID(기본 1)
@@ -59,7 +59,7 @@ class QrDoor:
         body = {
             "eventId": str(uuid.uuid4()),  # 찍을 때마다 새 이벤트. 재시도는 HttpVerifier가 같은 body로 한다
             "roomId": room,
-            "deviceId": f"qr-{room}",      # 키패드(keypad-1)와 구분
+            "deviceId": f"qr-{room}",      # 방마다 문 앞 QR 카메라 하나
             "code": code,
         }
         res = self.verifier.verify(body)

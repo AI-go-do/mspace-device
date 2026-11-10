@@ -263,11 +263,12 @@ class YoloDetector:
     """
     finds_objects = True
 
-    def __init__(self, model_path, size=640, desk_area=None):
+    def __init__(self, model_path, size=640, desk_area=None, floor_area=None):
         import cv2
         self.cv2 = cv2
         self.size = size
         self.desk_area = desk_area  # (x1, y1, x2, y2) 비율. 정리 확인 때 책상만 잘라 한 번 더 본다
+        self.floor_area = floor_area  # 같은 모양. 바닥(가방·에어팟 케이스가 떨어지는 곳)도 잘라 한 번 더 본다
         self.names = load_names(model_path)
         self.session = self.net = None
         try:
@@ -297,10 +298,11 @@ class YoloDetector:
         return parse_yolo(output, w / self.size, h / self.size, names=self.names)
 
     def detect_detailed(self, frame):
-        """정리 확인·기준 저장 때만: 한 장 전체 + 4조각, 그리고 DESK_AREA가 있으면 책상 확대까지 합친다."""
+        """정리 확인·기준 저장 때만: 한 장 전체 + 4조각, 그리고 DESK_AREA·FLOOR_AREA가 있으면 그 부분 확대까지 합친다."""
         found = detect_tiled(self.detect, frame)
-        if self.desk_area:
-            found = merge(found, detect_desk(self.detect, frame, self.desk_area))
+        for area in (self.desk_area, self.floor_area):
+            if area:
+                found = merge(found, detect_desk(self.detect, frame, area))
         return found
 
 
@@ -861,12 +863,14 @@ def make_labeler(detector, label_model=None):
     return label
 
 
-def make_detector(model_path, desk_area=None):
+def make_detector(model_path, desk_area=None, floor_area=None):
     if model_path:
         print("인원 세기: YOLO 모델", model_path)
         if desk_area:
             print("정리 확인: 책상 부분(DESK_AREA) %.2f,%.2f,%.2f,%.2f도 확대해서 봐요" % tuple(desk_area))
-        return YoloDetector(model_path, desk_area=desk_area)
+        if floor_area:
+            print("정리 확인: 바닥 부분(FLOOR_AREA) %.2f,%.2f,%.2f,%.2f도 확대해서 봐요" % tuple(floor_area))
+        return YoloDetector(model_path, desk_area=desk_area, floor_area=floor_area)
     print("인원 세기: 모델 파일이 없어 OpenCV 기본 사람 찾기(HOG)를 써요. 정리 확인은 꺼져요 (YOLO_MODEL 참고)")
     return HogPersonDetector()
 
@@ -908,7 +912,10 @@ def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path
                         area = getattr(detector, "desk_area", None)
                         if area:  # 책상 부분을 같이 그려서 DESK_AREA가 책상에 맞는지 본다
                             area = desk_box(frame.shape[1], frame.shape[0], area)
-                        preview.update(frame, dets, watcher.people(dets), area=area)
+                        floor = getattr(detector, "floor_area", None)
+                        if floor:  # 바닥 부분도 (FLOOR_AREA)
+                            floor = desk_box(frame.shape[1], frame.shape[0], floor)
+                        preview.update(frame, dets, watcher.people(dets), area=area, floor=floor)
                     except Exception as e:  # 화면 보기 오류는 인원 세기를 막지 않는다
                         print("화면 보기 오류(카메라는 계속 돌아요):", repr(e))
                 detailed = getattr(detector, "detect_detailed", None)

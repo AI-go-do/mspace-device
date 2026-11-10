@@ -754,7 +754,7 @@ def test_start_room_camera(monkeypatch):
     class Det:
         finds_objects = False
 
-    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None: Det())
+    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None: Det())
     monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
 
     def fake_run(watcher, cam, detector, push, pir_now, on_frame=None, preview=None, send_check=None):
@@ -776,7 +776,7 @@ def test_start_room_camera_uses_checkout_mode_when_sending(monkeypatch):
     class Det:
         finds_objects = True
 
-    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None: Det())
+    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None: Det())
     monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
     monkeypatch.setattr(gateway.SensorSender, "start", lambda self: self)
     monkeypatch.setattr(gateway.CheckoutPoller, "start", lambda self: polled.append(self.url) or self)
@@ -964,7 +964,7 @@ def test_run_room_camera_feeds_preview():
     got = []
 
     class P:
-        def update(self, frame, dets, people, area=None):
+        def update(self, frame, dets, people, area=None, floor=None):
             got.append((people, area))
 
     with pytest.raises(StopIteration):
@@ -975,7 +975,7 @@ def test_run_room_camera_feeds_preview():
 
 def test_preview_error_does_not_stop_counting():
     class Broken:
-        def update(self, frame, dets, people, area=None):
+        def update(self, frame, dets, people, area=None, floor=None):
             raise RuntimeError("인코딩 실패")
 
     pushed, seen = [], []
@@ -1182,8 +1182,9 @@ def test_merge_counts_same_object_once():
 
 def test_yolo_detailed_adds_desk_only_when_set():
     class Y(room_camera.YoloDetector):
-        def __init__(self, desk_area):
+        def __init__(self, desk_area, floor_area=None):
             self.desk_area = desk_area
+            self.floor_area = floor_area
             self.calls = 0
 
         def detect(self, frame):
@@ -1195,17 +1196,21 @@ def test_yolo_detailed_adds_desk_only_when_set():
     plain.detect_detailed(frame)
     desk.detect_detailed(frame)
     assert plain.calls == 5 and desk.calls == 10  # 전체+4조각, 책상+책상 4조각
+    both = Y((0.2, 0.2, 0.8, 0.6), (0.0, 0.6, 1.0, 1.0))
+    both.detect_detailed(frame)
+    assert both.calls == 15  # 바닥(FLOOR_AREA)도 바닥+바닥 4조각
 
 
 def test_preview_gets_desk_area_in_pixels():
     got = []
 
     class P:
-        def update(self, frame, dets, people, area=None):
-            got.append(area)
+        def update(self, frame, dets, people, area=None, floor=None):
+            got.append((area, floor))
 
     class D(FakeDetector):
         desk_area = (0.5, 0.5, 1.0, 1.0)
+        floor_area = (0.0, 0.5, 0.5, 1.0)
 
     class Cam:
         frames = [np.zeros((100, 200, 3), dtype=np.uint8)]
@@ -1218,7 +1223,7 @@ def test_preview_gets_desk_area_in_pixels():
     with pytest.raises(StopIteration):
         run_room_camera(RoomWatcher(1), Cam(), D(), lambda e: None,
                         clock=iter(range(100)).__next__, sleep=lambda s: None, preview=P())
-    assert got == [(100, 50, 100, 50)]
+    assert got == [((100, 50, 100, 50), (0, 50, 100, 50))]
 
 
 def test_camera_event_carries_uno_light():

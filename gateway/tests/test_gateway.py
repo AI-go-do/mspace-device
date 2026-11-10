@@ -231,7 +231,10 @@ def test_load_config_desk_area(monkeypatch, capsys):
     assert gateway.load_config({"DESK_AREA": "0.25, 0.22,0.64,0.83"}).desk_area == (0.25, 0.22, 0.64, 0.83)
     for bad in ["0.5,0.5,0.4,0.9", "a,b,c,d", "0.1,0.2,0.3", "0,0,1.5,1"]:
         assert gateway.load_config({"DESK_AREA": bad}).desk_area is None
-    assert "책상 확대는 꺼요" in capsys.readouterr().out
+    assert "DESK_AREA가 이상해서 그 부분 확대는 꺼요" in capsys.readouterr().out
+    assert gateway.load_config({"FLOOR_AREA": "0,0.7,1,1"}).floor_area == (0.0, 0.7, 1.0, 1.0)
+    assert gateway.load_config({"FLOOR_AREA": "1,1,0,0"}).floor_area is None
+    assert "FLOOR_AREA가 이상해서" in capsys.readouterr().out
 
 
 def test_load_config_reads_os_environ(monkeypatch):

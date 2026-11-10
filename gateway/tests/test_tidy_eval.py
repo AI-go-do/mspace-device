@@ -143,7 +143,7 @@ def test_run_score_end_to_end(tmp_path, monkeypatch):
         def detect(self, f):
             return [det("cup")] if f[0, 0, 0] > 100 else []
 
-    monkeypatch.setattr(room_camera, "make_detector", lambda model, area: Fake())
+    monkeypatch.setattr(room_camera, "make_detector", lambda model, area, floor=None: Fake())
     lines = []
     result = te.run_score(str(tmp_path), {"YOLO_MODEL": "m.onnx"}, out=lines.append)
     assert result["right"] == 2 and result["passed"] is True
@@ -170,7 +170,7 @@ def test_run_score_stops_on_broken_photo(tmp_path, monkeypatch):
         def detect(self, f):
             return []
 
-    monkeypatch.setattr(room_camera, "make_detector", lambda model, area: Fake())
+    monkeypatch.setattr(room_camera, "make_detector", lambda model, area, floor=None: Fake())
     with pytest.raises(SystemExit, match="001/before.jpg"):
         te.run_score(str(tmp_path), {"YOLO_MODEL": "m.onnx"}, out=lambda s: None)
 
@@ -317,7 +317,7 @@ def test_skipped_cases_show_in_result_and_table(tmp_path, monkeypatch):
         def detect(self, f):
             return []
 
-    monkeypatch.setattr(room_camera, "make_detector", lambda model, area: Fake())
+    monkeypatch.setattr(room_camera, "make_detector", lambda model, area, floor=None: Fake())
     result = te.run_score(str(tmp_path), {"YOLO_MODEL": "m.onnx"}, out=lambda s: None,
                           clock=lambda: next(ticks))
     assert len(result["skipped"]) == 1 and result["cases"] == 1

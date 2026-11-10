@@ -36,18 +36,20 @@ class Preview:
         self.lock = threading.Lock()
         self.server = None
 
-    def update(self, frame, dets, people, area=None):
+    def update(self, frame, dets, people, area=None, floor=None):
         """상자를 그린 사본을 JPEG로 바꿔 둔다. 원본 frame은 바꾸지 않는다.
 
         area: 책상 부분(DESK_AREA) 픽셀 상자. 있으면 하늘색으로 그려서 책상에 맞는지 보며 고칠 수 있게 한다.
+        floor: 바닥 부분(FLOOR_AREA) 픽셀 상자. 같은 색으로 "floor"라고 그린다.
         """
         import cv2
         img = frame.copy()
         size, thick = text_size(img)
-        if area:
-            x, y, w, h = (int(v) for v in area)
-            cv2.rectangle(img, (x, y), (x + w, y + h), DESK, thick)
-            cv2.putText(img, "desk", (x + 5, y + int(30 * size)), cv2.FONT_HERSHEY_SIMPLEX, size, DESK, thick)
+        for box, name in ((area, "desk"), (floor, "floor")):
+            if box:
+                x, y, w, h = (int(v) for v in box)
+                cv2.rectangle(img, (x, y), (x + w, y + h), DESK, thick)
+                cv2.putText(img, name, (x + 5, y + int(30 * size)), cv2.FONT_HERSHEY_SIMPLEX, size, DESK, thick)
         for d in dets:
             x, y, w, h = (int(v) for v in d.box)
             color = COLORS.get(d.label, OTHER)

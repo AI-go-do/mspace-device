@@ -12,7 +12,7 @@
 
 찍기 (사람이 보이면 저장하지 않는다):
     ROOM_CAMERA=2 YOLO_MODEL=gateway/yolov8s.onnx ~/mspace-venv/bin/python gateway/tidy_eval.py capture
-채점 (게이트웨이와 같은 설정 이름을 쓴다: YOLO_MODEL, DESK_AREA, DESK_PHOTO, DESK_LIGHT, DESK_THRESH, DESK_MIN_AREA, LABEL_MODEL, ROOM_ITEMS):
+채점 (게이트웨이와 같은 설정 이름을 쓴다: YOLO_MODEL, DESK_AREA, FLOOR_AREA, DESK_PHOTO, DESK_LIGHT, DESK_THRESH, DESK_MIN_AREA, LABEL_MODEL, ROOM_ITEMS):
     YOLO_MODEL=gateway/yolov8s.onnx DESK_PHOTO=1 DESK_AREA=... ~/mspace-venv/bin/python gateway/tidy_eval.py score
 여러 후보 한 번에 비교 (eval/tidy/candidates.txt에 한 줄에 하나: `이름 | YOLO_MODEL=... DESK_PHOTO=1`):
     ~/mspace-venv/bin/python gateway/tidy_eval.py compare
@@ -149,7 +149,7 @@ def score(cases, run_case):
 
 def candidate_name(env):
     """채점한 설정을 한 줄로 (README 기록용). 게이트웨이 설정 이름 그대로."""
-    keys = ("YOLO_MODEL", "DESK_PHOTO", "DESK_AREA", "DESK_LIGHT", "DESK_THRESH", "DESK_MIN_AREA",
+    keys = ("YOLO_MODEL", "DESK_PHOTO", "DESK_AREA", "FLOOR_AREA", "DESK_LIGHT", "DESK_THRESH", "DESK_MIN_AREA",
             "LABEL_MODEL", "ROOM_ITEMS")
     parts = [f"{k}={env[k]}" for k in keys if env.get(k)]
     return " ".join(parts) or "(설정 없음)"
@@ -213,7 +213,7 @@ def run_score(folder, env, out=print, as_json=False, clock=time.perf_counter):
     if not config.yolo_model:
         raise SystemExit("YOLO_MODEL을 넣어요. 예: YOLO_MODEL=gateway/yolov8s.onnx")
     loading = clock()
-    detector = room_camera.make_detector(config.yolo_model, config.desk_area)
+    detector = room_camera.make_detector(config.yolo_model, config.desk_area, config.floor_area)
     find = getattr(detector, "detect_detailed", detector.detect)
     use_desk = config.desk_photo and config.desk_area
     if config.desk_photo and not config.desk_area:

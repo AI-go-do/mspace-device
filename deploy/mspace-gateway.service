@@ -1,7 +1,7 @@
 # 젯슨이 켜지면 게이트웨이를 자동으로 켜는 systemd 서비스.
 # 직접 고치지 말고 deploy/install-service.sh 로 설치한다 (@USER@, @REPO@, @PYTHON@을 채워 줌).
 [Unit]
-Description=M-SPACE gateway (keypad, QR, room camera)
+Description=M-SPACE gateway (QR, room camera)
 Wants=network-online.target tailscaled.service
 After=network-online.target tailscaled.service
 

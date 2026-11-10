@@ -1,6 +1,6 @@
 # mspace-device
 
-M-SPACE 디바이스·센서 서비스예요. **문 앞 키패드 체크인**과 **방 안 재실 센서**를 맡아요.
+M-SPACE 디바이스·센서 서비스예요. **문 앞 QR 입실**과 **방 안 재실 센서**를 맡아요.
 
 - 담당: 수연
 - 팀 공통 문서: [AI-go-do/docs](https://github.com/AI-go-do/docs) (요구사항·컨벤션·인프라)
@@ -9,7 +9,7 @@ M-SPACE 디바이스·센서 서비스예요. **문 앞 키패드 체크인**과
 
 | ID | 내용 | 버전 |
 |---|---|---|
-| FR-ACC-001 | 6자리 번호 → 키패드 체크인 | v0.1 |
+| FR-ACC-001 | 입실 번호 확인 → 체크인 (11/10부터 문 앞 카메라 QR만, 키패드 뺌) | v0.1 |
 | FR-DEV-101 | 재실 센서 값 수집 (레이더·조도·CO2 → 서버) | v0.2 |
 | FR-DEV-102 | 방 현황 화면 (지금 비었는지, 다음 예약) | v0.2 |
 | FR-DEV-103 | 자리 비움 자동 퇴실 (10분 비면 알림, 15분이면 퇴실. 앱의 "아직 있어요"는 예약당 1번, 누른 뒤 10분 비면 퇴실) | v0.2 |
@@ -22,8 +22,8 @@ M-SPACE 디바이스·센서 서비스예요. **문 앞 키패드 체크인**과
 
 ```mermaid
 flowchart LR
-    kp[키패드] --> uno[우노]
-    sensor[PIR · 조도] --> uno
+    qr[문 앞 웹캠 QR] --> gw
+    sensor[PIR · 조도] --> uno[우노]
     uno -- USB 시리얼 --> gw[중계<br/>노트북 또는 젯슨]
     gw -- HTTPS --> core[예약 서버 core]
     core -- OK / NO --> gw
@@ -35,7 +35,7 @@ flowchart LR
 
 - 우노는 와이파이가 없어서 USB로 노트북에 보내고, 노트북(`gateway/gateway.py`)이 서버에 대신 전달해요.
 - **ESP32가 메인 장치예요.** 노트북 없이 ESP32 → 서버로 바로 보내요. 보내는 형식이 같아서 서버는 바뀌지 않아요. 지금은 우노+젯슨(1번 방)과 ESP32(2번 방)를 같이 시험해요.
-- 번호가 맞는지는 **서버만 판단**해요. 장치는 번호를 저장하지 않고, 입력을 보내고 결과를 표시만 해요.
+- 번호가 맞는지는 **서버만 판단**해요. 장치는 번호를 저장하지 않고, 읽은 번호를 보내고 결과를 표시만 해요.
 
 ## 3. 진행 상황 (11/10 기준)
 
@@ -43,7 +43,7 @@ flowchart LR
 
 | 영역 | 한 것 | PR |
 |---|---|---|
-| 출입 | 우노 키패드 6자리 → core 확인 → LED, 문 앞 웹캠 QR 입실, ESP32 시험용 키패드 | #1, #20–#22, #25, #26 |
+| 출입 | 문 앞 웹캠 QR → core 확인 → 우노 LED (처음엔 키패드였고 11/10에 뺌) | #1, #20–#22, #25, #26 |
 | 재실 | PIR·조도 → `POST /api/sensor-events`, PIR 2분 유지, 방 안 카메라 인원 세기 + PIR 합치기, 조도 같이 보내기 | #24, #27, #35 |
 | 정리 확인 | 퇴실 뒤 빈 방 물건 비교, 입실 직전 빈 방을 기준으로, 책상 확대·사진 비교, 이름 겹침 정리 | #27, #28, #29, #32 |
 | 공기 | 교육장 MQTT 센서(구독만) → 방 CO2·온도·습도, 가짜 센서(젯슨 안 브로커만)와 방 여러 개 | #33, #36 |
@@ -92,39 +92,35 @@ flowchart LR
 
 | 부품 | 우노 핀 |
 |---|---|
-| 키패드 행 R1~R4 | D11, D10, D9, D8 |
-| 키패드 열 C1~C4 | D7, D6, D5, D4 |
 | 초록 LED (맞음) | D12 → 220Ω → LED → GND |
 | 빨강 LED (틀림) | D13 → 220Ω → LED → GND |
 | PIR (SR501) | VCC → 5V, GND → GND, OUT → **D2** |
 | 조도 (CDS) | 5V → CDS → **A0** → 10kΩ → GND (CDS와 10kΩ 사이를 A0에) |
 | 레이더 (LD2410C) | 우노가 아니라 **ESP32**에 달아요 (아래 "ESP32 방 장치") |
 
-키패드 선에 `R1`·`C1` 같은 라벨이 있으면 왼쪽부터 순서대로가 아니라 **라벨 기준**으로 꽂아요 (C4~C1, R1~R4 순서인 키패드도 있어요).
-키패드를 눌렀는데 다른 숫자가 찍히면 선을 바꾸지 말고 코드의 `rowPins`, `colPins` 순서만 바꿔요.
+배선도·회로도 그림에는 아직 키패드가 그려져 있어요. 11/10에 키패드를 뺐으니 키패드 선은 꽂지 않아도 돼요 (그림은 다음에 고쳐요).
 
 ## 5. 실행 방법
 
-1. 아두이노 IDE → 라이브러리 관리 → **Keypad** (Mark Stanley) 설치
-2. `firmware/uno_sensor_node/uno_sensor_node.ino` 업로드
-3. 시리얼 모니터(115200)에서 `123456#` 입력 → keypad JSON이 찍히는지 확인 → **모니터를 닫아요** (중계와 포트를 같이 못 써요)
-4. 중계 실행
+1. `firmware/uno_sensor_node/uno_sensor_node.ino` 업로드 (따로 설치할 라이브러리 없음)
+2. 시리얼 모니터(115200)에서 occupancy JSON이 10초마다 찍히는지 확인 → **모니터를 닫아요** (중계와 포트를 같이 못 써요)
+3. 중계 실행
    ```bash
    pip3 install -r gateway/requirements.txt
-   DRY_RUN=1 python3 gateway/gateway.py              # 서버 없이 테스트: 123456#만 초록
+   DRY_RUN=1 python3 gateway/gateway.py              # 서버 없이 테스트 (보낼 내용만 화면에)
    echo 'DEVICE_TOKEN=<받은 장치 토큰>' > .env   # 토큰은 .env에만 (저장소에 안 올라가요)
    set -a; . ./.env; set +a                          # .env 값을 불러오기
    SERVER=https://dev-mspace.java21.net python3 gateway/gateway.py   # 토큰이 실리므로 원격 서버는 https만
    SEND_SENSORS=1 SERVER=https://dev-mspace.java21.net python3 gateway/gateway.py   # 재실 센서도 core로 보내기
    ```
-   재실 센서 전송(`SEND_SENSORS=1`)은 core에 `/api/sensor-events`(core #60)가 올라간 뒤 켜요. 키패드를 막지 않게 뒤에서 보내고, 끊기거나 토큰·경로 문제(401·403·404)면 모아 뒀다가 다시 보내요(최대 360개, 약 1시간). 이벤트 자체가 틀린 것(400·409·413·422)만 버려요.
+   재실 센서 전송(`SEND_SENSORS=1`)은 core에 `/api/sensor-events`(core #60)가 올라간 뒤 켜요. QR 확인을 막지 않게 뒤에서 보내고, 끊기거나 토큰·경로 문제(401·403·404)면 모아 뒀다가 다시 보내요(최대 360개, 약 1시간). 이벤트 자체가 틀린 것(400·409·413·422)만 버려요.
    포트는 자동으로 찾아요. 못 찾으면 `PORT=/dev/ttyACM0`처럼 지정해요.
    서버에는 `Authorization: Bearer <장치 토큰>` 헤더로 보내요. 토큰이 없으면 DRY_RUN만 돼요.
    `http://`는 내 컴퓨터에 띄운 core 테스트에서만 써요. 원격 주소에 `http://`를 쓰면 게이트웨이가 시작하지 않아요(토큰 보호).
 
 ### QR 입실 (문 앞 웹캠, 시연용)
 
-8차 회의(11/6)에서 시연을 **카메라 + QR**로 바꿨어요. 키패드는 "1차 시도"로 그대로 두고, 같은 서버 확인(`/api/access/verify`)을 QR로도 해요.
+8차 회의(11/6)에서 시연을 **카메라 + QR**로 바꿨고, 11/10에 키패드는 코드에서 뺐어요. 입실은 이 QR 하나로 서버 확인(`/api/access/verify`)을 해요.
 
 ```bash
 ls /dev/video*                                    # 웹캠 번호 확인 (보통 0)
@@ -133,7 +129,7 @@ QR_CAMERA=0 SEND_SENSORS=1 python3 gateway/gateway.py          # 진짜 서버
 DRY_RUN=1 QR_CAMERA=0 python3 gateway/gateway.py               # 서버 없이: 123456 QR만 초록
 ```
 
-- 흐름: 폰에 QR 띄우기 → 문 앞 웹캠에 비추기 → 젯슨이 읽어 core에 확인 → 우노 LED 초록/빨강 (키패드와 같은 LED)
+- 흐름: 폰에 QR 띄우기 → 문 앞 웹캠에 비추기 → 젯슨이 읽어 core에 확인 → 우노 LED 초록/빨강
 - QR 안의 글자: 입실 번호 6자리(`123456`) 또는 방까지 넣은 `MSPACE:1:123456`. 방 번호는 `QR_ROOM_ID`(기본 1). 다른 방 QR은 서버에 묻지 않고 거부
 - 지금은 예약 때 받은 6자리 번호를 QR로 만들어 비춰요 (QR 만들기 사이트나 앱). 나중에 웹 입실 화면이 QR을 바로 띄우고, core가 "30초마다 바뀌는 코드"를 주면 `qr_door.py`의 `parse_qr()`만 바꾸면 돼요
 - 같은 QR을 계속 비추면 5초 동안은 다시 묻지 않아요
@@ -338,25 +334,10 @@ echo ch341 | sudo tee /etc/modules-load.d/ch341.conf
 | OUT | D27 |
 | TX · RX | 비움 |
 
-**키패드 (시험용, `USE_KEYPAD 1`일 때)**: 2번 방에서도 키패드 체크인이 되는지, 두 방이 동시에 돌아가는지 볼 때만 켜요. 발표·운영에서 빼려면 `config.h`의 `USE_KEYPAD`를 `0`으로 바꾸고 다시 올리면 키패드 코드가 통째로 빠져요(배선은 그냥 둬도 돼요).
-
-| 부품 | ESP32 핀 |
-|---|---|
-| 키패드 행 R1~R4 | 32, 33, 25, 14 |
-| 키패드 열 C1~C4 | 13, 23, 19, 18 |
-| 초록 LED (열림) | 16 → 220Ω → LED → GND |
-| 빨강 LED (거부) | 17 → 220Ω → LED → GND |
-
-- 사용법은 우노와 같아요: 6자리 + `#` → 기다리는 동안 초록 깜빡임 → 초록(열림)/빨강(거부) 1.5초, `*`는 지우기. DRY_RUN이면 `123456`만 열려요
-- 숫자가 다르게 찍히면 선을 바꾸지 말고 `config.h`의 `KEYPAD_ROW_PINS`·`KEYPAD_COL_PINS` 순서만 바꿔요
-- 0·2·12·15번(부팅에 쓰임), 34~39번(입력 전용이라 키패드 행으로 못 씀), 21·22번(CO2 센서 자리)은 피했어요
-- 번호를 확인하는 동안(보통 1초 안) 센서 전송은 잠깐 멈췄다가 이어서 해요. 재실 판단은 1분 기준이라 영향 없어요
-
 **올리기**
 1. 아두이노 IDE → 보드 매니저 → **esp32** (Espressif) 설치, 보드는 `ESP32 Dev Module`
-2. (키패드를 켰으면) 라이브러리 관리 → **Keypad** (Mark Stanley) 설치
-3. `firmware/esp32_room_node/esp32_room_node.ino` 열기 (같은 폴더 파일이 탭으로 같이 열려요) → 업로드
-4. 시리얼 모니터(115200): 레이더 앞에 서면 `재실 2번 방: 있음 (레이더=1)`, 그대로여도 10초마다 한 줄 + `[DRY_RUN] POST ...`
+2. `firmware/esp32_room_node/esp32_room_node.ino` 열기 (같은 폴더 파일이 탭으로 같이 열려요) → 업로드
+3. 시리얼 모니터(115200): 레이더 앞에 서면 `재실 2번 방: 있음 (레이더=1)`, 그대로여도 10초마다 한 줄 + `[DRY_RUN] POST ...`
 
 **와이파이·서버 (준비되면)**
 1. `secrets.h.example`을 `secrets.h`로 복사해서 와이파이(2.4GHz), 서버 주소, 장치 토큰, 인증서 넣기. **GitHub에 안 올라가요**
@@ -367,15 +348,13 @@ echo ch341 | sudo tee /etc/modules-load.d/ch341.conf
 
 | 파일 | 하는 일 |
 |---|---|
-| `config.h` | 방 번호, 핀, 어떤 센서를 달았나(`USE_RADAR`, `USE_PIR`, `USE_KEYPAD`), 주기, DRY_RUN |
+| `config.h` | 방 번호, 핀, 어떤 센서를 달았나(`USE_RADAR`, `USE_PIR`), 주기, DRY_RUN |
 | `secrets.h` | 와이파이·서버 주소·토큰 (복사해서 만듦) |
 | `occupancy.*` | 레이더·PIR 읽기 → "하나라도 있음이면 있음"으로 합치기, 바뀜/10초 판단 |
 | `events.*` | core 형식 이벤트 (새 UUID eventId, 센서가 본 시각 observedAt) |
 | `net.*` | 와이파이 연결·자동 재연결, 인터넷 시계 |
-| `server.*` | 서버 설정 확인(토큰, https 인증서, 원격 http 막기) + POST 한 번. 재실·키패드가 같이 써요 |
+| `server.*` | 서버 설정 확인(토큰, https 인증서, 원격 http 막기) + POST 한 번 |
 | `sender.*` | 큐에 모아 순서대로 전송. 5xx·연결 실패·401·403·404·408·429·리디렉션은 큐를 그대로 두고 같은 eventId로 재시도(1→2→4…30초). 400·409·413·422(이 이벤트 형식 문제)만 버림. 시계(NTP)를 기다리는 동안 1분마다 로그 |
-| `checkin.*` | 키패드 번호를 `/api/access/verify`로 확인. 5xx·연결 실패면 같은 eventId로 1번 더, 그래도 안 되면 거부(게이트웨이와 같음) |
-| `keypad_door.*` | 키패드 읽기 + LED. 기다리는 동안 초록 깜빡임 |
 
 큐는 32개(10초 신호 기준 약 5분)까지 모아요. 와이파이가 5분 넘게 끊기면 그 사이 기록은 오래된 것부터 일부 빠져요(정확도 측정 #13 때 참고). core는 다시 받은 시각부터 10·15분을 새로 재요.
 
@@ -385,7 +364,6 @@ echo ch341 | sudo tee /etc/modules-load.d/ch341.conf
 |---|---|
 | PIR 같이 달기 (정확도 비교, 이슈 #13) | `USE_PIR 1`, OUT → D26. 코드는 이미 있음 |
 | CO2 (FR-DEV-104) | SCD40 읽는 파일 추가 → 1분마다 `makeCo2Event()`로 큐에 넣기. 보내는 쪽은 그대로 |
-| 키패드 체크인 (FR-ACC-001) | 코드 있음 (`USE_KEYPAD 1`). 방마다 ESP32 하나에 키패드까지 달면 젯슨 없이 체크인 |
 | 방 늘리기 | 같은 코드에 `ROOM_ID`·`DEVICE_ID`·토큰만 바꿔서 올리기 |
 
 ### 게이트웨이 구조
@@ -396,8 +374,8 @@ echo ch341 | sudo tee /etc/modules-load.d/ch341.conf
 |---|---|
 | `Config`, `load_config()` | 설정값(서버 주소, DRY_RUN, 토큰, 포트)을 한곳에 모음 |
 | `find_port()` | 우노가 꽂힌 USB 포트 찾기 |
-| `DryRunVerifier` / `HttpVerifier` | 번호 확인기. 같은 `verify(body)` 모양이라 연습용·진짜 서버를 바꿔 끼움 |
-| `handle_line()` + `HANDLERS` | 한 줄을 받아 `sensorType`별 처리기로 보냄 (`keypad`, `occupancy`) |
+| `DryRunVerifier` / `HttpVerifier` | 번호 확인기 (QR이 씀). 같은 `verify(body)` 모양이라 연습용·진짜 서버를 바꿔 끼움 |
+| `handle_line()` + `HANDLERS` | 한 줄을 받아 `sensorType`별 처리기로 보냄 (`occupancy`. 옛 `keypad` 줄은 건너뜀) |
 | `handle_occupancy()` | 우노 재실 줄을 core 형식(`kind: OCCUPANCY`, `occupied`, `sources`, `observedAt`)으로 바꿈 |
 | `main()` | 위 부품을 조립하고 시리얼을 계속 읽음 |
 | `qr_door.py` | 문 앞 웹캠 QR 입실 (`QR_CAMERA`). `QrDoor`가 QR 글자 → 같은 확인기 → OK/NO, `run_camera()`가 카메라에서 QR을 찾음 |
@@ -419,19 +397,18 @@ pytest --cov --cov-report=term-missing   # 우노·서버 없이 가짜 시리�
 | 확인 | 내용 | 합치기 조건 |
 |---|---|---|
 | `test` | 게이트웨이 테스트 + 커버리지 | develop · main 모두 통과해야 함 |
-| `firmware` | 우노 펌웨어 컴파일 (Keypad 포함) | develop · main 모두 통과해야 함 |
+| `firmware` | 우노 펌웨어 컴파일 | develop · main 모두 통과해야 함 |
 | `sonar` | 학교 SonarQube 서버 분석 (Secrets: `SONAR_HOST_URL`, `SONAR_TOKEN`) | develop은 결과 표시만, **main은 새 코드 커버리지 80% 이상** (품질 게이트) |
 | CodeRabbit | AI 리뷰 (한국어) | 참고용. 팀원 1명 승인은 따로 필요 |
 
 ## 6. 이벤트 형식과 eventId
 
 ```json
-{"eventId":"1-48213-18","roomId":1,"sensorType":"keypad","code":"123456","ms":12890}
 {"eventId":"1-48213-19","roomId":1,"sensorType":"occupancy","pir":1,"light":512,"ms":13000}
 ```
 
 - `eventId` = 방 번호 - 부팅 횟수 - 순서
-- 와이파이가 끊겨 중계가 같은 이벤트를 다시 보내도(최대 2번) 서버가 같은 eventId는 **한 번만 저장**해요 (중복 제거)
+- 중계가 같은 이벤트를 다시 보내도 서버가 같은 eventId는 **한 번만 저장**해요 (중복 제거)
 - 가운데 부팅 횟수는 우노 EEPROM(전원을 꺼도 남는 메모리)에 저장돼서, 우노를 껐다 켜서 순서가 0부터 다시 시작해도 번호가 겹치지 않게 해요. 새 보드는 랜덤한 큰 수에서 시작해서 보드를 바꿔도 예전 번호와 겹치지 않아요
 - 서버에는 이 값을 **UUID로 바꿔서** 보내요 (uuid5). 같은 입력이면 항상 같은 UUID라서 재전송해도 중복 제거가 그대로 돼요
 
@@ -442,11 +419,11 @@ pytest --cov --cov-report=term-missing   # 우노·서버 없이 가짜 시리�
 **출입 확인 (지영님 형식에 맞춤)**
 
 ```json
-요청: {"eventId": "uuid", "roomId": 1, "deviceId": "keypad-1", "code": "123456"}
+요청: {"eventId": "uuid", "roomId": 1, "deviceId": "qr-1", "code": "123456"}
 응답: {"result": "OPENED"}  또는  {"result": "DENIED", "reason": "WRONG_CODE"}
 ```
 
-`#`을 누르면 답이 올 때까지 **초록 LED가 깜빡여요(확인 중)**. 깜빡이는 동안 누른 `#`은 무시해요. 중계는 `OPENED`일 때만 초록 LED, 그 밖에는(서버 응답 없음 포함) 빨간 LED를 켜요. 우노가 9초 넘게 답을 못 받으면(USB 빠짐 등) 스스로 빨간 LED를 켜요. 거부 이유는 로그에 남겨요.
+중계는 `OPENED`일 때만 초록 LED, 그 밖에는(서버 응답 없음 포함) 빨간 LED를 켜요. 거부 이유는 로그에 남겨요.
 
 | 아직 정할 것 | 내용 |
 |---|---|
@@ -481,8 +458,8 @@ pytest --cov --cov-report=term-missing   # 우노·서버 없이 가짜 시리�
 ## 폴더 구조
 
 ```
-firmware/uno_sensor_node/   우노 코드 (키패드 · PIR · 조도) → 1번 방
-firmware/esp32_room_node/   ESP32 메인 장치 (레이더 → 와이파이로 core 직접, 시험용 키패드) → 2번 방
+firmware/uno_sensor_node/   우노 코드 (PIR · 조도 · 결과 LED) → 1번 방
+firmware/esp32_room_node/   ESP32 메인 장치 (레이더 → 와이파이로 core 직접) → 2번 방
 gateway/                    중계 (노트북·젯슨)
 docs/                       배선도·회로도 (png, svg)
 ```

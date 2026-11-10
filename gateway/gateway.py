@@ -1,12 +1,12 @@
 """M-SPACE 게이트웨이 (노트북/젯슨용)
 
-우노가 USB 시리얼로 보내는 키패드 번호(JSON 한 줄)를 읽어서 서버에 물어보고,
-결과를 우노에 OK/NO로 돌려준다 (FR-ACC-001).
-재실 센서(PIR·조도) 줄은 core 형식(docs/sensor-events-api.md)으로 바꿔 화면에 찍고,
-SEND_SENSORS=1이면 core POST /api/sensor-events로 보낸다 (FR-DEV-101). 키패드를 막지 않게 뒤에서(스레드) 보낸다.
+문 앞 웹캠 QR 입실(qr_door.py)을 서버에 물어보고, 결과를 우노에 OK/NO로 돌려줘 LED를 켠다 (FR-ACC-001).
+키패드 입력은 11/10에 뺐다 (QR 입실만 씀).
+우노가 USB 시리얼로 보내는 재실 센서(PIR·조도) 줄은 core 형식(docs/sensor-events-api.md)으로 바꿔 화면에 찍고,
+SEND_SENSORS=1이면 core POST /api/sensor-events로 보낸다 (FR-DEV-101). 시리얼 읽기를 막지 않게 뒤에서(스레드) 보낸다.
 
 출입 확인 API (core 담당 지영과 맞춘 형식):
-  요청: {"eventId": "uuid", "roomId": 1, "deviceId": "keypad-1", "code": "123456"}
+  요청: {"eventId": "uuid", "roomId": 1, "deviceId": "qr-1", "code": "123456"}
         헤더 Authorization: Bearer <장치 토큰>
   응답: {"result": "OPENED"}  또는  {"result": "DENIED", "reason": "WRONG_CODE"}
 
@@ -19,7 +19,7 @@ SEND_SENSORS=1이면 core POST /api/sensor-events로 보낸다 (FR-DEV-101). 키
   HttpVerifier            : 진짜 서버에 묻는다 (토큰, 재시도)
   SensorSender            : 재실 이벤트를 줄 세워 뒤에서 core로 보낸다 (재시도, 끊겨도 모아 둠)
   handle_occupancy()      : 재실 센서 줄을 core 형식으로 바꿔 화면에 찍고 SensorSender에 넘긴다
-  handle_line()           : 우노가 보낸 한 줄을 받아 우노에 돌려줄 답(OK/NO)을 만든다
+  handle_line()           : 우노가 보낸 한 줄을 sensorType별 처리기(HANDLERS)로 보낸다
   main()                  : 위 부품을 조립해서 시리얼을 계속 읽는다
   qr_door.py (QR_CAMERA)  : 문 앞 웹캠으로 QR 입실. 같은 확인기로 묻고 결과를 우노 LED로 보낸다
   room_camera.py (ROOM_CAMERA) : 방 안 웹캠으로 인원 세기 + 퇴실 뒤 정리 확인. 사진은 저장·전송 안 함
@@ -72,7 +72,7 @@ class Config:
     """게이트웨이 설정값 묶음. 코드를 고치지 않고 실행할 때 환경변수로 바꾼다."""
     server: str = "http://localhost:8080"  # 예약 서버(core) 주소
     dry_run: bool = False                  # True면 서버에 안 보내고 화면에만 찍는다 (서버 없이 테스트용)
-    device_token: str | None = None        # 장치 토큰. 서버가 "등록된 키패드"인지 확인하는 값. 저장소에 넣지 않고 .env에만 둔다
+    device_token: str | None = None        # 장치 토큰. 서버가 "등록된 장치"인지 확인하는 값. 저장소에 넣지 않고 .env에만 둔다
     port: str | None = None                # 우노가 꽂힌 USB 포트. 못 찾으면 None
     send_sensors: bool = False             # True면 재실 이벤트도 core로 보낸다 (core에 센서 API가 올라간 뒤 켠다)
     qr_camera: str | None = None           # QR 입실용 웹캠 (0, 1 또는 /dev/video0). 비우면 QR 끔
@@ -292,7 +292,7 @@ class SensorSender:
     - 2xx(STORED/DUPLICATE)면 성공, 400·409·413·422는 그 이벤트만 버린다
     - 401·403·404·408·429·5xx·연결 실패는 버리지 않고 간격을 늘려 같은 eventId로 다시 보낸다
       (토큰·서버 설정을 고치는 동안 기록이 사라지지 않게)
-    - 키패드 응답이 늦어지지 않게 별도 스레드에서 보낸다
+    - 시리얼 읽기·QR 답이 늦어지지 않게 별도 스레드에서 보낸다
     """
 
     def __init__(self, server, token, path="/api/sensor-events", drop=SENSOR_DROP, name="센서 전송"):
@@ -429,37 +429,6 @@ def to_uuid(raw_id):
 
 
 EVENT_ID_RE = re.compile(r"[0-9]+-[0-9]+-[0-9]+")  # 우노 형식: 방번호-부팅번호-순번
-CODE_RE = re.compile(r"[0-9]{6}")                   # 숫자 6자리 (0~9만. ² 같은 다른 숫자 글자는 안 됨)
-
-
-def valid_keypad(event):
-    """우노가 보내는 키패드 줄 형식인지 확인한다. 형식이 다르면 False (게이트웨이가 멈추지 않게)."""
-    eid, room, code = event.get("eventId"), event.get("roomId"), event.get("code")
-    return (
-        isinstance(eid, str) and EVENT_ID_RE.fullmatch(eid) is not None
-        and isinstance(room, int) and not isinstance(room, bool)  # True/False도 int로 취급되므로 따로 막는다
-        and isinstance(code, str) and CODE_RE.fullmatch(code) is not None
-    )
-
-
-def handle_keypad(event, verifier):
-    """키패드 줄: 서버에 번호를 묻고 우노에 돌려줄 답(OK/NO)을 만든다."""
-    if not valid_keypad(event):  # 형식이 어긋난 줄은 건너뛴다 (우노 코드와 같은 형식만 받는다)
-        print("형식이 맞지 않는 줄, 건너뜀")
-        return None
-    # 출입 확인은 지영과 맞춘 4개 필드만 보낸다
-    body = {
-        "eventId": to_uuid(event["eventId"]),  # 서버 형식(UUID)으로 바꾼다
-        "roomId": event["roomId"],
-        "deviceId": f"keypad-{event['roomId']}",  # 방마다 키패드 1개라서 방 번호로 이름을 붙인다
-        "code": event["code"],
-    }
-    res = verifier.verify(body)  # res = 서버의 판단 결과. 예: {"result": "OPENED"}
-    res = res if isinstance(res, dict) else {}  # 응답이 없거나 이상한 형식이면 빈 응답으로 본다
-    ok = res.get("result") == "OPENED"  # 열림일 때만 True. 서버 응답이 없으면 안전하게 거부(False)
-    reason = "" if ok else res.get("reason", "서버 응답 없음")  # 거부 이유. 나중에 5회 잠금 기능에 쓴다
-    print("출입", body["eventId"], "->", "열림" if ok else f"거부 ({reason})")
-    return b"OK\n" if ok else b"NO\n"
 
 
 def is_int(value):
@@ -557,8 +526,7 @@ def with_light(push, room):
 
 # sensorType별 처리기 표. 새 센서 줄은 여기에 한 줄씩 추가한다
 HANDLERS = {
-    "keypad": handle_keypad,
-    "occupancy": handle_occupancy,
+    "occupancy": handle_occupancy,  # 키패드(keypad)는 11/10에 뺐다. 옛 우노가 보내도 표에 없어 건너뛴다
 }
 
 
@@ -577,9 +545,7 @@ def handle_line(line, verifier, sensors=None):
     handler = HANDLERS.get(sensor_type) if isinstance(sensor_type, str) else None
     if handler is None:
         return None
-    if handler is handle_occupancy:
-        return handler(event, verifier, sensors)
-    return handler(event, verifier)
+    return handler(event, verifier, sensors)
 
 
 # ---------- 실행 ----------
@@ -607,7 +573,7 @@ def main(config=None):
     if not cameras_only:
         ser = serial.Serial(config.port, 115200, timeout=1)  # ser = 우노와 연결된 시리얼 통로. 115200은 우노 코드와 같은 속도
         time.sleep(2)  # 우노는 시리얼 연결 시 재부팅되므로 켜질 때까지 기다린다
-    write_lock = threading.Lock()  # 키패드 답과 QR 답이 동시에 우노로 가도 줄이 섞이지 않게
+    write_lock = threading.Lock()  # QR 답이 여러 스레드에서 우노로 가도 줄이 섞이지 않게
 
     def reply_to_uno(reply):
         if ser is None:  # 우노 없이 카메라만 시험할 때는 LED 대신 화면에
@@ -767,7 +733,7 @@ def start_room_camera(config, sensors):
 
 
 def start_qr(config, verifier, on_reply):
-    """문 앞 웹캠 QR 입실을 뒤에서(스레드) 켠다. 키패드와 같은 확인기, 같은 우노 LED를 쓴다."""
+    """문 앞 웹캠 QR 입실을 뒤에서(스레드) 켠다. 확인기로 묻고 결과를 우노 LED로 보낸다."""
     import qr_door  # QR을 켤 때만 불러온다
     door = qr_door.QrDoor(verifier, config.qr_room_id)
     frames = qr_door.open_camera(config.qr_camera)  # 스레드 전에 연다: 카메라가 없으면 바로 멈추고 알려줌

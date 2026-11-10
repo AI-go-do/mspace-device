@@ -43,10 +43,6 @@ class FakeResponse:
         return self.body
 
 
-def keypad_line(code, seq=1):
-    return json.dumps({"eventId": f"1-48213-{seq}", "roomId": 1, "sensorType": "keypad", "code": code, "ms": 10})
-
-
 def pir_line(value, seq=1):  # 처리기 표에 없는 sensorType 예시
     return json.dumps({"eventId": f"1-48213-{seq}", "roomId": 1, "sensorType": "pir", "value": value, "ms": 10})
 
@@ -95,113 +91,86 @@ def test_to_uuid_is_valid_and_stable():
     assert a != gateway.to_uuid("1-48213-18")
 
 
-# ---- 출입 확인 (지영과 맞춘 형식) ----
+# ---- 출입 확인 (QR 입실이 쓰는 HttpVerifier, 지영과 맞춘 형식) ----
 
-def test_keypad_opened_sends_ok(run):
-    written, sent = run([keypad_line("123456")], [FakeResponse({"result": "OPENED"})])
-    assert written == [b"OK\n"]
-    url, body = sent[0]
-    assert url.endswith("/api/access/verify")
-    assert set(body) == {"eventId", "roomId", "deviceId", "code"}  # 4개 필드만
-    assert body["deviceId"] == "keypad-1"
-    assert body["eventId"] == gateway.to_uuid("1-48213-1")
+ACCESS_BODY = {"eventId": "67e130b8-f207-50cb-8d21-46c7ff5ac2a5", "roomId": 1, "deviceId": "qr-1", "code": "123456"}
 
 
-def test_keypad_denied_sends_no(run, capsys):
-    written, _ = run([keypad_line("111111")], [FakeResponse({"result": "DENIED", "reason": "WRONG_CODE"})])
-    assert written == [b"NO\n"]
-    out = capsys.readouterr().out
-    assert "WRONG_CODE" in out  # 거부 이유가 로그에 남는다
-    assert "111111" not in out  # 번호(비밀)는 로그에 안 남는다
+@pytest.fixture
+def verify(monkeypatch):
+    """가짜 서버 응답을 차례로 주고 HttpVerifier.verify를 부른다. (결과, 보낸 요청, 기다린 초)"""
+    def _verify(responses, server="http://127.0.0.1:8411"):
+        sent, waits = [], []
+        queue = list(responses)
+        monkeypatch.setattr(gateway.time, "sleep", waits.append)
+
+        def fake_post(url, json=None, timeout=None, headers=None, proxies=None, allow_redirects=True):
+            sent.append((url, json))
+            assert allow_redirects is False  # 리디렉션은 따라가지 않는다
+            assert proxies == {"http": None, "https": None}  # 테스트 서버는 localhost라 프록시를 안 거친다
+            assert headers == {"Authorization": "Bearer test-token"}  # 장치 토큰을 항상 같이 보낸다
+            r = queue.pop(0)
+            if isinstance(r, Exception):
+                raise r
+            return r
+
+        monkeypatch.setattr(gateway.requests, "post", fake_post)
+        return gateway.HttpVerifier(server, "test-token").verify(dict(ACCESS_BODY)), sent, waits
+
+    return _verify
 
 
-def test_keypad_server_down_is_denied(run):
-    # 서버가 3번 다 실패하면 안전하게 거부한다
-    errors = [requests.ConnectionError("down")] * gateway.RETRIES
-    written, sent = run([keypad_line("123456")], errors)
-    assert written == [b"NO\n"]
-    assert len(sent) == gateway.RETRIES
+def test_verify_opened(verify):
+    res, sent, _ = verify([FakeResponse({"result": "OPENED"})])
+    assert res == {"result": "OPENED"}
+    assert sent[0] == ("http://127.0.0.1:8411/api/access/verify", ACCESS_BODY)
+
+
+def test_verify_server_down_gives_none_and_retries_same_event(verify):
+    res, sent, waits = verify([requests.ConnectionError("down")] * gateway.RETRIES)
+    assert res is None and len(sent) == gateway.RETRIES
     assert len({s[1]["eventId"] for s in sent}) == 1  # 재시도는 같은 eventId로
+    assert waits == [1]  # 재시도 전 1초. 마지막 실패 뒤에는 기다리지 않는다
 
 
-def test_retry_then_success(run):
-    written, sent = run([keypad_line("123456")], [FakeResponse(status=500), FakeResponse({"result": "OPENED"})])
-    assert written == [b"OK\n"]
-    assert len(sent) == 2
+@pytest.mark.parametrize("first", [FakeResponse(status=500), FakeResponse({}, status=503)])
+def test_verify_5xx_is_retried(verify, first):
+    res, sent, _ = verify([first, FakeResponse({"result": "OPENED"})])
+    assert res == {"result": "OPENED"} and len(sent) == 2
 
 
-# ---- 키패드가 아닌 줄 ----
-
-def test_ignores_non_keypad_events(run):
-    # 재실 센서 전달은 아직 안 한다 (다음 단계). 서버로 아무것도 안 보낸다
-    written, sent = run([pir_line(1)])
-    assert sent == [] and written == []
+def test_verify_4xx_is_not_retried(verify, capsys):
+    res, sent, _ = verify([FakeResponse({}, status=401)])
+    assert res is None and len(sent) == 1 and "401" in capsys.readouterr().out
 
 
-def test_skips_non_json_lines(run, capsys):
-    _, sent = run(["", "hello", '{"code":"654321"', keypad_line("123456")], [FakeResponse({"result": "OPENED"})])
-    assert len(sent) == 1  # 깨진 줄은 건너뛰고 정상 줄만 보낸다
+def test_verify_redirect_is_not_followed(verify):
+    res, sent, _ = verify([FakeResponse({"result": "OPENED"}, status=307)])
+    assert res is None and len(sent) == 1  # 3xx는 열지 않고, 다시 보내지도 않는다
+
+
+def test_verify_empty_body_is_empty_answer(verify):
+    assert verify([FakeResponse(None)])[0] == {}  # QrDoor가 빈 답을 거부로 본다
+
+
+def test_dry_run_verifier_opens_only_123456(capsys):
+    v = gateway.DryRunVerifier()
+    assert v.verify(ACCESS_BODY) == {"result": "OPENED"}
+    assert v.verify({**ACCESS_BODY, "code": "999999"})["result"] == "DENIED"
     out = capsys.readouterr().out
-    assert "JSON 아님" in out
-    assert "654321" not in out  # 깨진 줄에 섞인 번호도 로그에 안 남는다
+    assert "[DRY_RUN]" in out and "123456" not in out  # 번호는 로그에 안 남는다
 
 
-def test_empty_response_body_is_denied(run):
-    written, _ = run([keypad_line("123456")], [FakeResponse(None)])
-    assert written == [b"NO\n"]  # 서버가 빈 응답이면 안전하게 거부
-
-
-def test_non_dict_response_is_denied(run):
-    written, _ = run([keypad_line("123456")], [FakeResponse(["OPENED"])])
-    assert written == [b"NO\n"]  # 응답 형식이 이상해도 멈추지 않고 거부
-
-
-@pytest.mark.parametrize("bad", [
-    {"eventId": "1-1-1", "roomId": 1},                     # code 없음
-    {"eventId": None, "roomId": 1, "code": "123456"},      # eventId가 글자가 아님
-    {"eventId": "1-1-1", "roomId": True, "code": "123456"},  # roomId가 정수가 아님
-    {"eventId": "1-1-1", "roomId": 1, "code": "12a456"},   # code가 숫자 6자리가 아님
-    {"eventId": "1-1-1", "roomId": 1, "code": "²²²²²²"},   # 0~9가 아닌 숫자 글자
-    {"eventId": "\ud800", "roomId": 1, "code": "123456"},  # 깨진 글자 (UUID 변환에서 오류 나던 값)
-])
-def test_skips_malformed_keypad_line(run, bad):
-    line = json.dumps({**bad, "sensorType": "keypad"})
-    written, sent = run([line, keypad_line("123456")], [FakeResponse({"result": "OPENED"})])
-    assert written == [b"OK\n"] and len(sent) == 1  # 이상한 줄은 건너뛰고 다음 줄은 처리
-
-
-def test_no_wait_after_last_retry(run, monkeypatch):
-    waits = []
-    monkeypatch.setattr(gateway.time, "sleep", waits.append)
-    run([keypad_line("123456")], [requests.ConnectionError("down")] * gateway.RETRIES)
-    assert waits == [2, 1]  # 우노 켜짐 대기 2초, 재시도 전 1초. 마지막 실패 뒤에는 기다리지 않는다
-
-
-def test_4xx_is_not_retried(run, capsys):
-    written, sent = run([keypad_line("123456")], [FakeResponse({}, status=401)])
-    assert written == [b"NO\n"]
-    assert len(sent) == 1  # 401은 다시 보내도 같으니 한 번만 보낸다
-    assert "401" in capsys.readouterr().out
-
-
-def test_5xx_is_retried(run):
-    written, sent = run([keypad_line("123456")], [FakeResponse({}, status=503), FakeResponse({"result": "OPENED"})])
-    assert written == [b"OK\n"] and len(sent) == 2  # 서버 오류는 다시 보내서 성공
+def test_keypad_line_is_ignored(run):
+    """키패드는 뺐다(11/10). 예전 우노가 keypad 줄을 보내도 서버에 묻지 않고, 깨진 줄도 건너뛴다."""
+    line = json.dumps({"eventId": "1-1-1", "roomId": 1, "sensorType": "keypad", "code": "123456", "ms": 1})
+    written, sent = run([line, "", "hello", '{"code":"654321"', occ_line()], dry_run=True, token=None)
+    assert written == [] and sent == []
 
 
 def test_missing_token_exits():
     with pytest.raises(SystemExit):
         gateway.main(gateway.Config(port="/dev/fake", dry_run=False, device_token=None))
-
-
-# ---- 서버 없이 테스트 (DRY_RUN) ----
-
-def test_dry_run(run, capsys):
-    # DRY_RUN은 토큰 없이 된다
-    written, sent = run([keypad_line("123456", 1), keypad_line("999999", 2), pir_line(1, 3)], dry_run=True, token=None)
-    assert written == [b"OK\n", b"NO\n"]
-    assert sent == []  # 서버로는 아무것도 안 보낸다
-    assert "[DRY_RUN]" in capsys.readouterr().out
 
 
 def test_no_port_exits():
@@ -222,11 +191,6 @@ def test_no_port_exits():
 ])
 def test_is_safe_server(server, ok):
     assert gateway.is_safe_server(server) is ok
-
-
-def test_redirect_is_denied(run):
-    written, sent = run([keypad_line("123456")], [FakeResponse({"result": "OPENED"}, status=307)])
-    assert written == [b"NO\n"] and len(sent) == 1  # 3xx는 열지 않고, 다시 보내지도 않는다
 
 
 def test_remote_server_uses_env_proxy():
@@ -299,12 +263,6 @@ class FakeVerifier:
     def verify(self, body):
         self.bodies.append(body)
         return self.answer
-
-
-def test_handle_line_without_serial():
-    v = FakeVerifier({"result": "OPENED"})
-    assert gateway.handle_line(keypad_line("123456") + "\n", v) == b"OK\n"
-    assert v.bodies[0]["code"] == "123456"
 
 
 def test_handle_line_ignores_json_that_is_not_object():
@@ -383,11 +341,6 @@ def test_occupancy_bad_line_skipped(field, value, capsys):
     event[field] = value
     assert gateway.handle_line(json.dumps(event), gateway.DryRunVerifier()) is None
     assert "형식이 맞지 않는 센서 줄" in capsys.readouterr().out
-
-
-def test_occupancy_between_keypad_lines(run):
-    written, _ = run([keypad_line("123456", 1), occ_line(seq=2), keypad_line("999999", 3)], dry_run=True, token=None)
-    assert written == [b"OK\n", b"NO\n"]  # 센서 줄이 끼어도 키패드 답 순서는 그대로
 
 
 # ---- 재실 이벤트 전송 (SensorSender) ----

@@ -25,6 +25,7 @@ SEND_SENSORS=1이면 core POST /api/sensor-events로 보낸다 (FR-DEV-101). 키
   room_camera.py (ROOM_CAMERA) : 방 안 웹캠으로 인원 세기 + 퇴실 뒤 정리 확인. 사진은 저장·전송 안 함
   room_env.py (MQTT_ROOM)      : 교육장 MQTT 센서(CO2·온도·습도)를 그 방 값으로 core에 보냄. 구독만 함
   fake_env_sensors.py          : 젯슨 안 브로커에 방마다 가짜 CO2·온도·습도를 올린다 (진짜 센서가 멈췄을 때 시연용)
+  sensor_adapters.py           : 위 센서들(우노·카메라·MQTT)이 core로 내보내는 공통 모양 (어댑터 패턴, FR-DEV-101)
 
 설치:  pip3 install pyserial requests
 실행:  DRY_RUN=1 python3 gateway.py

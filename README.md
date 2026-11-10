@@ -404,6 +404,7 @@ echo ch341 | sudo tee /etc/modules-load.d/ch341.conf
 | `room_camera.py` | 방 안 웹캠 (`ROOM_CAMERA`). `RoomWatcher`가 사람 수 → 재실 이벤트, 빈 방이 되면 정리 확인. `YoloDetector`(모델 있을 때) / `HogPersonDetector`(없을 때) |
 | `room_env.py` | 교육장 MQTT 센서 (`MQTT_ROOM`). `RoomEnv`가 업링크 → 중복·미래 시각 정리 → 기기별 최근 값 평균 → 1분마다 CO2 이벤트, `RoomRouter`는 방 여러 개(`MQTT_ROOMS`), `make_client()`는 구독만 하는 paho 클라이언트 |
 | `fake_env_sensors.py` | 가짜 교육장 센서. 젯슨 안 브로커(localhost)에만 방마다 CO2·온도·습도 업링크를 1분마다 올림 (CO2 상한 950) |
+| `sensor_adapters.py` | 센서 어댑터의 공통 모양. 센서마다 다른 입력(우노 시리얼·MQTT·카메라)을 core 이벤트 한 모양(`OccupancyEvent`·`Co2Event`)으로 바꿔 `push` 한 곳으로 보냄. `ADAPTERS` 표에 지금 있는 어댑터 3개, `check_event()`로 모양 확인. 새 센서는 어댑터 하나 + 표 한 줄 |
 | `tidy_eval.py` | 정리 확인 채점. `capture`로 시험 사진 쌍과 정답을 모으고, `score`로 지금 설정의 정확도·심각한 오류·시간을 재고, `compare`로 여러 후보를 한 표로 비교 |
 
 ### 테스트

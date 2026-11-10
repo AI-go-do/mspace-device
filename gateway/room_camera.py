@@ -194,6 +194,8 @@ def detect_tiled(detect, frame):
     whole = list(detect(frame))
     extra = []
     for x, y, tw, th in tile_boxes(w, h):
+        if tw < 2 or th < 2:
+            continue  # 아주 작은 부분(DESK_AREA·FLOOR_AREA가 몇 픽셀)이면 조각이 비어서 모델이 오류를 낸다
         for d in detect(frame[y:y + th, x:x + tw]):
             bx, by, bw, bh = d.box
             if cut_by_tile(d.box, x, y, tw, th, w, h):

@@ -17,6 +17,7 @@ WORK_WIDTH = 640     # 비교는 책상을 이 폭으로 줄여서 한다 (빠�
 DIFF_THRESH = 35     # 밝기 차이가 이보다 크면 "달라짐" (0~255)
 MIN_AREA = 0.0012    # 책상 넓이의 이 비율보다 작은 차이는 무시 (먼지·잡음). 640폭에서 약 22×22
 MAX_AREA = 0.35      # 이보다 크면 물건이 아니라 조명·카메라가 바뀐 것으로 본다
+LIGHT_BLUR = 0.05    # DESK_LIGHT=local: 책상 폭의 이 비율 크기로 흐린 사진(= 그 자리 밝기)으로 나눠서 비교한다
 
 
 def desk_box(width, height, area):
@@ -45,13 +46,28 @@ def match_light(base, now):
     return np.clip(now.astype(np.float32) * (float(base.mean()) / mean_now), 0, 255).astype(np.uint8)
 
 
-def find_changes(base, now, thresh=DIFF_THRESH, min_area=MIN_AREA, max_area=MAX_AREA):
-    """두 책상 사진(prepare 결과)에서 달라진 곳 상자 (x, y, w, h) 목록. 조명이 통째로 바뀌었으면 None."""
+def flatten_light(img):
+    """자리마다 밝기를 고르게 한다 (블라인드·문틈 빛처럼 한쪽만 밝아진 것은 지우고 물건 가장자리는 남김)."""
+    import cv2
+    import numpy as np
+    sigma = max(1.0, img.shape[1] * LIGHT_BLUR)
+    glow = cv2.GaussianBlur(img.astype(np.float32), (0, 0), sigma) + 1.0
+    return np.clip(img.astype(np.float32) / glow * 128.0, 0, 255).astype(np.uint8)
+
+
+def find_changes(base, now, thresh=DIFF_THRESH, min_area=MIN_AREA, max_area=MAX_AREA, light="mean"):
+    """두 책상 사진(prepare 결과)에서 달라진 곳 상자 (x, y, w, h) 목록. 조명이 통째로 바뀌었으면 None.
+
+    light="mean": 사진 전체 밝기만 맞춘다 (원래 방식). "local": 자리마다 밝기를 고르게 한 뒤 비교한다.
+    """
     import cv2
     import numpy as np
     if base.shape != now.shape:
         return None
-    diff = cv2.absdiff(base, match_light(base, now))
+    if light == "local":
+        diff = cv2.absdiff(flatten_light(base), flatten_light(now))
+    else:
+        diff = cv2.absdiff(base, match_light(base, now))
     _, mask = cv2.threshold(diff, thresh, 255, cv2.THRESH_BINARY)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))       # 점 잡음 지우기
     mask = cv2.dilate(mask, np.ones((9, 9), np.uint8), iterations=2)                # 한 물건 조각 잇기
@@ -99,8 +115,9 @@ def fingerprint(img):
 class DeskCompare:
     """깨끗한 책상 사진 한 장을 들고 있다가 퇴실 뒤 책상과 비교한다."""
 
-    def __init__(self, area, path=None):
+    def __init__(self, area, path=None, thresh=DIFF_THRESH, min_area=MIN_AREA, light="mean"):
         self.area = area
+        self.tune = {"thresh": thresh, "min_area": min_area, "light": light}  # DESK_THRESH·DESK_MIN_AREA·DESK_LIGHT
         self.path = path              # 껐다 켜도 남게 저장할 파일 (.png). None이면 메모리에만
         self.base = None              # 깨끗한 책상 (prepare 결과)
         self.known = []               # 기준 때 모델이 찾은 물건 자리 (리모컨을 옮기면 빈 자리도 "달라짐"이라 뺀다)
@@ -173,7 +190,12 @@ class DeskCompare:
         if self.base is None:
             return None
         now, offset = prepare(frame, self.area)
-        found = find_changes(self.base, now)
+        found = find_changes(self.base, now, **self.tune)
         if found is None:
             return None
         return [to_frame(b, offset) for b in found]
+
+
+def settings(config):
+    """게이트웨이 설정(DESK_THRESH, DESK_MIN_AREA, DESK_LIGHT) → DeskCompare에 넘길 값."""
+    return {"thresh": config.desk_thresh, "min_area": config.desk_min_area, "light": config.desk_light}

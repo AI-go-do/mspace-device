@@ -12,7 +12,7 @@
 
 찍기 (사람이 보이면 저장하지 않는다):
     ROOM_CAMERA=2 YOLO_MODEL=gateway/yolov8s.onnx ~/mspace-venv/bin/python gateway/tidy_eval.py capture
-채점 (게이트웨이와 같은 설정 이름을 쓴다: YOLO_MODEL, DESK_AREA, DESK_PHOTO, LABEL_MODEL, ROOM_ITEMS):
+채점 (게이트웨이와 같은 설정 이름을 쓴다: YOLO_MODEL, DESK_AREA, DESK_PHOTO, DESK_LIGHT, DESK_THRESH, DESK_MIN_AREA, LABEL_MODEL, ROOM_ITEMS):
     YOLO_MODEL=gateway/yolov8s.onnx DESK_PHOTO=1 DESK_AREA=... ~/mspace-venv/bin/python gateway/tidy_eval.py score
 여러 후보 한 번에 비교 (eval/tidy/candidates.txt에 한 줄에 하나: `이름 | YOLO_MODEL=... DESK_PHOTO=1`):
     ~/mspace-venv/bin/python gateway/tidy_eval.py compare
@@ -149,7 +149,8 @@ def score(cases, run_case):
 
 def candidate_name(env):
     """채점한 설정을 한 줄로 (README 기록용). 게이트웨이 설정 이름 그대로."""
-    keys = ("YOLO_MODEL", "DESK_PHOTO", "DESK_AREA", "LABEL_MODEL", "ROOM_ITEMS")
+    keys = ("YOLO_MODEL", "DESK_PHOTO", "DESK_AREA", "DESK_LIGHT", "DESK_THRESH", "DESK_MIN_AREA",
+            "LABEL_MODEL", "ROOM_ITEMS")
     parts = [f"{k}={env[k]}" for k in keys if env.get(k)]
     return " ".join(parts) or "(설정 없음)"
 
@@ -232,7 +233,7 @@ def run_score(folder, env, out=print, as_json=False, clock=time.perf_counter):
         for key, img in (("before.jpg", before), ("after.jpg", after)):
             if img is None:
                 raise SystemExit(f"{case.name}/{key}를 못 읽었어요 (파일이 깨졌을 수 있어요). 다시 찍거나 answers.csv에서 빼요")
-        desk = desk_diff.DeskCompare(config.desk_area) if use_desk else None  # 메모리에만 (파일 안 씀)
+        desk = desk_diff.DeskCompare(config.desk_area, **desk_diff.settings(config)) if use_desk else None  # 메모리에만 (파일 안 씀)
         return judge(before, after, timed_find, config.room_items, desk, labeler)
 
     run_case(cases[0])  # 처음 한 번은 모델 준비로 느리다. 시간에 넣지 않고, 첫 장까지를 "모델 올리기"로 둔다

@@ -85,6 +85,9 @@ class Config:
     room_items: dict = field(default_factory=dict)  # 방 비품 {"remote": 1}: 그 개수까지는 있어도 없어도 괜찮음
     desk_area: tuple | None = None         # 책상 부분 (x1, y1, x2, y2) 화면 비율. 정리 확인 때 책상만 확대해서 한 번 더 본다
     desk_photo: bool = False               # True면 깨끗한 책상 사진(사람 0명일 때)을 젯슨에만 두고 퇴실 뒤 책상과 비교
+    desk_thresh: int = 35                  # 책상 비교: 밝기 차이가 이보다 크면 "달라짐" (DESK_THRESH, 1~255)
+    desk_min_area: float = 0.0012          # 책상 비교: 책상 넓이의 이 비율보다 작은 차이는 무시 (DESK_MIN_AREA)
+    desk_light: str = "mean"               # 책상 비교 밝기 맞추기: mean(전체) / local(자리마다, DESK_LIGHT=local)
     label_model: str | None = None         # 달라진 곳에 이름 붙일 모델 (YOLO-World ONNX). 없으면 YOLO_MODEL로
     baseline_file: str | None = "room_baseline.json"  # 깨끗한 방 기준을 적어 두는 파일. BASELINE_FILE=off면 메모리에만
     mqtt_room: int | None = None           # 교육장 MQTT 센서 값을 이 방 CO2·온도·습도로 보낸다 (Q-21 시연). 비우면 끔
@@ -132,6 +135,9 @@ def load_config(env=None):
         room_items=parse_room_items(env.get("ROOM_ITEMS", "")),
         desk_area=parse_desk_area(env.get("DESK_AREA", "")),
         desk_photo=env.get("DESK_PHOTO") == "1",
+        desk_thresh=parse_number(env, "DESK_THRESH", Config.desk_thresh, 1, 255, int),
+        desk_min_area=parse_number(env, "DESK_MIN_AREA", Config.desk_min_area, 0.0, 0.3, float),
+        desk_light="local" if env.get("DESK_LIGHT") == "local" else Config.desk_light,
         label_model=env.get("LABEL_MODEL") or None,
         baseline_file=(None if env.get("BASELINE_FILE") == "off"
                        else env.get("BASELINE_FILE") or Config.baseline_file),
@@ -194,6 +200,21 @@ def parse_room_items(text):
         if label.strip() and _is_number(n.strip()):
             items[label.strip()] = int(n.strip())
     return items
+
+
+def parse_number(env, key, default, low, high, kind):
+    """숫자 설정 하나. 비우면 기본값, 틀리거나 범위 밖이면 알려 주고 기본값."""
+    text = env.get(key, "").strip()
+    if not text:
+        return default
+    try:
+        value = kind(text)
+    except ValueError:
+        value = None
+    if value is not None and low <= value <= high:
+        return value
+    print(f"{key}가 이상해서 기본값 {default}을 써요: {text!r} ({low}~{high})")
+    return default
 
 
 def parse_desk_area(text):
@@ -744,7 +765,7 @@ def desk_compare(config, detector):
     import room_camera
     path = os.path.splitext(config.baseline_file)[0] + "_desk.png" if config.baseline_file else None
     print("정리 확인: 깨끗한 책상 사진과 비교해요 (사람 0명일 때 찍은 책상 사진 한 장만 젯슨에 둠, 서버로 안 보냄)")
-    return (desk_diff.DeskCompare(config.desk_area, path=path),
+    return (desk_diff.DeskCompare(config.desk_area, path=path, **desk_diff.settings(config)),
             room_camera.make_labeler(detector, config.label_model))
 
 
@@ -760,7 +781,7 @@ def start_room_camera(config, sensors):
     if desk is not None and on_checkout:  # 예약 기준 책상 사진 (입실 직전 빈 방, 정리 확인 뒤 지움, Q-22)
         import desk_diff
         path = os.path.splitext(config.baseline_file)[0] + "_entry_desk.png" if config.baseline_file else None
-        entry_desk = desk_diff.DeskCompare(config.desk_area, path=path)
+        entry_desk = desk_diff.DeskCompare(config.desk_area, path=path, **desk_diff.settings(config))
     watcher = room_camera.RoomWatcher(room, check_objects=detector.finds_objects, room_items=config.room_items,
                                       on_checkout=on_checkout, baseline_path=config.baseline_file,
                                       desk=desk, labeler=labeler, entry_desk=entry_desk)

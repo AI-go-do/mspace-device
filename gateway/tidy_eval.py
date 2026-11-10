@@ -346,13 +346,13 @@ def rank(rows):
 
 def compare_table(rows):
     """비교표 (마크다운). README 실험 기록·포트폴리오에 그대로 붙인다."""
-    head = ("| 판단 | 후보 | 정확도 (깨끗함 / 치울 것 / 두고 감) | 심각 오류 (잘못 신고 / 놓침) | 사진당 시간 (최대) "
+    head = ("| 순위 | 판단 | 후보 | 정확도 (깨끗함 / 치울 것 / 두고 감) | 심각 오류 (잘못 신고 / 놓침) | 사진당 시간 (최대) "
             "| 메모리 최대 | 모델 올리기 | 라이선스 |")
-    lines = [head, "|---|---|---|---|---|---|---|---|"]
-    for row in rows:
+    lines = [head, "|---|---|---|---|---|---|---|---|---|"]
+    for i, row in enumerate(rows, 1):
         r = row["result"]
         if "error" in r:
-            lines.append(f"| 실패 | {row['name']} | {r['error']} | | | | | {row['license']} |")
+            lines.append(f"| {i} | 실패 | {row['name']} | {r['error']} | | | | | {row['license']} |")
             continue
         parts = []
         for a in ANSWERS:
@@ -361,10 +361,21 @@ def compare_table(rows):
         memory = f"{r['memoryMB']:.0f}MB" if r.get("memoryMB") is not None else "-"
         name = row["name"] + (f" ({len(r['skipped'])}문제 건너뜀)" if r.get("skipped") else "")
         split = f" ({r['falseAlarm']} / {r['missed']})" if "falseAlarm" in r else ""
-        lines.append(f"| {row['verdict']} | {name} | **{r['accuracy']:.1%}** ({' / '.join(parts)}) "
+        lines.append(f"| {i} | {row['verdict']} | {name} | **{r['accuracy']:.1%}** ({' / '.join(parts)}) "
                      f"| {r['serious']}{split} | {r['medianSeconds']:.2f}초 ({r['maxSeconds']:.2f}초) | {memory} "
                      f"| {r['loadSeconds']:.1f}초 | {row['license']} |")
     return "\n".join(lines)
+
+
+def chosen_line(rows):
+    """맨 위 한 줄 요약: 채택한 후보와 그 점수 (강사님 LAB 화면의 "지금 쓰는 방식"처럼)."""
+    top = rows[0] if rows else None
+    if top is None or "error" in top["result"]:
+        return "**채택:** 없음 (모든 후보 실패)"
+    r = top["result"]
+    memory = f" · 메모리 {r['memoryMB']:.0f}MB" if r.get("memoryMB") is not None else ""
+    return (f"**채택:** {top['name']} · 정확도 {r['accuracy']:.1%} · 심각 오류 {r['serious']} "
+            f"· 사진당 {r['medianSeconds']:.2f}초{memory}")
 
 
 def run_compare(folder, env, out=print, run_candidate=None):
@@ -380,7 +391,8 @@ def run_compare(folder, env, out=print, run_candidate=None):
     rows = rank(rows)
     cases = next((r["result"]["cases"] for r in rows if "error" not in r["result"]), 0)
     table = compare_table(rows)
-    text = (f"### {datetime.now(KST):%Y-%m-%d %H:%M} · 정리 확인 후보 비교 (문제 {cases}개)\n\n"
+    text = (f"### {datetime.now(KST):%Y-%m-%d %H:%M} · 정리 확인 후보 비교 (문제 {cases}개, 후보 {len(rows)}개)\n\n"
+            f"{chosen_line(rows)}\n\n"
             f"목표: 정확도 {GOAL_ACCURACY:.0%} 이상 · 심각 오류 0 · 사진당 {GOAL_SECONDS:.0f}초 안\n\n{table}\n")
     out(text)
     path = os.path.join(folder, f"compare_{datetime.now(KST):%m%d_%H%M}.md")

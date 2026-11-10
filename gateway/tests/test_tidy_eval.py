@@ -238,8 +238,9 @@ def test_compare_writes_table(tmp_path):
     rows = te.run_compare(str(tmp_path), {}, out=lines.append, run_candidate=lambda c: results[c.name])
     assert [r["name"] for r in rows] == ["B", "A", "C"]
     text = "\n".join(lines)
-    assert "| 채택 | B | **97.5%** (100% / 95% / -) | 0 | 0.50초 (1.00초) | 812MB | 3.2초 | AGPL-3.0" in text
-    assert "| 탈락 (정확도) | A |" in text and "| 실패 | C | 모델 파일이 없어요 |" in text
+    assert "**채택:** B · 정확도 97.5% · 심각 오류 0 · 사진당 0.50초 · 메모리 812MB" in text
+    assert "| 1 | 채택 | B | **97.5%** (100% / 95% / -) | 0 | 0.50초 (1.00초) | 812MB | 3.2초 | AGPL-3.0" in text
+    assert "| 2 | 탈락 (정확도) | A |" in text and "| 3 | 실패 | C | 모델 파일이 없어요 |" in text
     saved = list(tmp_path.glob("compare_*.md"))
     assert len(saved) == 1 and "문제 40개" in saved[0].read_text(encoding="utf-8")
 
@@ -323,3 +324,7 @@ def test_skipped_cases_show_in_result_and_table(tmp_path, monkeypatch):
     assert result["loadSeconds"] == 1  # 시작 0 → 첫 장 1 (둘째 장까지 기다리지 않음)
     row = {"name": "v8s", "result": result, "verdict": "후보", "license": "AGPL-3.0 (Ultralytics)"}
     assert "v8s (1문제 건너뜀)" in te.compare_table([row])
+
+
+def test_chosen_line_when_all_failed():
+    assert te.chosen_line([{"name": "x", "verdict": "실패", "result": {"error": "e"}}]) == "**채택:** 없음 (모든 후보 실패)"

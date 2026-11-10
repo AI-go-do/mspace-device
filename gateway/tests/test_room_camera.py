@@ -7,7 +7,7 @@ import pytest
 
 import gateway
 import room_camera
-from room_camera import (BEAT_SEC, EMPTY_CHECK_SEC, ENTRY_EMPTY_SEC, PENDING_MAX_SEC, SETTLE_SEC, Detection, RoomWatcher, check_message, iou, nms,
+from room_camera import (BEAT_SEC, DESK_DIFF_CONF, EMPTY_CHECK_SEC, ENTRY_EMPTY_SEC, PENDING_MAX_SEC, SETTLE_SEC, Detection, RoomWatcher, check_message, iou, nms,
                          parse_yolo, run_room_camera, tile_boxes, detect_tiled, cut_by_tile, tidy_body,
                          desk_box, detect_desk, merge)
 
@@ -498,14 +498,69 @@ def test_practice_mode_does_not_keep_entry_baseline():
 
 
 def test_tidy_body_matches_server_format():
-    check = {"roomId": 1, "status": "LEFT_ITEMS", "trash": {"cup": 2}, "reservationId": 9,
-             "leftItems": {"laptop": 1, "cell phone": 1, "backpack": 1}, "checkedAt": "2026-11-06T17:00:00+09:00"}
+    """10차: 쓰레기든 물건이든 남으면 LEFT_ITEMS, 물건마다 이름(모델 이름)과 확신도."""
+    check = {"roomId": 1, "status": "LEFT_ITEMS", "trash": {"cup": 2}, "reservationId": 9, "phase": "FIRST",
+             "leftItems": {"umbrella": 1}, "confidence": {"cup": [0.41, 0.9], "umbrella": [0.93]},
+             "checkedAt": "2026-11-06T17:00:00+09:00"}
     body = tidy_body(check, "camera-1", event_id="e1")
-    assert body == {"eventId": "e1", "reservationId": 9, "deviceId": "camera-1", "result": "NEEDS_CLEANING",
-                    "items": ["backpack", "cell phone", "cup", "cup", "laptop"],
-                    "leftItems": ["BAG", "LAPTOP", "PHONE"], "observedAt": "2026-11-06T17:00:00+09:00"}
-    clean = tidy_body({**check, "trash": {}, "leftItems": {"book": 1}}, "camera-1")
-    assert clean["result"] == "CLEAN" and clean["leftItems"] == [] and clean["items"] == ["book"]
+    assert body == {"eventId": "e1", "reservationId": 9, "deviceId": "camera-1", "phase": "FIRST",
+                    "result": "LEFT_ITEMS",
+                    "items": [{"name": "umbrella", "confidence": 0.93}, {"name": "cup", "confidence": 0.9},
+                              {"name": "cup", "confidence": 0.41}],
+                    "observedAt": "2026-11-06T17:00:00+09:00"}
+    only_book = tidy_body({**check, "trash": {}, "leftItems": {"book": 1}, "confidence": {}}, "camera-1")
+    assert only_book["result"] == "LEFT_ITEMS"  # 예전엔 책만 남으면 CLEAN이라 경고가 안 걸렸다
+    assert only_book["items"] == [{"name": "book", "confidence": DESK_DIFF_CONF}]  # 점수 없으면 경고 기준 아래
+    clean = tidy_body({**check, "trash": {}, "leftItems": {}, "phase": "RECHECK"}, "camera-1")
+    assert clean["result"] == "CLEAN" and clean["items"] == [] and clean["phase"] == "RECHECK"
+
+
+def test_tidy_body_keeps_most_confident_20():
+    check = {"trash": {"cup": 25}, "leftItems": {}, "reservationId": 1, "checkedAt": "t",
+             "confidence": {"cup": [round(i / 100, 2) for i in range(25)]}}
+    items = tidy_body(check, "camera-1")["items"]
+    assert len(items) == 20 and items[0]["confidence"] == 0.24 and items[-1]["confidence"] == 0.05
+
+
+def test_check_uses_lowest_scores_for_new_items():
+    """컵이 기준보다 1개 늘면, 어느 게 새것인지 모르니 낮은 점수를 쓴다 (확신도를 부풀리지 않게)."""
+    w = RoomWatcher(1)
+    w.baseline = {"cup": 1}
+    dets = [Detection("cup", 0.9, (0, 0, 9, 9)), Detection("cup", 0.45, (50, 0, 9, 9)),
+            Detection("umbrella", 0.88, (90, 0, 9, 9))]
+    c = w.check(dets, "t")
+    assert c["confidence"] == {"cup": [0.45], "umbrella": [0.88]}
+
+
+def test_left_items_are_checked_again_after_two_hours():
+    """첫 확인에서 남은 물건 → 서버가 다시 확인하라고 하면 같은 기준과 비교. 그대로면 LEFT, 가져갔으면 CLEAN."""
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([], 5).run([person()], 5).checkout(1).run([thing("umbrella")], SETTLE_SEC + 6)
+    assert [(c["phase"], c["status"]) for c in r.out] == [("FIRST", "LEFT_ITEMS")]
+    assert r.w.entry is None and r.w.recheck_base == {"reservationId": 1, "objects": {}}
+    r.w.request_check(1, r.t, "RECHECK")
+    r.run([thing("umbrella")], SETTLE_SEC + 6)
+    assert [(c["reservationId"], c["phase"], c["leftItems"]) for c in r.out[1:]] == [(1, "RECHECK", {"umbrella": 1})]
+    assert "2시간 뒤 다시 확인" in check_message(r.out[1]) and r.w.recheck_base is None
+
+
+def test_recheck_clean_when_taken_back():
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([], 5).run([person()], 5).checkout(4).run([thing("cup")], SETTLE_SEC + 6)
+    r.w.request_check(4, r.t, "RECHECK")
+    r.run([], SETTLE_SEC + 6)
+    assert [(c["phase"], c["status"]) for c in r.out] == [("FIRST", "NEEDS_CLEANING"), ("RECHECK", "CLEAN")]
+    assert tidy_body(r.out[1], "camera-1")["result"] == "CLEAN"
+
+
+def test_recheck_without_base_is_skipped():
+    """첫 확인이 깨끗했거나 젯슨이 꺼졌다 켜지면 기준이 없다 → 보내지 않는다 (경고 없음)."""
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([], 5).run([person()], 5).checkout(2).run([], SETTLE_SEC + 6)
+    assert r.out[0]["status"] == "CLEAN" and r.w.recheck_base is None
+    r.w.request_check(2, r.t, "RECHECK")
+    r.run([thing("cup")], SETTLE_SEC + 6)
+    assert r.out[1]["status"] == "SKIPPED" and "reservationId" not in r.out[1]
 
 
 def test_run_room_camera_sends_only_reservation_checks(monkeypatch):
@@ -907,6 +962,35 @@ def test_checkout_poller_survives_errors_and_warns_once(capsys):
     out = capsys.readouterr().out
     assert out.count("못 물어요") == 1 and "다시 됨" in out
     assert fired == [2]
+
+
+def test_checkout_poller_rechecks_once_after_time():
+    """서버가 recheck를 내려 주면 그 시각이 지난 뒤 한 번만 부른다. 서버가 빼면(다음 예약 시작) 안 부른다."""
+    body = {"lastEnded": {"reservationId": 5}, "recheck": {"reservationId": 5, "at": "2026-11-10T14:00:00+09:00"}}
+    at = gateway.parse_recheck(body["recheck"])[1]
+    clock = [at - 30]
+    answers = [FakeResp(200, body), FakeResp(200, body), FakeResp(200, body), FakeResp(200, {"lastEnded": None})]
+    fired = []
+    p = gateway.CheckoutPoller("https://x", "t", 1, lambda rid: None, get=lambda url, **kw: answers.pop(0),
+                               on_recheck=fired.append, now=lambda: clock[0])
+    p.poll_once()           # 아직 시각 전
+    clock[0] = at + 1
+    p.poll_once()           # 지남 → 부름
+    p.poll_once()           # 같은 예약은 한 번만
+    p.poll_once()
+    assert fired == [5]
+
+
+@pytest.mark.parametrize("value", [None, "x", {"reservationId": "5", "at": "2026-11-10T14:00:00+09:00"},
+                                   {"reservationId": 5, "at": "2026-11-10T14:00:00"}, {"reservationId": 5, "at": "어제"},
+                                   {"reservationId": True, "at": "2026-11-10T14:00:00Z"}])
+def test_parse_recheck_rejects_bad_values(value):
+    assert gateway.parse_recheck(value) is None
+
+
+def test_parse_recheck_reads_z_time():
+    assert gateway.parse_recheck({"reservationId": 3, "at": "2026-11-10T05:00:00Z"}) == (
+        3, gateway.parse_recheck({"reservationId": 3, "at": "2026-11-10T14:00:00+09:00"})[1])
 
 
 def test_tidy_sender_drops_404_and_409():

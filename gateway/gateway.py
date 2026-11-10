@@ -364,9 +364,12 @@ class CheckoutPoller:
 
     켠 직후 처음 본 lastEnded는 이미 지난 일이라 기억만 하고 부르지 않는다.
     서버에 못 닿으면 기다렸다 다시 묻는다 (그동안 정리 확인은 미뤄질 뿐 틀리지 않는다).
+
+    10차(두고 간 물건 2시간): 서버가 recheck {reservationId, at}를 내려 주면, at이 지난 뒤 처음 물을 때
+    on_recheck(예약 번호)를 한 번 부른다. 다음 예약이 시작돼 서버가 recheck를 빼면 부르지 않는다.
     """
 
-    def __init__(self, server, token, room, on_checkout, every=POLL_SEC, get=None):
+    def __init__(self, server, token, room, on_checkout, every=POLL_SEC, get=None, on_recheck=None, now=None):
         self.url = f"{server}/api/rooms/{room}/current"
         self.headers = {"Authorization": f"Bearer {token}"}
         self.on_checkout = on_checkout
@@ -375,14 +378,19 @@ class CheckoutPoller:
         self.known = False   # 처음 한 번 읽었는지
         self.last = None     # 마지막으로 본 끝난 예약 번호
         self.failing = False
+        self.on_recheck = on_recheck
+        self.now = now or time.time
+        self.rechecked = set()  # 이미 다시 확인을 부른 예약 번호 (서버가 계속 내려 줘도 한 번만)
 
     def poll_once(self):
         try:
             r = self.get(self.url, headers=self.headers, timeout=(CONNECT_TIMEOUT, TIMEOUT), allow_redirects=False)
             if r.status_code != 200:
                 raise ValueError(f"응답 {r.status_code}")
-            ended = (r.json().get("lastEnded") or {}).get("reservationId")
-        except (requests.RequestException, ValueError) as e:
+            data = r.json()
+            ended = (data.get("lastEnded") or {}).get("reservationId")
+            recheck = parse_recheck(data.get("recheck"))
+        except (requests.RequestException, ValueError, AttributeError) as e:
             if not self.failing:  # 끊길 때 한 번만 알린다
                 print(f"[퇴실 확인] 서버에 예약 상태를 못 물어요, 다시 시도해요: {e}")
             self.failing = True
@@ -390,6 +398,7 @@ class CheckoutPoller:
         if self.failing:
             print("[퇴실 확인] 서버 연결 다시 됨")
         self.failing = False
+        self.check_recheck(recheck)
         if not self.known:
             self.known, self.last = True, ended
             return None
@@ -400,6 +409,17 @@ class CheckoutPoller:
             return ended
         return None
 
+    def check_recheck(self, recheck):
+        """다시 확인할 때가 지났으면 on_recheck를 한 번 부른다."""
+        if self.on_recheck is None or recheck is None:
+            return
+        rid, at = recheck
+        if rid in self.rechecked or self.now() < at:
+            return
+        self.rechecked.add(rid)
+        print(f"[퇴실 확인] 예약 {rid} 2시간 뒤 다시 확인 → 방이 비면 확인")
+        self.on_recheck(rid)
+
     def run_forever(self):
         while True:
             self.poll_once()
@@ -408,6 +428,22 @@ class CheckoutPoller:
     def start(self):
         threading.Thread(target=self.run_forever, daemon=True).start()
         return self
+
+
+def parse_recheck(value):
+    """서버 recheck {reservationId, at} → (예약 번호, epoch 초). 없거나 모양이 틀리면 None."""
+    if not isinstance(value, dict):
+        return None
+    rid, at = value.get("reservationId"), value.get("at")
+    if not is_int(rid) or not isinstance(at, str):
+        return None
+    try:
+        when = datetime.fromisoformat(at.replace("Z", "+00:00"))  # 파이썬 3.10 아래는 Z를 못 읽는다
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        return None  # 시간대 없는 시각은 젯슨 시계와 어긋날 수 있어 쓰지 않는다
+    return rid, when.timestamp()
 
 
 def make_verifier(config):
@@ -750,7 +786,8 @@ def start_room_camera(config, sensors):
                             drop=TIDY_DROP, name="정리 확인 전송").start()
         send_check = tidy.push
         CheckoutPoller(config.server, config.device_token, room,
-                       lambda rid: watcher.request_check(rid, time.monotonic())).start()
+                       lambda rid: watcher.request_check(rid, time.monotonic()),
+                       on_recheck=lambda rid: watcher.request_check(rid, time.monotonic(), "RECHECK")).start()
         print("정리 확인: 퇴실하면 확인 (서버 예약 상태를 10초마다 확인). "
               "기준은 사람이 처음 보이기 직전 3초 빈 방 (그 예약 동안 생긴 것만 봄)")
     else:

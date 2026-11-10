@@ -438,7 +438,10 @@ class CheckoutPoller:
 
     def run_forever(self):
         while True:
-            self.poll_once()
+            try:
+                self.poll_once()
+            except Exception as e:  # 한 번 실패해도 퇴실 확인 스레드는 살려 둔다
+                print(f"[퇴실 확인] 예약 상태 처리 중 오류, 다음에 다시 해요: {e}")
             time.sleep(self.every)
 
     def start(self):

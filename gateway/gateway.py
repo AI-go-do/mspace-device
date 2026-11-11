@@ -89,6 +89,8 @@ class Config:
     desk_thresh: int = 35                  # 책상 비교: 밝기 차이가 이보다 크면 "달라짐" (DESK_THRESH, 1~255)
     desk_min_area: float = 0.0012          # 책상 비교: 책상 넓이의 이 비율보다 작은 차이는 무시 (DESK_MIN_AREA)
     desk_light: str = "mean"               # 책상 비교 방식: mean(전체 밝기) / local(자리마다 밝기) / ssim(모양 비교)
+    desk_gone: bool = False                # 책상 비교: 물건을 치운 자리는 "달라짐"에서 뺀다 (DESK_GONE=1, 실험)
+    desk_eq: bool = False                  # 책상 비교: 지금 사진 밝기·대비를 기준에 맞춤 (DESK_EQ=1, 불 켬↔끔 실험)
     tidy_photos: bool = False              # True면 정리 확인 때 빈 방 사진(입실 전·퇴실 뒤·3시간 뒤)을 core로 올린다 (Q-27)
     label_model: str | None = None         # 달라진 곳에 이름 붙일 모델 (YOLO-World ONNX). 없으면 YOLO_MODEL로
     baseline_file: str | None = "room_baseline.json"  # 깨끗한 방 기준을 적어 두는 파일. BASELINE_FILE=off면 메모리에만
@@ -141,6 +143,8 @@ def load_config(env=None):
         desk_thresh=parse_number(env, "DESK_THRESH", Config.desk_thresh, 1, 255, int),
         desk_min_area=parse_number(env, "DESK_MIN_AREA", Config.desk_min_area, 0.0, 0.3, float),
         desk_light=env.get("DESK_LIGHT") if env.get("DESK_LIGHT") in ("local", "ssim") else Config.desk_light,
+        desk_gone=env.get("DESK_GONE") == "1",
+        desk_eq=env.get("DESK_EQ") == "1",
         tidy_photos=env.get("TIDY_PHOTOS") == "1",
         label_model=env.get("LABEL_MODEL") or None,
         baseline_file=(None if env.get("BASELINE_FILE") == "off"

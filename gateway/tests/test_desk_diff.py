@@ -68,12 +68,32 @@ def test_ssim_ignores_light_and_shade_but_still_finds_things():
     assert len(found) == 1
 
 
+def test_gone_drops_places_where_a_thing_was_taken_away():
+    """컵을 치운 자리는 빼고, 새로 둔 물건은 남긴다 (DESK_GONE=1)."""
+    with_phone, _ = prepare(desk(PHONE, noise=6), AREA)
+    empty, _ = prepare(desk(noise=6), AREA)
+    assert len(find_changes(with_phone, empty, light="ssim")) == 1           # 끄면 치운 자리도 "달라짐"
+    assert find_changes(with_phone, empty, light="ssim", gone=True) == []    # 켜면 뺌
+    assert len(find_changes(empty, with_phone, light="ssim", gone=True)) == 1  # 새로 둔 것은 그대로
+
+
+def test_eq_still_finds_things_in_a_dark_room():
+    base, _ = prepare(desk(noise=6), AREA)
+    for light in (0.5, 0.35, 0.2):
+        dark = prepare(desk(PHONE, light=light, noise=6), AREA)[0]
+        assert len(find_changes(base, dark, light="ssim", eq=True)) == 1
+        assert find_changes(base, prepare(desk(light=light, noise=6), AREA)[0], light="ssim", eq=True) == []
+    assert find_changes(base, prepare(desk(PHONE, light=0.2, noise=6), AREA)[0], light="ssim") is None  # 끄면 건너뜀
+
+
 def test_desk_settings_come_from_env(capsys):
     import desk_diff
     import gateway
     config = gateway.load_config({"DESK_THRESH": "50", "DESK_MIN_AREA": "0.004", "DESK_LIGHT": "local", "PORT": "x"})
     d = DeskCompare(AREA, **desk_diff.settings(config))
-    assert d.tune == {"thresh": 50, "min_area": 0.004, "light": "local"}
+    assert d.tune == {"thresh": 50, "min_area": 0.004, "light": "local", "gone": False, "eq": False}
+    config = gateway.load_config({"DESK_GONE": "1", "DESK_EQ": "1", "PORT": "x"})
+    assert (config.desk_gone, config.desk_eq) == (True, True)
     config = gateway.load_config({"DESK_THRESH": "999", "DESK_MIN_AREA": "abc", "PORT": "x"})
     assert (config.desk_thresh, config.desk_min_area, config.desk_light) == (35, 0.0012, "mean")
     assert "DESK_THRESH가 이상해서" in capsys.readouterr().out

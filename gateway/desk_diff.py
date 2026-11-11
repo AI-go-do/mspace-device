@@ -20,6 +20,7 @@ MAX_AREA = 0.35      # 이보다 크면 물건이 아니라 조명·카메라가
 LIGHT_BLUR = 0.05    # DESK_LIGHT=local: 책상 폭의 이 비율 크기로 흐린 사진(= 그 자리 밝기)으로 나눠서 비교한다
 SSIM_SIGMA = 3.0     # DESK_LIGHT=ssim: 모양을 비교할 작은 창 크기 (가우스 시그마, 640폭 기준 약 15×15)
 LIGHT_MODES = ("mean", "local", "ssim")
+GONE_RATIO = 1.5     # DESK_GONE=1: 기준 사진 쪽 가장자리가 지금보다 이만큼 더 많으면 "치운 자리"로 보고 뺀다
 
 
 def desk_box(width, height, area):
@@ -79,16 +80,49 @@ def ssim_diff(base, now, sigma=SSIM_SIGMA):
     return np.clip((1.0 - ssim) * 127.5, 0, 255).astype(np.uint8)
 
 
-def find_changes(base, now, thresh=DIFF_THRESH, min_area=MIN_AREA, max_area=MAX_AREA, light="mean"):
+def edge_energy(img):
+    """가장자리(무늬)가 얼마나 많은지 (소벨 크기 평균). 맨 책상은 작고, 물건이 있으면 크다."""
+    import cv2
+    import numpy as np
+    gx = cv2.Sobel(img, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(img, cv2.CV_32F, 0, 1, ksize=3)
+    return float(np.mean(np.abs(gx) + np.abs(gy))) if img.size else 0.0
+
+
+def is_gone(base, now, box, ratio=GONE_RATIO):
+    """달라진 곳이 "물건이 생김"이 아니라 "물건을 치움"인가.
+
+    버려진/치워진 물건 구분 (Tian·Feris·Hampapur 2008 등 감시 카메라 연구의 방법): 그 자리에 무늬가 기준 사진 쪽에
+    더 많으면 원래 있던 것이 없어진 것이다. 기준보다 지금 무늬가 많아야 "새로 남긴 물건"으로 본다.
+    """
+    x, y, w, h = box
+    before, after = edge_energy(base[y:y + h, x:x + w]), edge_energy(now[y:y + h, x:x + w])
+    return before > ratio * max(after, 1e-6)
+
+
+def match_contrast(base, now):
+    """지금 사진의 밝기와 대비(평균·표준편차)를 기준 사진에 맞춘다. 불을 꺼서 어둡고 흐릿해진 사진도
+    기준과 같은 밝기로 펴서 비교한다 (자리마다 펴는 CLAHE는 잡음까지 키워서 전체로만 맞춘다)."""
+    import numpy as np
+    n = now.astype(np.float32)
+    spread = float(n.std()) or 1.0
+    return np.clip((n - float(n.mean())) / spread * float(base.std()) + float(base.mean()), 0, 255).astype(np.uint8)
+
+
+def find_changes(base, now, thresh=DIFF_THRESH, min_area=MIN_AREA, max_area=MAX_AREA, light="mean",
+                 gone=False, eq=False):
     """두 책상 사진(prepare 결과)에서 달라진 곳 상자 (x, y, w, h) 목록. 조명이 통째로 바뀌었으면 None.
 
     light="mean": 사진 전체 밝기만 맞춘다 (원래 방식). "local": 자리마다 밝기를 고르게 한 뒤 비교한다.
     "ssim": 밝기 차이 대신 자리마다 모양(무늬)이 달라졌는지 본다 (빛·그림자에 가장 덜 예민, 조금 느림).
+    gone=True: 물건을 치운 자리는 뺀다 (DESK_GONE=1). eq=True: 지금 사진의 밝기·대비를 기준에 먼저 맞춘다 (DESK_EQ=1).
     """
     import cv2
     import numpy as np
     if base.shape != now.shape:
         return None
+    if eq:
+        now = match_contrast(base, now)
     if light == "ssim":
         diff = ssim_diff(base, now)
     elif light == "local":
@@ -103,7 +137,10 @@ def find_changes(base, now, thresh=DIFF_THRESH, min_area=MIN_AREA, max_area=MAX_
         return None
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     boxes = join_near([tuple(int(v) for v in cv2.boundingRect(c)) for c in contours])
-    return [b for b in boxes if b[2] * b[3] >= min_area * total]
+    boxes = [b for b in boxes if b[2] * b[3] >= min_area * total]
+    if gone:
+        boxes = [b for b in boxes if not is_gone(base, now, b)]
+    return boxes
 
 
 def join_near(boxes, gap=12):
@@ -142,9 +179,10 @@ def fingerprint(img):
 class DeskCompare:
     """깨끗한 책상 사진 한 장을 들고 있다가 퇴실 뒤 책상과 비교한다."""
 
-    def __init__(self, area, path=None, thresh=DIFF_THRESH, min_area=MIN_AREA, light="mean"):
+    def __init__(self, area, path=None, thresh=DIFF_THRESH, min_area=MIN_AREA, light="mean", gone=False, eq=False):
         self.area = area
-        self.tune = {"thresh": thresh, "min_area": min_area, "light": light}  # DESK_THRESH·DESK_MIN_AREA·DESK_LIGHT
+        # DESK_THRESH·DESK_MIN_AREA·DESK_LIGHT·DESK_GONE·DESK_EQ
+        self.tune = {"thresh": thresh, "min_area": min_area, "light": light, "gone": gone, "eq": eq}
         self.path = path              # 껐다 켜도 남게 저장할 파일 (.png). None이면 메모리에만
         self.base = None              # 깨끗한 책상 (prepare 결과)
         self.known = []               # 기준 때 모델이 찾은 물건 자리 (리모컨을 옮기면 빈 자리도 "달라짐"이라 뺀다)
@@ -224,5 +262,6 @@ class DeskCompare:
 
 
 def settings(config):
-    """게이트웨이 설정(DESK_THRESH, DESK_MIN_AREA, DESK_LIGHT) → DeskCompare에 넘길 값."""
-    return {"thresh": config.desk_thresh, "min_area": config.desk_min_area, "light": config.desk_light}
+    """게이트웨이 설정(DESK_THRESH, DESK_MIN_AREA, DESK_LIGHT, DESK_GONE, DESK_EQ) → DeskCompare에 넘길 값."""
+    return {"thresh": config.desk_thresh, "min_area": config.desk_min_area, "light": config.desk_light,
+            "gone": config.desk_gone, "eq": config.desk_eq}

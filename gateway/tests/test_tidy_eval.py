@@ -317,7 +317,7 @@ def test_run_one_uses_default_timeout_for_bad_value():
     for bad in ("abc", "0", "-5", "inf"):
         te.run_one("eval/tidy", te.Candidate("a", {"TIDY_TIMEOUT": bad}), {}, run=run)
     te.run_one("eval/tidy", te.Candidate("a", {"TIDY_TIMEOUT": "60"}), {}, run=run)
-    assert seen == [10800.0, 10800.0, 10800.0, 10800.0, 60.0]
+    assert seen == [1800.0, 1800.0, 1800.0, 1800.0, 60.0]  # 문제집이 없으면 최소 30분
 
 
 def test_skipped_cases_show_in_result_and_table(tmp_path, monkeypatch):
@@ -348,3 +348,17 @@ def test_skipped_cases_show_in_result_and_table(tmp_path, monkeypatch):
 
 def test_chosen_line_when_all_failed():
     assert te.chosen_line([{"name": "x", "verdict": "실패", "result": {"error": "e"}}]) == "**채택:** 없음 (모든 후보 실패)"
+
+
+def test_default_timeout_grows_with_the_number_of_pairs(tmp_path):
+    """사진당 2분까지 허용하니, 문제마다 두 장 × 2분 + 10분 여유 안에서는 실패로 끊지 않는다."""
+    rows = ["case,answer,memo"]
+    for i in range(1, 48):
+        name = f"{i:03d}"
+        (tmp_path / name).mkdir()
+        for p in ("before.jpg", "after.jpg"):
+            (tmp_path / name / p).write_bytes(b"x")
+        rows.append(f"{name},CLEAN,")
+    (tmp_path / "answers.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    assert te.default_timeout(str(tmp_path)) == 47 * 2 * te.GOAL_SECONDS + 600
+    assert te.default_timeout(str(tmp_path / "없음")) == te.TIMEOUT_MIN_SEC

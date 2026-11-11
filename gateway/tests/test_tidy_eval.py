@@ -89,7 +89,7 @@ def test_rank_uses_left_accuracy_then_three_way():
 def test_score_passes_only_when_all_goals_met():
     cases = [te.Case(f"{i:03d}", "CLEAN") for i in range(20)]
     ok = te.score(cases, lambda c: ({"status": "CLEAN"}, 0.5))
-    slow = te.score(cases, lambda c: ({"status": "CLEAN"}, 10.5))
+    slow = te.score(cases, lambda c: ({"status": "CLEAN"}, 120.5))
     assert ok["passed"] and ok["accuracy"] == 1.0 and not slow["passed"]
     assert not te.score([], lambda c: None)["passed"]
 
@@ -217,7 +217,7 @@ def test_license_and_verdict():
     assert te.license_of({"YOLO_MODEL": "rtdetr-l.onnx"}) == "Apache-2.0"
     assert te.license_of({"YOLO_MODEL": "my.onnx"}) == "확인 필요"
     assert te.verdict(result_of(0.97)) == "후보"
-    assert te.verdict(result_of(0.90, serious=2, median=12.0)) == "탈락 (정확도, 심각 오류, 시간)"
+    assert te.verdict(result_of(0.90, serious=2, median=130.0)) == "탈락 (정확도, 심각 오류, 시간)"
     assert te.verdict({"error": "x"}) == "실패"
 
 
@@ -317,7 +317,7 @@ def test_run_one_uses_default_timeout_for_bad_value():
     for bad in ("abc", "0", "-5", "inf"):
         te.run_one("eval/tidy", te.Candidate("a", {"TIDY_TIMEOUT": bad}), {}, run=run)
     te.run_one("eval/tidy", te.Candidate("a", {"TIDY_TIMEOUT": "60"}), {}, run=run)
-    assert seen == [1800.0, 1800.0, 1800.0, 1800.0, 60.0]
+    assert seen == [10800.0, 10800.0, 10800.0, 10800.0, 60.0]
 
 
 def test_skipped_cases_show_in_result_and_table(tmp_path, monkeypatch):

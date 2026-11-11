@@ -34,7 +34,7 @@ ANSWERS = ("CLEAN", "NEEDS_CLEANING", "LEFT_ITEMS")
 KOREAN = {"CLEAN": "깨끗함", "NEEDS_CLEANING": "치울 것", "LEFT_ITEMS": "두고 간 물건"}
 CHOICES = {"1": "CLEAN", "2": "NEEDS_CLEANING", "3": "LEFT_ITEMS"}
 GOAL_ACCURACY = 0.95
-GOAL_SECONDS = 1.0
+GOAL_SECONDS = 10.0  # 정리 확인은 퇴실 뒤 한 번만 봐서 10초면 충분 (11/11 수연). 시연 땐 정확도가 비슷하면 빠른 쪽
 DEFAULT_DIR = "eval/tidy"
 RESULT_MARK = "TIDY_RESULT "
 # 모델 파일 이름 → 라이선스 (포트폴리오·배포 때 확인용). 모르는 모델은 "확인 필요"
@@ -51,6 +51,17 @@ def is_serious(answer, got):
     (치울 것 ↔ 두고 감 끼리 바뀐 것은 틀림이지만 심각하지는 않다: 어느 쪽이든 관리자가 본다)
     """
     return answer != got and "CLEAN" in (answer, got)
+
+
+def left_ok(answer, got):
+    """깨끗함 / 뭔가 남음만 맞으면 정답. 사용자에게는 쓰레기와 두고 간 물건을 구별하지 않고 알려서 (11/11 수연)
+    이 점수로 순위와 합격을 정한다. 세 가지까지 맞힌 정확도는 참고로 함께 적는다."""
+    return (answer == "CLEAN") == (got == "CLEAN")
+
+
+def main_accuracy(result):
+    """순위·합격에 쓰는 정확도 (깨끗함/남음). 이 점수가 없던 옛 결과는 세 가지 정확도로 본다."""
+    return result.get("leftAccuracy", result["accuracy"])
 
 
 # ---------- 문제집 ----------
@@ -130,21 +141,24 @@ def score(cases, run_case):
         check, seconds = run_case(case)
         got = check["status"]
         rows.append({"case": case.name, "answer": case.answer, "got": got, "seconds": round(seconds, 3),
-                     "ok": got == case.answer, "serious": is_serious(case.answer, got),
+                     "ok": got == case.answer, "leftOk": left_ok(case.answer, got), "serious": is_serious(case.answer, got),
                      "trash": check.get("trash", {}), "leftItems": check.get("leftItems", {}),
                      "people": check.get("people", 0), "memo": case.memo})
     n = len(rows)
     right = sum(r["ok"] for r in rows)
+    left_right = sum(r["leftOk"] for r in rows)
+    left_accuracy = left_right / n if n else 0.0
     serious = sum(r["serious"] for r in rows)
     false_alarm = sum(r["serious"] and r["answer"] == "CLEAN" for r in rows)  # 깨끗한데 신고
     median = statistics.median(r["seconds"] for r in rows) if rows else 0.0
     slowest = max((r["seconds"] for r in rows), default=0.0)
     by_answer = {a: [sum(r["ok"] for r in rows if r["answer"] == a), sum(r["answer"] == a for r in rows)]
                  for a in ANSWERS}
-    return {"cases": n, "right": right, "accuracy": right / n if n else 0.0, "serious": serious,
+    return {"cases": n, "right": right, "accuracy": right / n if n else 0.0,
+            "leftRight": left_right, "leftAccuracy": left_accuracy, "serious": serious,
             "falseAlarm": false_alarm, "missed": serious - false_alarm,
             "medianSeconds": round(median, 3), "maxSeconds": round(slowest, 3), "byAnswer": by_answer, "rows": rows,
-            "passed": bool(n) and right / n >= GOAL_ACCURACY and serious == 0 and median <= GOAL_SECONDS}
+            "passed": bool(n) and left_accuracy >= GOAL_ACCURACY and serious == 0 and median <= GOAL_SECONDS}
 
 
 def candidate_name(env):
@@ -157,8 +171,8 @@ def candidate_name(env):
 
 def report(result, candidate, out=print):
     out(f"후보: {candidate}")
-    out(f"문제 {result['cases']}개 중 {result['right']}개 맞음: 정확도 {result['accuracy']:.1%} "
-        f"(목표 {GOAL_ACCURACY:.0%}), 심각한 오류 {result['serious']}개 (목표 0, 잘못 신고 {result['falseAlarm']} · 놓침 {result['missed']}), "
+    out(f"문제 {result['cases']}개 중 {result['leftRight']}개 맞음: 정확도 (깨끗함/남음) {result['leftAccuracy']:.1%} "
+        f"(목표 {GOAL_ACCURACY:.0%}), 세 가지까지 {result['right']}개 {result['accuracy']:.1%}, 심각한 오류 {result['serious']}개 (목표 0, 잘못 신고 {result['falseAlarm']} · 놓침 {result['missed']}), "
         f"사진당 {result['medianSeconds']:.2f}초 (목표 {GOAL_SECONDS:.0f}초 안)")
     for a in ANSWERS:
         ok, total = result["byAnswer"][a]
@@ -168,14 +182,15 @@ def report(result, candidate, out=print):
     for r in wrong:
         found = {**r["trash"], **r["leftItems"]}
         seen = ", ".join(f"{k} {v}" for k, v in sorted(found.items())) or "찾은 것 없음"
-        mark = " [심각]" if r["serious"] else ""
+        mark = " [심각]" if r["serious"] else (" [종류만]" if r["leftOk"] else "")
         person = f" (사람 {r['people']}명 보임: 다시 찍어요)" if r["people"] else ""
         out(f"  틀림{mark} {r['case']}: 정답 {KOREAN[r['answer']]} → {KOREAN[r['got']]} ({seen}){person}"
             f"{' - ' + r['memo'] if r['memo'] else ''}")
     out("통과" if result["passed"] else "아직 기준 못 넘음")
     names = " ".join(r["case"] for r in wrong) or "없음"
     out("README 실험 기록에 붙일 줄:")
-    out(f"| {datetime.now(KST):%m/%d} | 정리 확인 | {candidate} | {result['accuracy']:.1%} | {result['serious']} "
+    out(f"| {datetime.now(KST):%m/%d} | 정리 확인 | {candidate} | {result['leftAccuracy']:.1%} (세 가지 {result['accuracy']:.1%}) "
+        f"| {result['serious']} "
         f"| {result['medianSeconds']:.2f}초 | (바꾼 것) | 문제 {result['cases']}개, 틀림 {names} |")
 
 
@@ -318,7 +333,7 @@ def verdict(result):
     if "error" in result:
         return "실패"
     why = []
-    if result["accuracy"] < GOAL_ACCURACY:
+    if main_accuracy(result) < GOAL_ACCURACY:
         why.append("정확도")
     if result["serious"]:
         why.append("심각 오류")
@@ -328,15 +343,15 @@ def verdict(result):
 
 
 def rank(rows):
-    """기준을 넘은 것 → 정확도 높은 순 → 심각 오류 적은 순 → 빠른 순.
+    """기준을 넘은 것 → 정확도 (깨끗함/남음) 높은 순 → 심각 오류 적은 순 → 세 가지 정확도 높은 순 → 빠른 순.
 
     맨 위를 채택으로 바꾼다. 아무도 기준을 못 넘었어도 맨 위를 "채택 (기준 미달: …)"로 둔다 (지금 쓸 것 + 다음 개선의 출발점).
     """
     def key(row):
         r = row["result"]
         if "error" in r:
-            return (2, 0, 0, 0)
-        return (0 if row["verdict"] == "후보" else 1, -r["accuracy"], r["serious"], r["medianSeconds"])
+            return (2, 0, 0, 0, 0)
+        return (0 if row["verdict"] == "후보" else 1, -main_accuracy(r), r["serious"], -r["accuracy"], r["medianSeconds"])
     rows = sorted(rows, key=key)
     if rows and rows[0]["verdict"] == "후보":
         rows[0]["verdict"] = "채택"
@@ -347,13 +362,13 @@ def rank(rows):
 
 def compare_table(rows):
     """비교표 (마크다운). README 실험 기록·포트폴리오에 그대로 붙인다."""
-    head = ("| 순위 | 판단 | 후보 | 정확도 (깨끗함 / 치울 것 / 두고 감) | 심각 오류 (잘못 신고 / 놓침) | 사진당 시간 (최대) "
-            "| 메모리 최대 | 모델 올리기 | 라이선스 |")
-    lines = [head, "|---|---|---|---|---|---|---|---|---|"]
+    head = ("| 순위 | 판단 | 후보 | 정확도 (깨끗함/남음) | 세 가지 정확도 (깨끗함 / 치울 것 / 두고 감) "
+            "| 심각 오류 (잘못 신고 / 놓침) | 사진당 시간 (최대) | 메모리 최대 | 모델 올리기 | 라이선스 |")
+    lines = [head, "|---|---|---|---|---|---|---|---|---|---|"]
     for i, row in enumerate(rows, 1):
         r = row["result"]
         if "error" in r:
-            lines.append(f"| {i} | 실패 | {row['name']} | {r['error']} | | | | | {row['license']} |")
+            lines.append(f"| {i} | 실패 | {row['name']} | {r['error']} | | | | | | {row['license']} |")
             continue
         parts = []
         for a in ANSWERS:
@@ -362,7 +377,7 @@ def compare_table(rows):
         memory = f"{r['memoryMB']:.0f}MB" if r.get("memoryMB") is not None else "-"
         name = row["name"] + (f" ({len(r['skipped'])}문제 건너뜀)" if r.get("skipped") else "")
         split = f" ({r['falseAlarm']} / {r['missed']})" if "falseAlarm" in r else ""
-        lines.append(f"| {i} | {row['verdict']} | {name} | **{r['accuracy']:.1%}** ({' / '.join(parts)}) "
+        lines.append(f"| {i} | {row['verdict']} | {name} | **{main_accuracy(r):.1%}** | {r['accuracy']:.1%} ({' / '.join(parts)}) "
                      f"| {r['serious']}{split} | {r['medianSeconds']:.2f}초 ({r['maxSeconds']:.2f}초) | {memory} "
                      f"| {r['loadSeconds']:.1f}초 | {row['license']} |")
     return "\n".join(lines)
@@ -375,7 +390,7 @@ def chosen_line(rows):
         return "**채택:** 없음 (모든 후보 실패)"
     r = top["result"]
     memory = f" · 메모리 {r['memoryMB']:.0f}MB" if r.get("memoryMB") is not None else ""
-    return (f"**채택:** {top['name']} · 정확도 {r['accuracy']:.1%} · 심각 오류 {r['serious']} "
+    return (f"**채택:** {top['name']} · 정확도 (깨끗함/남음) {main_accuracy(r):.1%} · 세 가지 {r['accuracy']:.1%} · 심각 오류 {r['serious']} "
             f"· 사진당 {r['medianSeconds']:.2f}초{memory}")
 
 
@@ -394,7 +409,7 @@ def run_compare(folder, env, out=print, run_candidate=None):
     table = compare_table(rows)
     text = (f"### {datetime.now(KST):%Y-%m-%d %H:%M} · 정리 확인 후보 비교 (문제 {cases}개, 후보 {len(rows)}개)\n\n"
             f"{chosen_line(rows)}\n\n"
-            f"목표: 정확도 {GOAL_ACCURACY:.0%} 이상 · 심각 오류 0 · 사진당 {GOAL_SECONDS:.0f}초 안\n\n{table}\n")
+            f"목표: 정확도 (깨끗함/남음) {GOAL_ACCURACY:.0%} 이상 · 심각 오류 0 · 사진당 {GOAL_SECONDS:.0f}초 안\n\n{table}\n")
     out(text)
     path = os.path.join(folder, f"compare_{datetime.now(KST):%m%d_%H%M}.md")
     with open(path, "w", encoding="utf-8") as f:

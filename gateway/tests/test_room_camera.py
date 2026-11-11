@@ -757,7 +757,8 @@ def test_start_room_camera(monkeypatch):
     monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None: Det())
     monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
 
-    def fake_run(watcher, cam, detector, push, pir_now, on_frame=None, preview=None, send_check=None):
+    def fake_run(watcher, cam, detector, push, pir_now, on_frame=None, preview=None, send_check=None,
+                 send_photo=None):
         gateway.LAST_PIR[3] = (1, gateway.time.monotonic())
         on_frame()
         called.update(room=watcher.room_id, cam=cam, check=watcher.check_objects, pir=pir_now(),
@@ -781,7 +782,8 @@ def test_start_room_camera_uses_checkout_mode_when_sending(monkeypatch):
     monkeypatch.setattr(gateway.SensorSender, "start", lambda self: self)
     monkeypatch.setattr(gateway.CheckoutPoller, "start", lambda self: polled.append(self.url) or self)
 
-    def fake_run(watcher, cam, detector, push, pir_now, on_frame=None, preview=None, send_check=None):
+    def fake_run(watcher, cam, detector, push, pir_now, on_frame=None, preview=None, send_check=None,
+                 send_photo=None):
         called.update(checkout=watcher.on_checkout, send=send_check is not None)
 
     monkeypatch.setattr(room_camera, "run_room_camera", fake_run)
@@ -1264,3 +1266,128 @@ def test_light_dropped_when_uno_stale():
     gateway.with_light(got.append, 1)({"kind": "OCCUPANCY", "sources": {"camera": True}})
     assert got[0]["sources"] == {"camera": True}
     assert gateway.fresh_light(2) is None
+
+
+# ---- 정리 확인 사진 (TIDY_PHOTOS, docs Q-27) ----
+
+FRAME = np.full((720, 1280, 3), 120, np.uint8)
+
+
+class PhotoRoom(Room):
+    """지금 화면(photo)도 넣어 주는 Room."""
+
+    def run(self, dets, sec=1, pir=None):
+        for _ in range(sec):
+            c = self.w.update(dets, now=self.t, pir=pir, photo=lambda: FRAME)[1]
+            if c and c["status"] != "BASELINE_SAVED":
+                self.out.append(c)
+            self.t += 1
+        return self
+
+
+def is_jpeg(b):
+    return isinstance(b, bytes) and b[:2] == b"\xff\xd8" and len(b) <= room_camera.PHOTO_MAX_BYTES
+
+
+def test_tidy_photos_attach_entry_and_after_photos_to_first_check():
+    r = PhotoRoom(RoomWatcher(1, on_checkout=True, photos=True))
+    r.run([], 5).run([person()], 5).checkout(1).run([thing("umbrella")], SETTLE_SEC + 6)
+    photos = r.out[0]["photos"]
+    assert list(photos) == ["FIRST", "ENTRY"] and all(is_jpeg(b) for b in photos.values())
+    r.w.request_check(1, r.t, "RECHECK")
+    r.run([thing("umbrella")], SETTLE_SEC + 6)
+    assert list(r.out[1]["photos"]) == ["RECHECK"] and is_jpeg(r.out[1]["photos"]["RECHECK"])
+
+
+def test_tidy_photos_off_by_default_and_skipped_without_photo():
+    r = PhotoRoom(RoomWatcher(1, on_checkout=True))
+    r.run([], 5).run([person()], 5).checkout(1).run([thing("cup")], SETTLE_SEC + 6)
+    assert "photos" not in r.out[0]
+    r = Room(RoomWatcher(1, on_checkout=True, photos=True))  # 화면을 안 주면 (사진 없음) 결과만
+    r.run([], 5).run([person()], 5).checkout(1).run([thing("cup")], SETTLE_SEC + 6)
+    assert "photos" not in r.out[0] and r.out[0]["status"] == "NEEDS_CLEANING"
+
+
+def test_tidy_photos_never_include_a_person():
+    """자세히 찾기에서 사람이 보이면(가운데 값은 0명이어도) 그 장은 사진을 안 붙인다."""
+    w = RoomWatcher(1, on_checkout=True, photos=True)
+    r = PhotoRoom(w)
+    r.run([], 5).run([person()], 5).checkout(1)
+    c = None
+    for t in range(r.t, r.t + SETTLE_SEC + 6):
+        c = c or w.update([], now=t, photo=lambda: FRAME, detail=lambda: [person()])[1]
+    assert c["phase"] == "FIRST" and list(c.get("photos", {})) == ["ENTRY"]
+    assert w.room_photo(lambda: FRAME, [person()]) is None
+
+
+def test_entry_photo_survives_restart_and_is_deleted_after_check(tmp_path):
+    base = str(tmp_path / "room_baseline.json")
+    r = PhotoRoom(RoomWatcher(1, on_checkout=True, baseline_path=base, photos=True))
+    r.run([], 5).run([person()], 3)
+    jpg = tmp_path / "room_baseline_entry.jpg"
+    saved = jpg.read_bytes()
+    assert is_jpeg(saved)
+    r2 = PhotoRoom(RoomWatcher(1, on_checkout=True, baseline_path=base, photos=True), t=100)  # 껐다 켬
+    r2.run([person()], 3).checkout(4).run([], SETTLE_SEC + 6)
+    assert r2.out[0]["photos"]["ENTRY"] == saved
+    assert not jpg.exists() and not (tmp_path / "room_baseline_entry.json").exists()
+
+
+def test_entry_photo_from_another_moment_is_not_used(tmp_path):
+    """개수 파일의 지문과 사진이 다르면(사진만 바뀐 채 꺼짐) 입실 전 사진은 빼고 보낸다."""
+    base = str(tmp_path / "room_baseline.json")
+    r = PhotoRoom(RoomWatcher(1, on_checkout=True, baseline_path=base, photos=True))
+    r.run([], 5).run([person()], 3)
+    (tmp_path / "room_baseline_entry.jpg").write_bytes(b"\xff\xd8other")
+    w = RoomWatcher(1, on_checkout=True, baseline_path=base, photos=True)
+    assert w.entry is not None and w.entry["jpg"] is None
+
+
+def test_photo_jpeg_shrinks_big_frames():
+    import cv2
+    jpg = room_camera.photo_jpeg(np.random.randint(0, 255, (2160, 3840, 3), np.uint8))
+    assert is_jpeg(jpg)
+    h, w = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR).shape[:2]
+    assert max(h, w) == room_camera.PHOTO_MAX_SIDE
+    assert room_camera.photo_jpeg(object()) is None  # 못 만들면 None (결과는 그대로)
+
+
+def test_run_room_camera_sends_photos_after_result_and_keeps_them_out_of_log(tmp_path):
+    class PhotoCheck(RoomWatcher):
+        def update(self, dets, now, pir=None, now_iso=None, detail=None, photo=None):
+            assert photo is not None and photo() is not None  # TIDY_PHOTOS면 화면을 넘긴다
+            return None, {"roomId": 1, "status": "CLEAN", "trash": {}, "leftItems": {}, "checkedAt": "t",
+                          "reservationId": 7, "phase": "FIRST", "photos": {"FIRST": b"a", "ENTRY": b"b"}}
+
+    order = []
+    log = tmp_path / "log.jsonl"
+    with pytest.raises(StopIteration):
+        run_room_camera(PhotoCheck(1, photos=True), FakeCam(1), FakeDetector(), lambda e: None, log_path=log,
+                        sleep=lambda s: None, send_check=lambda b: order.append(("check", b["reservationId"])),
+                        send_photo=lambda b: order.append((b["phase"], b["reservationId"], b["deviceId"], b["jpg"])))
+    assert order == [("check", 7), ("FIRST", 7, "camera-1", b"a"), ("ENTRY", 7, "camera-1", b"b")]
+    assert "photos" not in json.loads(log.read_text())
+
+
+def test_start_room_camera_turns_on_photo_sender(monkeypatch):
+    called = {}
+
+    class Det:
+        finds_objects = True
+
+    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None: Det())
+    monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
+    monkeypatch.setattr(gateway.SensorSender, "start", lambda self: self)
+    monkeypatch.setattr(gateway.CheckoutPoller, "start", lambda self: self)
+
+    def fake_run(watcher, cam, detector, push, pir_now, on_frame=None, preview=None, send_check=None,
+                 send_photo=None):
+        called.update(photos=watcher.photos, send=send_photo is not None)
+
+    monkeypatch.setattr(room_camera, "run_room_camera", fake_run)
+    cfg = gateway.Config(room_camera="1", server="https://x.example", device_token="t", tidy_photos=True)
+    gateway.start_room_camera(cfg, object()).join(timeout=1)
+    assert called == {"photos": True, "send": True}
+    gateway.start_room_camera(cfg, None).join(timeout=1)  # 연습 모드는 사진 안 찍음
+    assert called == {"photos": False, "send": False}
+    assert gateway.load_config({"TIDY_PHOTOS": "1"}).tidy_photos and not gateway.load_config({}).tidy_photos

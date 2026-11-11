@@ -36,6 +36,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -93,6 +94,9 @@ ENTRY_EMPTY_SEC = 3    # (퇴실 모드) 한 장씩 셌을 때 0명이 연속 3�
 SNAPSHOT_SEC = 60      # (퇴실 모드) 빈 방이 계속되면 후보를 1분마다 새로 찍는다 (햇빛·조명 변화 따라감)
 DESK_DIFF_CONF = 0.5   # 책상 사진 비교로 찾은 물건의 확신도. 모델 점수가 없어서 core 경고 기준(기본 0.8)보다 낮게 둔다
                        # → 알림은 가도 이것만으로 경고는 안 간다 (잘못 본 그림자·빛으로 경고하지 않게)
+PHOTO_MAX_SIDE = 1280  # 정리 확인 사진(TIDY_PHOTOS=1)은 긴 변을 이만큼으로 줄여 올린다
+PHOTO_QUALITY = 80     # JPEG 품질. 1280x720이면 보통 100~300KB
+PHOTO_MAX_BYTES = 1_000_000  # core 한도는 2MB지만 중간 프록시(nginx 기본 1MB)에 막히지 않게 1MB 아래로
 ENTRY_PIR_GRACE_SEC = 10  # PIR이 먼저 켜진 뒤 이 안에 카메라가 사람을 보면 보통 입실. 더 길면 카메라에 안 보인 사람이
                           # 그동안 뭘 두었을 수 있어 후보를 쓰지 않는다
 
@@ -329,12 +333,37 @@ def describe(items):
     return ", ".join(f"{KOREAN.get(k, k)} {n}" for k, n in sorted(items.items()))
 
 
+def photo_jpeg(frame):
+    """정리 확인 사진(사람 0명일 때만 부름)을 JPEG 바이트로 줄인다. 못 만들면 None (결과 전송은 그대로)."""
+    try:
+        import cv2
+        h, w = frame.shape[:2]
+        scale = min(1.0, PHOTO_MAX_SIDE / max(h, w))
+        if scale < 1.0:
+            frame = cv2.resize(frame, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
+        for quality in (PHOTO_QUALITY, 60, 40):
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+            if ok and len(buf) <= PHOTO_MAX_BYTES:
+                return buf.tobytes()
+        print(f"정리 확인 사진이 {PHOTO_MAX_BYTES // 1000}KB보다 커서 올리지 않아요")
+    except Exception as e:  # 사진 하나 못 만들어도 정리 확인은 계속
+        print("정리 확인 사진을 못 만들었어요(결과는 그대로 보내요):", repr(e))
+    return None
+
+
+def photo_sum(jpg):
+    return hashlib.sha256(jpg).hexdigest()[:16] if jpg else None
+
+
 class RoomWatcher:
     """찾은 목록을 받아서 (1) core에 보낼 재실 이벤트 (2) 정리 확인 결과를 만든다."""
 
     def __init__(self, room_id, check_objects=True, now=None, room_items=None, on_checkout=False,
-                 baseline_path=None, desk=None, labeler=None, entry_desk=None):
+                 baseline_path=None, desk=None, labeler=None, entry_desk=None, photos=False):
         self.room_id = room_id
+        # photos (TIDY_PHOTOS=1, docs Q-27): 퇴실 모드에서 입실 전(ENTRY)·퇴실 뒤(FIRST)·3시간 뒤(RECHECK) 빈 방 컬러 사진을
+        # 결과에 붙여 core로 올린다. 사람이 0명인 장만 찍는다. 입실 전 사진은 정리 확인을 보내면 젯슨에서 지운다
+        self.photos = photos
         # desk: 깨끗한 책상 사진 비교(desk_diff.DeskCompare, DESK_PHOTO=1). 모델이 모르는 물건도 "남음"으로 잡는다
         # labeler(frame, box): 달라진 곳에 이름 붙이기. 못 붙이면 None → "모르는 물건"
         self.desk = desk
@@ -360,9 +389,10 @@ class RoomWatcher:
         # 예약 기준 (퇴실 모드, Q-22 B안): 사람이 처음 보이기 직전 빈 방. 퇴실 뒤 이것과 비교해 "그 예약 동안 생긴 것"만 본다
         self.entry_desk = entry_desk  # 예약 기준 책상 사진 (DESK_PHOTO일 때). 정리 확인이 끝나면 지운다
         self.entry_path = (os.path.splitext(baseline_path)[0] + "_entry.json") if baseline_path else None
+        self.entry_photo_path = (os.path.splitext(baseline_path)[0] + "_entry.jpg") if baseline_path else None
         self.raw_empty_since = None  # 한 장씩 셌을 때 0명이 된 시각 (가운데 값이 아니라 그 장 그대로)
-        self.snapshot = None         # 빈 방 후보 {"objects", "img", "known", "at"}. 메모리에만
-        self.entry = None            # 확정된 예약 기준 {"objects", "at"}
+        self.snapshot = None         # 빈 방 후보 {"objects", "img", "known", "jpg", "at"}. 메모리에만
+        self.entry = None            # 확정된 예약 기준 {"objects", "at", "jpg"(입실 전 사진, TIDY_PHOTOS일 때)}
         self.pir_since = None        # 후보를 찍은 뒤 카메라엔 0명인데 PIR이 처음 켜진 시각
         self.recheck_base = None
         self.load_baseline()
@@ -422,11 +452,40 @@ class RoomWatcher:
             print(f"예약 기준 파일을 못 읽어서 버려요 ({self.entry_path}: {e})")
             self.clear_entry()
             return
-        self.entry = {"objects": objects, "at": float("-inf")}  # 켜기 전에 잡은 것 = 어떤 퇴실 알림보다 먼저
+        self.entry = {"objects": objects, "at": float("-inf"),  # 켜기 전에 잡은 것 = 어떤 퇴실 알림보다 먼저
+                      "jpg": self.load_entry_photo(saved.get("photoSum"))}
         print(f"저장된 예약 기준 불러옴 {self.room_id}번 방 ({saved.get('savedAt', '시각 모름')})")
 
+    def load_entry_photo(self, want):
+        """입실 전 사진을 읽는다. 개수 파일에 적힌 지문과 다르면(사진만 바뀐 채 꺼짐) 쓰지 않는다."""
+        if not want or not self.entry_photo_path or not os.path.exists(self.entry_photo_path):
+            return None
+        try:
+            with open(self.entry_photo_path, "rb") as f:
+                jpg = f.read()
+        except OSError as e:
+            print(f"입실 전 사진을 못 읽어서 빼고 보내요 ({self.entry_photo_path}: {e})")
+            return None
+        return jpg if photo_sum(jpg) == want else None
+
+    def write_entry_photo(self, jpg):
+        """입실 전 사진을 젯슨에 둔다 (껐다 켜도 퇴실 뒤 같이 올리게). 없으면 옛 사진을 지운다."""
+        if not self.entry_photo_path:
+            return
+        try:
+            if jpg:
+                with open(self.entry_photo_path + ".tmp", "wb") as f:
+                    f.write(jpg)
+                os.replace(self.entry_photo_path + ".tmp", self.entry_photo_path)
+            elif os.path.exists(self.entry_photo_path):
+                os.remove(self.entry_photo_path)
+        except OSError as e:  # 못 써도 메모리엔 있음
+            print(f"입실 전 사진 파일을 못 썼어요 ({self.entry_photo_path}: {e})")
+
     def set_entry(self, snap, now, now_iso):
-        self.entry = {"objects": snap["objects"], "at": now}
+        jpg = snap.get("jpg")
+        self.entry = {"objects": snap["objects"], "at": now, "jpg": jpg}
+        self.write_entry_photo(jpg)
         if self.entry_desk is not None:
             if snap["img"] is not None:
                 self.entry_desk.set_prepared(snap["img"], snap["known"])
@@ -437,6 +496,8 @@ class RoomWatcher:
                       "savedAt": now_iso or datetime.now(KST).isoformat(timespec="seconds")}
             if self.entry_desk is not None:  # 사진 지문을 같이 적어 같은 때 저장된 짝인지 켤 때 확인한다
                 record["deskSum"] = fingerprint(self.entry_desk.base) if self.entry_desk.ready else None
+            if jpg:
+                record["photoSum"] = photo_sum(jpg)
             try:
                 with open(self.entry_path + ".tmp", "w", encoding="utf-8") as f:
                     json.dump(record, f, ensure_ascii=False)
@@ -452,11 +513,12 @@ class RoomWatcher:
         self.entry = None
         if self.entry_desk is not None:
             self.entry_desk.clear()
-        if self.entry_path and os.path.exists(self.entry_path):
-            try:
-                os.remove(self.entry_path)
-            except OSError as e:
-                print(f"예약 기준 파일을 못 지웠어요 ({self.entry_path}: {e})")
+        for path in (self.entry_path, self.entry_photo_path):
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError as e:
+                    print(f"예약 기준 파일을 못 지웠어요 ({path}: {e})")
 
     def track_entry(self, raw, pir, now, now_iso, detail, dets, photo):
         """빈 방 후보를 들고 있다가, 사람이 처음 보이면 그 후보를 다음 예약 기준으로 확정한다.
@@ -491,7 +553,8 @@ class RoomWatcher:
         if self.entry_desk is not None and photo is not None:
             img = self.entry_desk.look(photo())  # 책상 부분만 흑백·작게. 메모리에만
             known = [d.box for d in self.objects(seen)]
-        self.snapshot = {"objects": self.count(seen), "img": img, "known": known, "at": now}
+        jpg = self.room_photo(photo, dets, seen)  # 입실 전 사진 (TIDY_PHOTOS)
+        self.snapshot = {"objects": self.count(seen), "img": img, "known": known, "jpg": jpg, "at": now}
         self.pir_since = None
 
     def drop_recheck_on_entry(self):
@@ -514,6 +577,12 @@ class RoomWatcher:
 
     def people(self, dets):
         return sum(1 for d in dets if d.label == "person")
+
+    def room_photo(self, photo, *seen):
+        """TIDY_PHOTOS일 때 지금 화면을 JPEG로. 빠르게 센 것·자세히 찾은 것 어디에도 사람이 없을 때만 (사람 사진은 안 올림)."""
+        if not self.photos or photo is None or any(self.people(d) for d in seen):
+            return None
+        return photo_jpeg(photo())
 
     def update(self, dets, now, pir=None, now_iso=None, detail=None, photo=None):
         """한 번 센 결과를 넣는다. 보낼 재실 이벤트(dict)와 정리 확인 결과(dict)를 (event, check)로 돌려준다.
@@ -598,7 +667,7 @@ class RoomWatcher:
         if self.pending is None:  # 퇴실 확인이 먼저. 그게 없을 때만 3시간 뒤 다시 확인
             reservation_id, _ = self.recheck_pending
             self.recheck_pending = None
-            return self.recheck(reservation_id, dets, now_iso, detail) if self.check_objects else None
+            return self.recheck(reservation_id, dets, now_iso, detail, photo) if self.check_objects else None
         reservation_id = self.pending[0]
         self.pending = None
         self.had_people = False
@@ -613,13 +682,17 @@ class RoomWatcher:
         check = self.check(seen, now_iso, photo=photo if desk else None, base=self.entry["objects"], desk=desk)
         check["reservationId"] = reservation_id
         check["phase"] = "FIRST"
+        photos = {"FIRST": self.room_photo(photo, dets, seen), "ENTRY": self.entry.get("jpg") if self.photos else None}
+        photos = {k: v for k, v in photos.items() if v}  # 퇴실 뒤 사진부터 (입실 전은 core가 아직 안 받을 수 있음)
+        if photos:
+            check["photos"] = photos
         # 물건이 남았으면 3시간 뒤 다시 확인할 때 쓰게 기준 개수만 남긴다 (책상 사진은 지움)
         self.recheck_base = ({"reservationId": reservation_id, "objects": dict(self.entry["objects"])}
                              if check["status"] != "CLEAN" else None)
         self.clear_entry()  # 보냈으면 지운다 (다음 예약은 다음 빈 방에서 새로)
         return check
 
-    def recheck(self, reservation_id, dets, now_iso, detail):
+    def recheck(self, reservation_id, dets, now_iso, detail, photo=None):
         """3시간 뒤 다시 확인 (RECHECK). 첫 확인 때와 같은 기준(입실 직전 빈 방)과 개수로만 비교한다.
 
         책상 사진 비교는 하지 않는다 (사진은 첫 확인 뒤 지움). 그래서 사진 비교로만 찾았던 물건은 여기서
@@ -633,6 +706,9 @@ class RoomWatcher:
         check = self.check(seen, now_iso, base=base["objects"])
         check["reservationId"] = reservation_id
         check["phase"] = "RECHECK"
+        jpg = self.room_photo(photo, dets, seen)
+        if jpg:
+            check["photos"] = {"RECHECK": jpg}
         return check
 
     def event(self, people, pir, now_iso):
@@ -782,6 +858,11 @@ def tidy_body(check, device_id, event_id=None):
     }
 
 
+def photo_body(reservation_id, phase, device_id, jpg):
+    """POST /api/rooms/{roomId}/tidy-photos (core #115) multipart 칸. phase = ENTRY | FIRST | RECHECK."""
+    return {"reservationId": reservation_id, "phase": phase, "deviceId": device_id, "jpg": jpg}
+
+
 def check_message(check):
     if check["status"] == "BASELINE_SAVED":
         n = sum(check["objects"].values())
@@ -892,11 +973,13 @@ def safe_log(log_path, record):
 
 def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path="room_checks.jsonl",
                     every=1.0, clock=time.monotonic, sleep=time.sleep, on_frame=lambda: None, preview=None,
-                    warn_every=10.0, send_check=None):
-    """카메라에서 1초마다 한 장씩 세서 watcher에 넣는다. 사진은 저장하지 않는다.
+                    warn_every=10.0, send_check=None, send_photo=None):
+    """카메라에서 1초마다 한 장씩 세서 watcher에 넣는다. 사진은 저장하지 않는다
+    (TIDY_PHOTOS=1이면 사람 0명인 빈 방 사진만 core로 올리고, 입실 전 사진은 퇴실 확인 때까지만 젯슨에 둔다).
 
     on_frame: 사진을 잘 읽을 때마다 부른다 (게이트웨이가 카메라가 살아 있는지 본다).
     send_check: 퇴실 모드에서 예약에 붙은 정리 확인 결과를 서버로 보낸다 (tidy_body 형식).
+    send_photo: 결과에 붙은 빈 방 사진(TIDY_PHOTOS)을 결과 다음에 올린다 (photo_body 형식). 기록 파일엔 안 남긴다.
     """
     print(f"방 안 카메라 켜짐: {watcher.room_id}번 방")
     last_warn = None
@@ -922,7 +1005,8 @@ def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path
                         print("화면 보기 오류(카메라는 계속 돌아요):", repr(e))
                 detailed = getattr(detector, "detect_detailed", None)
                 detail = (lambda: detailed(frame)) if detailed else None  # 기준·정리 확인 때만 불림
-                photo = (lambda: frame) if watcher.desk is not None else None  # 책상 사진 비교 (DESK_PHOTO)
+                # 책상 사진 비교(DESK_PHOTO)·정리 확인 사진(TIDY_PHOTOS) 때만 지금 화면을 쓴다
+                photo = (lambda: frame) if watcher.desk is not None or getattr(watcher, "photos", False) else None
                 event, check = watcher.update(dets, clock(), pir_now(), detail=detail, photo=photo)
                 del frame, detail, photo  # 사진은 바로 버린다
                 on_frame()  # 찾기까지 성공한 장만 "카메라 살아 있음"으로 친다
@@ -930,10 +1014,16 @@ def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path
                     print(f"인원 {watcher.room_id}번 방: {event['sources']['people']}명")
                     push(event)
                 if check:
+                    photos = check.pop("photos", None) or {}  # 사진 바이트는 기록 파일·화면에 남기지 않는다
                     print(check_message(check))
                     safe_log(log_path, check)
                     if send_check is not None and "reservationId" in check:
                         send_check(tidy_body(check, f"camera-{watcher.room_id}"))
+                        if send_photo is not None and photos:
+                            for phase, jpg in photos.items():
+                                send_photo(photo_body(check["reservationId"], phase, f"camera-{watcher.room_id}", jpg))
+                            print(f"정리 확인 사진 {len(photos)}장 올리기 대기 ({', '.join(photos)})")
+                    del photos
             except Exception as e:  # 한 장에서 오류가 나도 카메라 스레드는 계속 돈다
                 print("방 안 카메라 처리 오류(계속 돌아요):", repr(e))
         sleep(max(0.0, every - (clock() - started)))

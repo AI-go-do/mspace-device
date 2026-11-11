@@ -62,8 +62,28 @@ def test_score_counts_accuracy_serious_and_time():
     lines = []
     te.report(result, "YOLO_MODEL=x", out=lines.append)
     text = "\n".join(lines)
-    assert "정확도 33.3%" in text and "틀림 [심각] 002" in text and "종이컵" in text
-    assert "| 정리 확인 | YOLO_MODEL=x | 33.3% | 1 |" in text and "틀림 002 003" in text
+    assert "정확도 (깨끗함/남음) 66.7%" in text and "세 가지까지 1개 33.3%" in text
+    assert "틀림 [심각] 002" in text and "틀림 [종류만] 003" in text and "종이컵" in text
+    assert "| 정리 확인 | YOLO_MODEL=x | 66.7% (세 가지 33.3%) | 1 |" in text and "틀림 002 003" in text
+
+
+def test_left_accuracy_ignores_trash_vs_left_items():
+    """쓰레기 ↔ 두고 감만 바뀐 것은 깨끗함/남음 정확도에서 맞음. 합격도 이 점수로."""
+    cases = [te.Case(f"{i:03d}", "LEFT_ITEMS") for i in range(20)]
+    result = te.score(cases, lambda c: ({"status": "NEEDS_CLEANING"}, 0.5))
+    assert result["accuracy"] == 0.0 and result["leftAccuracy"] == 1.0 and result["leftRight"] == 20
+    assert result["serious"] == 0 and result["passed"]
+    assert te.verdict(result) == "후보"
+
+
+def test_rank_uses_left_accuracy_then_three_way():
+    rows = [{"name": "세 가지만 높음", "verdict": "탈락 (정확도)", "result": {**result_of(0.60), "leftAccuracy": 0.70}},
+            {"name": "남음 높음", "verdict": "탈락 (정확도)", "result": {**result_of(0.50), "leftAccuracy": 0.80}},
+            {"name": "남음 같고 세 가지 높음", "verdict": "탈락 (정확도)", "result": {**result_of(0.55), "leftAccuracy": 0.80}}]
+    ranked = te.rank(rows)
+    assert [r["name"] for r in ranked] == ["남음 같고 세 가지 높음", "남음 높음", "세 가지만 높음"]
+    table = te.compare_table([{**r, "license": "-"} for r in ranked])
+    assert "| 1 | 채택 (기준 미달: 정확도) | 남음 같고 세 가지 높음 | **80.0%** | 55.0% (100% / 95% / -) |" in table
 
 
 def test_score_passes_only_when_all_goals_met():
@@ -238,8 +258,8 @@ def test_compare_writes_table(tmp_path):
     rows = te.run_compare(str(tmp_path), {}, out=lines.append, run_candidate=lambda c: results[c.name])
     assert [r["name"] for r in rows] == ["B", "A", "C"]
     text = "\n".join(lines)
-    assert "**채택:** B · 정확도 97.5% · 심각 오류 0 · 사진당 0.50초 · 메모리 812MB" in text
-    assert "| 1 | 채택 | B | **97.5%** (100% / 95% / -) | 0 | 0.50초 (1.00초) | 812MB | 3.2초 | AGPL-3.0" in text
+    assert "**채택:** B · 정확도 (깨끗함/남음) 97.5% · 세 가지 97.5% · 심각 오류 0 · 사진당 0.50초 · 메모리 812MB" in text
+    assert "| 1 | 채택 | B | **97.5%** | 97.5% (100% / 95% / -) | 0 | 0.50초 (1.00초) | 812MB | 3.2초 | AGPL-3.0" in text
     assert "| 2 | 탈락 (정확도) | A |" in text and "| 3 | 실패 | C | 모델 파일이 없어요 |" in text
     saved = list(tmp_path.glob("compare_*.md"))
     assert len(saved) == 1 and "문제 40개" in saved[0].read_text(encoding="utf-8")

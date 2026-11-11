@@ -113,7 +113,7 @@ def next_case_name(folder):
 
 # ---------- 채점 ----------
 
-def judge(before, after, find, room_items=None, desk=None, labeler=None, clock=time.perf_counter):
+def judge(before, after, find, room_items=None, desk=None, labeler=None, clock=time.perf_counter, vlm=None):
     """사진 한 쌍을 퇴실 모드와 같은 방법으로 판단한다. (결과 dict, 퇴실 사진 처리 초)를 돌려준다.
 
     find(frame): 정리 확인 때 쓰는 "자세히 찾기" (detect_detailed). before = 그 예약의 기준(입실 직전 빈 방).
@@ -130,6 +130,11 @@ def judge(before, after, find, room_items=None, desk=None, labeler=None, clock=t
     seconds = clock() - started
     if check is None:
         raise RuntimeError("정리 확인 결과가 비어 있어요 (RoomWatcher.check)")
+    if vlm is not None:  # VLM_URL (10판 실험): 입실·퇴실 사진을 VLM에게 한 번 더 보여 준다
+        new_item, vlm_seconds, _ = vlm.ask(before, after)
+        check["yoloStatus"], check["vlm"] = check["status"], new_item
+        check["status"] = vlm.combine(check["status"], new_item)
+        seconds += vlm_seconds  # 캐시에서 꺼냈어도 처음 물었을 때 걸린 시간을 더한다
     check["people"] = watcher.people(found)
     return check, seconds
 
@@ -143,7 +148,8 @@ def score(cases, run_case):
         rows.append({"case": case.name, "answer": case.answer, "got": got, "seconds": round(seconds, 3),
                      "ok": got == case.answer, "leftOk": left_ok(case.answer, got), "serious": is_serious(case.answer, got),
                      "trash": check.get("trash", {}), "leftItems": check.get("leftItems", {}),
-                     "people": check.get("people", 0), "memo": case.memo})
+                     "people": check.get("people", 0), "memo": case.memo,
+                     "yolo": check.get("yoloStatus"), "vlm": check.get("vlm")})
     n = len(rows)
     right = sum(r["ok"] for r in rows)
     left_right = sum(r["leftOk"] for r in rows)
@@ -164,7 +170,8 @@ def score(cases, run_case):
 def candidate_name(env):
     """채점한 설정을 한 줄로 (README 기록용). 게이트웨이 설정 이름 그대로."""
     keys = ("YOLO_MODEL", "DESK_PHOTO", "DESK_AREA", "FLOOR_AREA", "DESK_LIGHT", "DESK_THRESH", "DESK_MIN_AREA",
-            "DESK_GONE", "DESK_EQ", "DESK_MOVE", "DESK_MOVE_SAME", "DESK_MATCH", "DESK_MATCH_SIM", "LABEL_MODEL", "ROOM_ITEMS")
+            "DESK_GONE", "DESK_EQ", "DESK_MOVE", "DESK_MOVE_SAME", "DESK_MATCH", "DESK_MATCH_SIM", "LABEL_MODEL", "ROOM_ITEMS",
+            "VLM_NAME", "VLM_RULE", "VLM_SIDE", "VLM_EQ")
     parts = [f"{k}={env[k]}" for k in keys if env.get(k)]
     return " ".join(parts) or "(설정 없음)"
 
@@ -234,6 +241,8 @@ def run_score(folder, env, out=print, as_json=False, clock=time.perf_counter):
     if config.desk_photo and not config.desk_area:
         out("DESK_PHOTO=1은 DESK_AREA가 있어야 해요. 책상 사진 비교 없이 채점해요")
     labeler = room_camera.make_labeler(detector, config.label_model) if use_desk else None
+    import vlm_check
+    vlm = vlm_check.from_env(env)
     first_seen = []
 
     def timed_find(img):  # 모델을 불러와 첫 장을 보기까지 걸린 시간을 잰다
@@ -249,7 +258,7 @@ def run_score(folder, env, out=print, as_json=False, clock=time.perf_counter):
             if img is None:
                 raise SystemExit(f"{case.name}/{key}를 못 읽었어요 (파일이 깨졌을 수 있어요). 다시 찍거나 answers.csv에서 빼요")
         desk = desk_diff.DeskCompare(config.desk_area, **desk_diff.settings(config)) if use_desk else None  # 메모리에만 (파일 안 씀)
-        return judge(before, after, timed_find, config.room_items, desk, labeler)
+        return judge(before, after, timed_find, config.room_items, desk, labeler, vlm=vlm)
 
     run_case(cases[0])  # 처음 한 번은 모델 준비로 느리다. 시간에 넣지 않고, 첫 장까지를 "모델 올리기"로 둔다
     load_seconds = first_seen[0] - loading

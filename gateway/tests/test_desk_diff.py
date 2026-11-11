@@ -122,6 +122,55 @@ def test_move_does_not_count_a_flipped_remote_seen_as_laptop():
     assert check["leftItems"] == {"cell phone": 1}  # 새로 둔 휴대폰은 그대로
 
 
+def fake_embed(img, path=None):
+    """DINOv2 대신: 밝기 8칸 히스토그램 (길이 1). 같은 색 물건끼리 비슷하게 나온다."""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    v = np.histogram(gray, bins=8, range=(0, 256))[0].astype(np.float32)
+    return v / (np.linalg.norm(v) + 1e-6)
+
+
+def test_match_does_not_count_the_same_thing_moved_and_renamed(monkeypatch):
+    """옮긴 리모컨을 YOLO가 laptop으로 봐도, 잘라서 비교하면 기준 때 리모컨과 같아서 새 물건으로 안 센다 (DESK_MATCH=1)."""
+    import desk_diff
+    import tidy_eval
+    monkeypatch.setattr(desk_diff, "dino_embed", fake_embed)
+    before, after = desk(REMOTE, noise=6), desk(MOVED_REMOTE, noise=6)
+    remote = Detection("remote", 0.8, (700, 700, 45, 30))
+    laptop = Detection("laptop", 0.4, (1000, 800, 30, 45))
+
+    def find(frame):
+        return [remote] if frame is before else [laptop]
+
+    check, _ = tidy_eval.judge(before, after, find, room_items={"remote": 1},
+                               desk=DeskCompare(AREA, light="ssim", match=True))
+    assert check["status"] == "CLEAN"
+    check, _ = tidy_eval.judge(before, after, find, room_items={"remote": 1}, desk=DeskCompare(AREA, light="ssim"))
+    assert check["leftItems"] == {"laptop": 1}  # 끄면 지금처럼 잘못 신고
+    paper = desk(MOVED_REMOTE, PAPER, noise=6)
+    check, _ = tidy_eval.judge(before, paper, lambda f: [remote] if f is before else [laptop], room_items={"remote": 1},
+                               desk=DeskCompare(AREA, light="ssim", match=True))
+    assert check["status"] != "CLEAN" and "laptop" not in check["leftItems"]  # 새 종이는 그대로 남음
+
+
+def test_dino_embed_is_one_unit_vector(monkeypatch):
+    import desk_diff
+    monkeypatch.setattr(desk_diff, "dino_session", lambda path: FakeDino())
+    v = desk_diff.dino_embed(desk()[200:300, 600:700])
+    assert v.shape == (3,) and abs(float(np.linalg.norm(v)) - 1) < 1e-3
+
+
+def test_match_settings_and_crop():
+    import desk_diff
+    import gateway
+    config = gateway.load_config({"DESK_MATCH": "1", "DESK_MATCH_SIM": "0.9", "PORT": "x"})
+    d = DeskCompare(AREA, **desk_diff.settings(config))
+    assert d.match and d.match_sim == 0.9
+    assert d.same_as_before(desk(), [(0, 0, 10, 10)]) == [False]  # 기준 사진이 없으면 비교 안 함
+    frame = desk()
+    assert desk_diff.crop(frame, (100, 100, 50, 50)).shape[:2] == (70, 70)
+    assert desk_diff.crop(frame, (1915, 1075, 2, 2)) is None  # 화면 끝 아주 작은 것은 못 자름
+
+
 def test_eq_still_finds_things_in_a_dark_room():
     base, _ = prepare(desk(noise=6), AREA)
     for light in (0.5, 0.35, 0.2):
@@ -170,6 +219,7 @@ def test_desk_settings_come_from_env(capsys):
     d = DeskCompare(AREA, **desk_diff.settings(config))
     assert d.tune == {"thresh": 50, "min_area": 0.004, "light": "local", "gone": False, "eq": False,
                       "model": "gateway/dinov2_small.onnx", "move": False}
+    assert (d.match, d.match_sim) == (False, 0.8)
     assert gateway.load_config({"DESK_LIGHT": "dino", "DESK_DINO_MODEL": "m.onnx", "PORT": "x"}).desk_dino_model == "m.onnx"
     config = gateway.load_config({"DESK_GONE": "1", "DESK_EQ": "1", "DESK_MOVE": "1", "PORT": "x"})
     assert (config.desk_gone, config.desk_eq, config.desk_move) == (True, True, True)

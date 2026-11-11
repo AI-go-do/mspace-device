@@ -29,6 +29,9 @@ GONE_RATIO = 1.5     # DESK_GONE=1: 기준 사진 쪽 가장자리가 지금보�
 MOVE_SAME = 0.67     # DESK_MOVE=1: 기준 사진 쪽 무늬가 지금의 이 비율 이상이면 "원래 뭔가 있던 자리"(옮김·뒤집음·치움)로 본다
 MOVE_SIZE = 2.5      # DESK_MOVE=1: 옮긴 짝으로 볼 두 자리의 넓이 차이 (배)
 MOVE_CONTENT = 2.0   # DESK_MOVE=1: 옮긴 짝으로 볼 두 자리의 무늬 양 차이 (배)
+MATCH_SIM = 0.8      # DESK_MATCH=1: 잘라낸 두 물건의 DINOv2 특징이 이만큼(코사인 0~1) 비슷하면 "같은 물건"
+MATCH_PAD = 0.2      # DESK_MATCH=1: 모델이 찾은 물건 상자는 이 비율만큼 넓혀 자른다
+MATCH_SHRINK = -0.2  # DESK_MATCH=1: 책상 비교로 찾은 곳은 물건보다 넉넉히 잡혀서 가운데만 자른다 (가장자리 20%씩 뺌)
 
 
 def desk_box(width, height, area):
@@ -113,6 +116,52 @@ def dino_features(img, path):
     return feats.reshape(h // 14, w // 14, -1)
 
 
+def crop(frame, box, pad=MATCH_PAD, min_side=32):
+    """원래 화면 좌표 상자를 조금 넓혀 자른다 (화면 밖은 잘라 냄). 너무 작으면 None."""
+    h, w = frame.shape[:2]
+    x, y, bw, bh = box
+    px, py = bw * pad, bh * pad
+    x0, y0 = int(max(0, x - px)), int(max(0, y - py))
+    x1, y1 = int(min(w, x + bw + px)), int(min(h, y + bh + py))
+    if x1 - x0 < min_side // 2 or y1 - y0 < min_side // 2:
+        return None
+    return frame[y0:y1, x0:x1]
+
+
+def dino_embed(img, path=DINO_MODEL):
+    """잘라낸 물건 사진(컬러) → DINOv2 특징 하나 (칸마다 특징의 평균, 길이 1). "이게 무엇인가"를 숫자로."""
+    import cv2
+    import numpy as np
+    w, h = DINO_SIZE
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+    x = cv2.resize(rgb, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32) / 255.0
+    x = ((x - np.array(DINO_MEAN, np.float32)) / np.array(DINO_STD, np.float32)).transpose(2, 0, 1)[None]
+    session = dino_session(path)
+    feats = session.run(None, {session.get_inputs()[0].name: x.astype(np.float32)})[0][0]
+    v = feats.mean(axis=0)
+    return v / (np.linalg.norm(v) + 1e-6)
+
+
+def same_things(before, after, candidates, references, path=DINO_MODEL, sim=MATCH_SIM):
+    """퇴실 사진의 물건(candidates)마다, 기준 사진의 물건(references) 중 같은 물건이 있는지 (DESK_MATCH=1).
+
+    물건 단위 변화 찾기(arXiv 2501.05555 "Zero-Shot Scene Change Detection"류)와 같은 생각: 방 전체가 아니라
+    잘라낸 물건끼리 DINOv2 특징을 비교한다. 리모컨을 옮기거나 뒤집어도 "같은 물건"이라 새로 남긴 것으로 안 센다.
+    candidates·references는 (상자, 넓힐 비율) 목록. 돌려주는 것: candidates와 같은 순서의 True/False.
+    잘라낸 사진은 메모리에서 비교만 하고 버린다.
+    """
+    import numpy as np
+    refs = [c for c in (crop(before, b, pad) for b, pad in references) if c is not None]
+    if not refs or not candidates:
+        return [False] * len(candidates)
+    ref_vecs = np.stack([dino_embed(c, path) for c in refs])
+    out = []
+    for b, pad in candidates:
+        c = crop(after, b, pad)
+        out.append(c is not None and float((ref_vecs @ dino_embed(c, path)).max()) >= sim)
+    return out
+
+
 def dino_diff(base, now, path=DINO_MODEL):
     """자리마다 "무엇이 있나"가 얼마나 달라졌나를 0~255로 (DINOv2 특징의 코사인 거리).
 
@@ -146,6 +195,17 @@ def is_gone(base, now, box, ratio=GONE_RATIO):
     return before > ratio * max(after, 1e-6)
 
 
+def box_energy(img, box):
+    """상자 안 무늬 양 (가장자리 세기 × 넓이)."""
+    x, y, w, h = box
+    return edge_energy(img[y:y + h, x:x + w]) * w * h
+
+
+def was_there(base, now, boxes, same=MOVE_SAME):
+    """달라진 곳 중 기준 사진 쪽에도 무늬가 비슷하게 있던 곳 (= 원래 뭔가 있던 자리)."""
+    return [b for b in boxes if box_energy(base, b) >= same * box_energy(now, b)]
+
+
 def split_moved(base, now, boxes, same=MOVE_SAME, size=MOVE_SIZE, content=MOVE_CONTENT):
     """달라진 곳을 (새로 생긴 곳, 원래 있던 걸 옮긴 곳)으로 나눈다 (DESK_MOVE=1, 실험).
 
@@ -153,10 +213,7 @@ def split_moved(base, now, boxes, same=MOVE_SAME, size=MOVE_SIZE, content=MOVE_C
     2. 새로 생긴 자리라도, 크기·무늬 양이 비슷한 "없어진 자리"가 따로 있으면 그 물건을 옮겨 온 것.
     이름(YOLO)을 몰라도 리모컨처럼 방에 원래 있던 걸 옮긴 것을 새 물건으로 세지 않는다.
     """
-    def energy(img, b):
-        x, y, w, h = b
-        return edge_energy(img[y:y + h, x:x + w]) * w * h
-
+    energy = box_energy
     kept, moved, gone = [], [], []
     for b in boxes:
         before, after = energy(base, b), energy(now, b)
@@ -266,11 +323,14 @@ class DeskCompare:
     """깨끗한 책상 사진 한 장을 들고 있다가 퇴실 뒤 책상과 비교한다."""
 
     def __init__(self, area, path=None, thresh=DIFF_THRESH, min_area=MIN_AREA, light="mean", gone=False, eq=False,
-                 model=DINO_MODEL, move=False):
+                 model=DINO_MODEL, move=False, match=False, match_sim=MATCH_SIM):
         self.area = area
         # DESK_THRESH·DESK_MIN_AREA·DESK_LIGHT·DESK_GONE·DESK_EQ·DESK_DINO_MODEL
         self.tune = {"thresh": thresh, "min_area": min_area, "light": light, "gone": gone, "eq": eq, "model": model,
                      "move": move}
+        self.match = match            # DESK_MATCH=1: 잘라낸 물건끼리 DINOv2로 "같은 물건인가" 비교 (실험)
+        self.match_sim = match_sim    # DESK_MATCH_SIM
+        self.base_frame = None        # DESK_MATCH용 기준 사진 (컬러, 메모리에만. 파일로 저장하지 않음)
         self.path = path              # 껐다 켜도 남게 저장할 파일 (.png). None이면 메모리에만
         self.base = None              # 깨끗한 책상 (prepare 결과)
         self.known = []               # 기준 때 모델이 찾은 물건 자리 (리모컨을 옮기면 빈 자리도 "달라짐"이라 뺀다)
@@ -311,6 +371,7 @@ class DeskCompare:
         known_dets = list(known_dets)
         self.set_prepared(self.look(frame), [d.box for d in known_dets])
         self.known_labels = [d.label for d in known_dets]
+        self.base_frame = frame if self.match else None
 
     def set_prepared(self, img, known_boxes=()):
         """look으로 미리 줄여 둔 사진을 기준으로 삼고 파일에 적는다 (사람 0명일 때 찍은 것만)."""
@@ -335,7 +396,7 @@ class DeskCompare:
 
     def clear(self):
         """기준 사진을 메모리와 파일에서 지운다 (예약 기준은 정리 확인이 끝나면 지운다)."""
-        self.base, self.known, self.known_labels, self.moved = None, [], [], []
+        self.base, self.known, self.known_labels, self.moved, self.base_frame = None, [], [], [], None
         for p in (self.path, self.path and self.path + ".json"):
             if p and os.path.exists(p):
                 try:
@@ -352,11 +413,25 @@ class DeskCompare:
         found = find_changes(self.base, now, moved=moved, **self.tune)
         self.moved = [to_frame(b, offset) for b in moved]
         if found is None:
+            self.there = []
             return None
+        # DESK_MATCH: 달라진 곳 중 "기준 때 뭔가 있던 자리"(옮기기 전 자리). 빈 책상 자리는 비교 대상에서 뺀다
+        self.there = [to_frame(b, offset) for b in was_there(self.base, now, found + moved)] if self.match else []
         return [to_frame(b, offset) for b in found]
+
+    def same_as_before(self, frame, things):
+        """퇴실 사진의 (상자, 넓힐 비율)마다 "기준 사진에 있던 같은 물건인가" (DESK_MATCH=1). 기준 컬러 사진이 없으면 모두 False.
+
+        기준 사진에서 자르는 곳: 기준 때 모델이 찾은 물건 + 옮기기 전 자리(기준 쪽에 무늬가 있던 달라진 곳).
+        """
+        if not self.match or self.base_frame is None or not things:
+            return [False] * len(things)
+        refs = [(b, MATCH_PAD) for b in self.known] + [(b, MATCH_SHRINK) for b in getattr(self, "there", [])]
+        return same_things(self.base_frame, frame, things, refs, self.tune["model"], self.match_sim)
 
 
 def settings(config):
     """게이트웨이 설정(DESK_THRESH, DESK_MIN_AREA, DESK_LIGHT, DESK_GONE, DESK_EQ, DESK_MOVE) → DeskCompare에 넘길 값."""
     return {"thresh": config.desk_thresh, "min_area": config.desk_min_area, "light": config.desk_light,
-            "gone": config.desk_gone, "eq": config.desk_eq, "model": config.desk_dino_model, "move": config.desk_move}
+            "gone": config.desk_gone, "eq": config.desk_eq, "model": config.desk_dino_model, "move": config.desk_move,
+            "match": config.desk_match, "match_sim": config.desk_match_sim}

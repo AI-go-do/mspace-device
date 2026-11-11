@@ -45,7 +45,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from desk_diff import desk_box, fingerprint
+from desk_diff import MATCH_PAD, MATCH_SHRINK, desk_box, fingerprint
 
 KST = timezone(timedelta(hours=9))
 
@@ -772,6 +772,7 @@ class RoomWatcher:
             return None  # 비교를 못 함 (기준 없음, 조명·카메라가 크게 바뀜). "달라진 곳 없음"과 구분
         seen = [d.box for d in self.objects(dets)] + list(desk.known)
         items = {}
+        self.desk_found = []  # (이름, 상자): DESK_MATCH에서 "원래 있던 같은 물건인가" 다시 보려고
         for box in changes:
             if any(overlaps(box, b) for b in seen):
                 continue  # 이미 개수로 센 물건이거나, 원래 있던 물건(리모컨)을 옮겨서 생긴 빈자리
@@ -779,7 +780,24 @@ class RoomWatcher:
             if label in FURNITURE:
                 continue  # 의자를 빼 두거나 넣은 자리 (가구는 정리 대상이 아님)
             items[label] = items.get(label, 0) + 1
+            self.desk_found.append((label, box))
         return items
+
+    def drop_same_things(self, frame, dets, now_items, extra, base, desk):
+        """DESK_MATCH=1: 늘어난 물건을 잘라 기준 사진의 물건과 DINOv2로 비교해, 같은 물건(옮김·뒤집음·이름 잘못 봄)은 뺀다."""
+        allowed = {k: max(base.get(k, 0), self.room_items.get(k, 0)) for k in now_items}
+        yolo = [d for d in self.objects(dets) if now_items.get(d.label, 0) > allowed.get(d.label, 0)]
+        found = list(getattr(self, "desk_found", []))
+        same = desk.same_as_before(frame, [(d.box, MATCH_PAD) for d in yolo]
+                                   + [(box, MATCH_SHRINK) for _, box in found])
+        now_items, extra = dict(now_items), dict(extra)
+        for d, hit in zip(yolo, same[:len(yolo)]):
+            if hit and now_items.get(d.label, 0) > allowed.get(d.label, 0):
+                now_items[d.label] -= 1
+        for (label, _), hit in zip(found, same[len(yolo):]):
+            if hit and extra.get(label, 0) > 0:
+                extra[label] -= 1
+        return ({k: v for k, v in now_items.items() if v > 0}, {k: v for k, v in extra.items() if v > 0})
 
     def not_moved(self, dets, now_items, base, desk):
         """DESK_MOVE=1: 늘어난 물건 중 "원래 있던 걸 옮기거나 다른 이름으로 잘못 본 것"은 빼고 다시 센다 (실험).
@@ -815,9 +833,11 @@ class RoomWatcher:
         if desk is not None and desk.ready and photo is not None:
             frame = photo()
             found = self.desk_items(frame, dets, desk)
-            del frame
             compared = found is not None
             extra = found or {}
+            if compared and getattr(desk, "match", False):
+                now_items, extra = self.drop_same_things(frame, dets, now_items, extra, base, desk)
+            del frame
             if not compared:
                 print(f"정리 확인 {self.room_id}번 방: 책상 사진 비교를 건너뜀 (조명·카메라가 크게 바뀜)")
         if compared and desk.tune.get("move"):

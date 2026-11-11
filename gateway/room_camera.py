@@ -240,6 +240,12 @@ def overlaps(a, b, ratio=0.3):
     return inside(a, b, ratio)
 
 
+def similar_size(a, b, ratio=2.5):
+    """두 상자 넓이가 ratio배 안으로 비슷한지."""
+    small, big = sorted((a[2] * a[3], b[2] * b[3]))
+    return small > 0 and big <= ratio * small
+
+
 def inside(a, b, ratio=0.5):
     """a 상자가 b 상자 안에 절반 넘게 들어가 있는지."""
     ax, ay, aw, ah = a
@@ -775,6 +781,23 @@ class RoomWatcher:
             items[label] = items.get(label, 0) + 1
         return items
 
+    def not_moved(self, dets, now_items, base, desk):
+        """DESK_MOVE=1: 늘어난 물건 중 "원래 있던 걸 옮기거나 다른 이름으로 잘못 본 것"은 빼고 다시 센다 (실험).
+
+        - 책상 비교가 "옮긴 자리"로 본 곳에 있는 것 (리모컨을 옮김·뒤집음)
+        - 기준 때 다른 이름의 물건이 있던 자리에, 비슷한 크기로 잡힌 것 (뒤집힌 리모컨을 laptop으로 봄)
+        개수가 기준보다 늘어난 이름만 본다. 기준에 있던 같은 이름의 물건은 원래대로 센다.
+        """
+        known = list(zip(desk.known, desk.known_labels))
+        items = dict(now_items)
+        for d in self.objects(dets):
+            if items.get(d.label, 0) <= max(base.get(d.label, 0), self.room_items.get(d.label, 0)):
+                continue
+            renamed = any(label != d.label and overlaps(d.box, box) and similar_size(d.box, box) for box, label in known)
+            if renamed or any(overlaps(d.box, box) for box in desk.moved):
+                items[d.label] -= 1
+        return {k: v for k, v in items.items() if v > 0}
+
     def check(self, dets, now_iso, photo=None, base=None, desk=None):
         """깨끗할 때보다 늘어난 물건만 골라 결과를 만든다 (종류별 개수, 자리는 보지 않음).
 
@@ -797,6 +820,8 @@ class RoomWatcher:
             extra = found or {}
             if not compared:
                 print(f"정리 확인 {self.room_id}번 방: 책상 사진 비교를 건너뜀 (조명·카메라가 크게 바뀜)")
+        if compared and desk.tune.get("move"):
+            now_items = self.not_moved(dets, now_items, base, desk)
         trash, left, confidence = {}, {}, {}
         scores = self.scores(dets)
         for label, n in now_items.items():

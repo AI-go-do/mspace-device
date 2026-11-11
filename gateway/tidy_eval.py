@@ -164,7 +164,7 @@ def score(cases, run_case):
 def candidate_name(env):
     """채점한 설정을 한 줄로 (README 기록용). 게이트웨이 설정 이름 그대로."""
     keys = ("YOLO_MODEL", "DESK_PHOTO", "DESK_AREA", "FLOOR_AREA", "DESK_LIGHT", "DESK_THRESH", "DESK_MIN_AREA",
-            "DESK_GONE", "DESK_EQ", "LABEL_MODEL", "ROOM_ITEMS")
+            "DESK_GONE", "DESK_EQ", "DESK_MOVE", "LABEL_MODEL", "ROOM_ITEMS")
     parts = [f"{k}={env[k]}" for k in keys if env.get(k)]
     return " ".join(parts) or "(설정 없음)"
 

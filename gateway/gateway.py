@@ -92,6 +92,7 @@ class Config:
     desk_gone: bool = False                # 책상 비교: 물건을 치운 자리는 "달라짐"에서 뺀다 (DESK_GONE=1, 실험)
     desk_dino_model: str = "gateway/dinov2_small.onnx"  # DESK_LIGHT=dino에서 쓸 DINOv2 ONNX (DESK_DINO_MODEL, 실험)
     desk_eq: bool = False                  # 책상 비교: 지금 사진 밝기·대비를 기준에 맞춤 (DESK_EQ=1, 불 켬↔끔 실험)
+    desk_move: bool = False                # 책상 비교: 원래 있던 걸 옮기거나 뒤집은 것은 새 물건으로 안 셈 (DESK_MOVE=1, 실험)
     tidy_photos: bool = False              # True면 정리 확인 때 빈 방 사진(입실 전·퇴실 뒤·3시간 뒤)을 core로 올린다 (Q-27)
     label_model: str | None = None         # 달라진 곳에 이름 붙일 모델 (YOLO-World ONNX). 없으면 YOLO_MODEL로
     baseline_file: str | None = "room_baseline.json"  # 깨끗한 방 기준을 적어 두는 파일. BASELINE_FILE=off면 메모리에만
@@ -147,6 +148,7 @@ def load_config(env=None):
         desk_dino_model=env.get("DESK_DINO_MODEL") or Config.desk_dino_model,
         desk_gone=env.get("DESK_GONE") == "1",
         desk_eq=env.get("DESK_EQ") == "1",
+        desk_move=env.get("DESK_MOVE") == "1",
         tidy_photos=env.get("TIDY_PHOTOS") == "1",
         label_model=env.get("LABEL_MODEL") or None,
         baseline_file=(None if env.get("BASELINE_FILE") == "off"

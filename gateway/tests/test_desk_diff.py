@@ -77,6 +77,51 @@ def test_gone_drops_places_where_a_thing_was_taken_away():
     assert len(find_changes(empty, with_phone, light="ssim", gone=True)) == 1  # 새로 둔 것은 그대로
 
 
+REMOTE = (700, 700, 45, 30, (30, 30, 30))
+MOVED_REMOTE = (1000, 800, 30, 45, (30, 30, 30))      # 옮기면서 돌림
+FLIPPED_REMOTE = (700, 700, 45, 30, (120, 120, 170))  # 같은 자리에서 뒤집음 (뒷면 색이 다름)
+
+
+def test_move_drops_moved_and_flipped_room_things_but_keeps_new_ones():
+    """원래 있던 리모컨을 옮기거나 뒤집은 것은 빼고, 새로 둔 물건은 남긴다 (DESK_MOVE=1)."""
+    base, _ = prepare(desk(REMOTE, noise=6), AREA)
+    moved_img, _ = prepare(desk(MOVED_REMOTE, noise=6), AREA)
+    flipped, _ = prepare(desk(FLIPPED_REMOTE, noise=6), AREA)
+    assert len(find_changes(base, moved_img, light="ssim")) == 2   # 끄면 빈자리·새 자리 둘 다 "달라짐"
+    out = []
+    assert find_changes(base, moved_img, light="ssim", move=True, moved=out) == []
+    assert len(out) == 2
+    assert len(find_changes(base, flipped, light="ssim")) == 1
+    assert find_changes(base, flipped, light="ssim", move=True) == []
+    with_paper, _ = prepare(desk(MOVED_REMOTE, PAPER, noise=6), AREA)
+    assert len(find_changes(base, with_paper, light="ssim", move=True)) == 1  # 크기가 다른 새 물건은 그대로
+    empty, _ = prepare(desk(noise=6), AREA)
+    assert len(find_changes(empty, prepare(desk(PHONE, noise=6), AREA)[0], light="ssim", move=True)) == 1
+
+
+def test_move_does_not_count_a_flipped_remote_seen_as_laptop():
+    """뒤집힌 리모컨을 YOLO가 laptop으로 봐도, 기준 때 리모컨이 있던 자리·크기면 새 물건으로 안 센다."""
+    import tidy_eval
+    before, after = desk(REMOTE, noise=6), desk(FLIPPED_REMOTE, noise=6)
+    remote = Detection("remote", 0.8, (700, 700, 45, 30))
+    laptop = Detection("laptop", 0.4, (698, 699, 50, 33))
+
+    def find(frame):
+        return [remote] if frame is before else [laptop]
+
+    on = DeskCompare(AREA, light="ssim", move=True)
+    check, _ = tidy_eval.judge(before, after, find, room_items={"remote": 1}, desk=on)
+    assert check["status"] == "CLEAN"
+    off = DeskCompare(AREA, light="ssim")
+    check, _ = tidy_eval.judge(before, after, find, room_items={"remote": 1}, desk=off)
+    assert check["leftItems"] == {"laptop": 1}  # 끄면 지금처럼 잘못 신고
+    phone = Detection("cell phone", 0.7, (900, 400, 40, 80))
+    check, _ = tidy_eval.judge(before, desk(FLIPPED_REMOTE, PHONE, noise=6),
+                               lambda f: [remote] if f is before else [laptop, phone],
+                               room_items={"remote": 1}, desk=DeskCompare(AREA, light="ssim", move=True))
+    assert check["leftItems"] == {"cell phone": 1}  # 새로 둔 휴대폰은 그대로
+
+
 def test_eq_still_finds_things_in_a_dark_room():
     base, _ = prepare(desk(noise=6), AREA)
     for light in (0.5, 0.35, 0.2):
@@ -124,10 +169,10 @@ def test_desk_settings_come_from_env(capsys):
     config = gateway.load_config({"DESK_THRESH": "50", "DESK_MIN_AREA": "0.004", "DESK_LIGHT": "local", "PORT": "x"})
     d = DeskCompare(AREA, **desk_diff.settings(config))
     assert d.tune == {"thresh": 50, "min_area": 0.004, "light": "local", "gone": False, "eq": False,
-                      "model": "gateway/dinov2_small.onnx"}
+                      "model": "gateway/dinov2_small.onnx", "move": False}
     assert gateway.load_config({"DESK_LIGHT": "dino", "DESK_DINO_MODEL": "m.onnx", "PORT": "x"}).desk_dino_model == "m.onnx"
-    config = gateway.load_config({"DESK_GONE": "1", "DESK_EQ": "1", "PORT": "x"})
-    assert (config.desk_gone, config.desk_eq) == (True, True)
+    config = gateway.load_config({"DESK_GONE": "1", "DESK_EQ": "1", "DESK_MOVE": "1", "PORT": "x"})
+    assert (config.desk_gone, config.desk_eq, config.desk_move) == (True, True, True)
     config = gateway.load_config({"DESK_THRESH": "999", "DESK_MIN_AREA": "abc", "PORT": "x"})
     assert (config.desk_thresh, config.desk_min_area, config.desk_light) == (35, 0.0012, "mean")
     assert "DESK_THRESH가 이상해서" in capsys.readouterr().out

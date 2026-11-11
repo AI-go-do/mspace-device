@@ -5,16 +5,21 @@
 set -u
 cd ~/mspace-device || exit 1
 LLAMA=~/llama.cpp/build/bin/llama-server
+PORT=${VLM_PORT:-8091}  # 8080은 다른 프로그램(사진 보기 서버 등)이 쓰고 있을 수 있어서 피한다
 B="YOLO_MODEL=gateway/yolov8s.onnx DESK_PHOTO=1 DESK_AREA=0.25,0.22,0.64,0.83 ROOM_ITEMS=remote:1 DESK_LIGHT=ssim DESK_THRESH=25 DESK_MOVE=1 DESK_MOVE_SAME=1.0"
-V="VLM_URL=http://127.0.0.1:8080 VLM_CACHE=$HOME/vlm/cache.json TIDY_TIMEOUT=7200"
+V="VLM_URL=http://127.0.0.1:$PORT VLM_CACHE=$HOME/vlm/cache.json TIDY_TIMEOUT=7200"
 
 run_model() {
   name=$1; model=$2; mmproj=$3
   echo "=== $name 시작 $(date +%H:%M)"
-  "$LLAMA" -m ~/vlm/"$model" --mmproj ~/vlm/"$mmproj" --host 127.0.0.1 --port 8080 -t 6 -c 8192 > ~/vlm/"$name".log 2>&1 &
+  if curl -s -o /dev/null "http://127.0.0.1:$PORT/"; then
+    echo "$PORT번 포트를 이미 다른 프로그램이 쓰고 있어요. VLM_PORT=다른번호 로 다시 돌려요"; return
+  fi
+  "$LLAMA" -m ~/vlm/"$model" --mmproj ~/vlm/"$mmproj" --host 127.0.0.1 --port "$PORT" -t 6 -c 8192 > ~/vlm/"$name".log 2>&1 &
   pid=$!
-  for _ in $(seq 120); do curl -sf http://127.0.0.1:8080/health > /dev/null && break; sleep 5; done
-  if ! curl -sf http://127.0.0.1:8080/health > /dev/null; then
+  ready() { curl -sf "http://127.0.0.1:$PORT/health" | grep -q '"ok"'; }  # llama-server가 맞는지까지 확인
+  for _ in $(seq 120); do ready && break; kill -0 "$pid" 2>/dev/null || break; sleep 5; done
+  if ! ready; then
     echo "$name 서버가 안 떴어요. ~/vlm/$name.log 를 보세요"; kill "$pid" 2>/dev/null; return
   fi
   printf '%s\n' \

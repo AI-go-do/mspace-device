@@ -93,6 +93,7 @@ def test_move_drops_moved_and_flipped_room_things_but_keeps_new_ones():
     assert len(out) == 2
     assert len(find_changes(base, flipped, light="ssim")) == 1
     assert find_changes(base, flipped, light="ssim", move=True) == []
+    assert len(find_changes(base, flipped, light="ssim", move=True, move_same=5.0)) == 1  # 기준을 높이면 덜 뺌
     with_paper, _ = prepare(desk(MOVED_REMOTE, PAPER, noise=6), AREA)
     assert len(find_changes(base, with_paper, light="ssim", move=True)) == 1  # 크기가 다른 새 물건은 그대로
     empty, _ = prepare(desk(noise=6), AREA)
@@ -218,7 +219,8 @@ def test_desk_settings_come_from_env(capsys):
     config = gateway.load_config({"DESK_THRESH": "50", "DESK_MIN_AREA": "0.004", "DESK_LIGHT": "local", "PORT": "x"})
     d = DeskCompare(AREA, **desk_diff.settings(config))
     assert d.tune == {"thresh": 50, "min_area": 0.004, "light": "local", "gone": False, "eq": False,
-                      "model": "gateway/dinov2_small.onnx", "move": False}
+                      "model": "gateway/dinov2_small.onnx", "move": False,
+                      "move_same": 0.67}
     assert (d.match, d.match_sim) == (False, 0.8)
     assert gateway.load_config({"DESK_LIGHT": "dino", "DESK_DINO_MODEL": "m.onnx", "PORT": "x"}).desk_dino_model == "m.onnx"
     config = gateway.load_config({"DESK_GONE": "1", "DESK_EQ": "1", "DESK_MOVE": "1", "PORT": "x"})

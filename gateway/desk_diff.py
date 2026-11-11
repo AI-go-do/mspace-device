@@ -245,7 +245,7 @@ def match_contrast(base, now):
 
 
 def find_changes(base, now, thresh=DIFF_THRESH, min_area=MIN_AREA, max_area=MAX_AREA, light="mean",
-                 gone=False, eq=False, model=DINO_MODEL, move=False, moved=None):
+                 gone=False, eq=False, model=DINO_MODEL, move=False, moved=None, move_same=MOVE_SAME):
     """두 책상 사진(prepare 결과)에서 달라진 곳 상자 (x, y, w, h) 목록. 조명이 통째로 바뀌었으면 None.
 
     light="mean": 사진 전체 밝기만 맞춘다 (원래 방식). "local": 자리마다 밝기를 고르게 한 뒤 비교한다.
@@ -280,7 +280,7 @@ def find_changes(base, now, thresh=DIFF_THRESH, min_area=MIN_AREA, max_area=MAX_
     if gone:
         boxes = [b for b in boxes if not is_gone(base, now, b)]
     if move:
-        boxes, out = split_moved(base, now, boxes)
+        boxes, out = split_moved(base, now, boxes, same=move_same)
         if moved is not None:
             moved.extend(out)
     return boxes
@@ -323,11 +323,11 @@ class DeskCompare:
     """깨끗한 책상 사진 한 장을 들고 있다가 퇴실 뒤 책상과 비교한다."""
 
     def __init__(self, area, path=None, thresh=DIFF_THRESH, min_area=MIN_AREA, light="mean", gone=False, eq=False,
-                 model=DINO_MODEL, move=False, match=False, match_sim=MATCH_SIM):
+                 model=DINO_MODEL, move=False, match=False, match_sim=MATCH_SIM, move_same=MOVE_SAME):
         self.area = area
         # DESK_THRESH·DESK_MIN_AREA·DESK_LIGHT·DESK_GONE·DESK_EQ·DESK_DINO_MODEL
         self.tune = {"thresh": thresh, "min_area": min_area, "light": light, "gone": gone, "eq": eq, "model": model,
-                     "move": move}
+                     "move": move, "move_same": move_same}
         self.match = match            # DESK_MATCH=1: 잘라낸 물건끼리 DINOv2로 "같은 물건인가" 비교 (실험)
         self.match_sim = match_sim    # DESK_MATCH_SIM
         self.base_frame = None        # DESK_MATCH용 기준 사진 (컬러, 메모리에만. 파일로 저장하지 않음)
@@ -434,4 +434,4 @@ def settings(config):
     """게이트웨이 설정(DESK_THRESH, DESK_MIN_AREA, DESK_LIGHT, DESK_GONE, DESK_EQ, DESK_MOVE) → DeskCompare에 넘길 값."""
     return {"thresh": config.desk_thresh, "min_area": config.desk_min_area, "light": config.desk_light,
             "gone": config.desk_gone, "eq": config.desk_eq, "model": config.desk_dino_model, "move": config.desk_move,
-            "match": config.desk_match, "match_sim": config.desk_match_sim}
+            "match": config.desk_match, "match_sim": config.desk_match_sim, "move_same": config.desk_move_same}

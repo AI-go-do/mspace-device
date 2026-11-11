@@ -93,6 +93,7 @@ class Config:
     desk_dino_model: str = "gateway/dinov2_small.onnx"  # DESK_LIGHT=dino에서 쓸 DINOv2 ONNX (DESK_DINO_MODEL, 실험)
     desk_eq: bool = False                  # 책상 비교: 지금 사진 밝기·대비를 기준에 맞춤 (DESK_EQ=1, 불 켬↔끔 실험)
     desk_move: bool = False                # 책상 비교: 원래 있던 걸 옮기거나 뒤집은 것은 새 물건으로 안 셈 (DESK_MOVE=1, 실험)
+    desk_move_same: float = 0.67           # DESK_MOVE에서 "원래 있던 자리"로 볼 기준 (DESK_MOVE_SAME, 높을수록 덜 뺌)
     desk_match: bool = False               # 정리 확인: 잘라낸 물건끼리 DINOv2로 "같은 물건인가" 비교 (DESK_MATCH=1, 실험)
     desk_match_sim: float = 0.8            # DESK_MATCH에서 "같은 물건"으로 볼 비슷한 정도 (DESK_MATCH_SIM, 0~1)
     tidy_photos: bool = False              # True면 정리 확인 때 빈 방 사진(입실 전·퇴실 뒤·3시간 뒤)을 core로 올린다 (Q-27)
@@ -152,6 +153,7 @@ def load_config(env=None):
         desk_eq=env.get("DESK_EQ") == "1",
         desk_move=env.get("DESK_MOVE") == "1",
         desk_match=env.get("DESK_MATCH") == "1",
+        desk_move_same=parse_number(env, "DESK_MOVE_SAME", Config.desk_move_same, 0.1, 10.0, float),
         desk_match_sim=parse_number(env, "DESK_MATCH_SIM", Config.desk_match_sim, 0.0, 1.0, float),
         tidy_photos=env.get("TIDY_PHOTOS") == "1",
         label_model=env.get("LABEL_MODEL") or None,

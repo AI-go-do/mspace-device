@@ -18,6 +18,8 @@ DIFF_THRESH = 35     # 밝기 차이가 이보다 크면 "달라짐" (0~255)
 MIN_AREA = 0.0012    # 책상 넓이의 이 비율보다 작은 차이는 무시 (먼지·잡음). 640폭에서 약 22×22
 MAX_AREA = 0.35      # 이보다 크면 물건이 아니라 조명·카메라가 바뀐 것으로 본다
 LIGHT_BLUR = 0.05    # DESK_LIGHT=local: 책상 폭의 이 비율 크기로 흐린 사진(= 그 자리 밝기)으로 나눠서 비교한다
+SSIM_SIGMA = 3.0     # DESK_LIGHT=ssim: 모양을 비교할 작은 창 크기 (가우스 시그마, 640폭 기준 약 15×15)
+LIGHT_MODES = ("mean", "local", "ssim")
 
 
 def desk_box(width, height, area):
@@ -55,16 +57,41 @@ def flatten_light(img):
     return np.clip(img.astype(np.float32) / glow * 128.0, 0, 255).astype(np.uint8)
 
 
+def ssim_diff(base, now, sigma=SSIM_SIGMA):
+    """자리마다 "모양이 얼마나 다른가"를 0~255로 (SSIM). 밝기·대비가 통째로 바뀐 것은 거의 0으로 나온다.
+
+    SSIM은 작은 창마다 평균 밝기·대비·무늬(상관)를 따로 비교한다. 빛이 세지거나 그림자가 져도 무늬가 같으면
+    비슷하다고 보고, 물건이 생겨 무늬가 바뀐 곳만 크게 나온다. 값 = (1 - SSIM) / 2 × 255.
+    """
+    import cv2
+    import numpy as np
+    a, b = base.astype(np.float32), now.astype(np.float32)
+    c1, c2 = (0.01 * 255) ** 2, (0.03 * 255) ** 2
+
+    def blur(x):
+        return cv2.GaussianBlur(x, (0, 0), sigma)
+
+    mu_a, mu_b = blur(a), blur(b)
+    var_a = blur(a * a) - mu_a * mu_a
+    var_b = blur(b * b) - mu_b * mu_b
+    cov = blur(a * b) - mu_a * mu_b
+    ssim = ((2 * mu_a * mu_b + c1) * (2 * cov + c2)) / ((mu_a * mu_a + mu_b * mu_b + c1) * (var_a + var_b + c2))
+    return np.clip((1.0 - ssim) * 127.5, 0, 255).astype(np.uint8)
+
+
 def find_changes(base, now, thresh=DIFF_THRESH, min_area=MIN_AREA, max_area=MAX_AREA, light="mean"):
     """두 책상 사진(prepare 결과)에서 달라진 곳 상자 (x, y, w, h) 목록. 조명이 통째로 바뀌었으면 None.
 
     light="mean": 사진 전체 밝기만 맞춘다 (원래 방식). "local": 자리마다 밝기를 고르게 한 뒤 비교한다.
+    "ssim": 밝기 차이 대신 자리마다 모양(무늬)이 달라졌는지 본다 (빛·그림자에 가장 덜 예민, 조금 느림).
     """
     import cv2
     import numpy as np
     if base.shape != now.shape:
         return None
-    if light == "local":
+    if light == "ssim":
+        diff = ssim_diff(base, now)
+    elif light == "local":
         diff = cv2.absdiff(flatten_light(base), flatten_light(now))
     else:
         diff = cv2.absdiff(base, match_light(base, now))

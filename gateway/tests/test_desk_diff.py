@@ -58,6 +58,16 @@ def test_local_light_ignores_one_sided_light_but_still_finds_things():
     assert len(found) == 1
 
 
+def test_ssim_ignores_light_and_shade_but_still_finds_things():
+    base, _ = prepare(desk(noise=6), AREA)
+    assert find_changes(base, prepare(desk(noise=6), AREA)[0], light="ssim") == []
+    assert find_changes(base, prepare(desk(light=0.7, noise=6), AREA)[0], light="ssim") == []
+    assert find_changes(base, prepare(side_light(desk(noise=6)), AREA)[0], light="ssim") == []
+    assert len(find_changes(base, prepare(desk(PHONE, PAPER, CARD, noise=6), AREA)[0], light="ssim")) == 3
+    found = find_changes(base, prepare(side_light(desk(PHONE, noise=6)), AREA)[0], light="ssim")
+    assert len(found) == 1
+
+
 def test_desk_settings_come_from_env(capsys):
     import desk_diff
     import gateway
@@ -67,6 +77,8 @@ def test_desk_settings_come_from_env(capsys):
     config = gateway.load_config({"DESK_THRESH": "999", "DESK_MIN_AREA": "abc", "PORT": "x"})
     assert (config.desk_thresh, config.desk_min_area, config.desk_light) == (35, 0.0012, "mean")
     assert "DESK_THRESH가 이상해서" in capsys.readouterr().out
+    assert gateway.load_config({"DESK_LIGHT": "ssim", "PORT": "x"}).desk_light == "ssim"
+    assert gateway.load_config({"DESK_LIGHT": "fancy", "PORT": "x"}).desk_light == "mean"
 
 
 def test_whole_desk_changed_means_camera_moved():

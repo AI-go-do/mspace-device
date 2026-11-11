@@ -34,7 +34,7 @@ ANSWERS = ("CLEAN", "NEEDS_CLEANING", "LEFT_ITEMS")
 KOREAN = {"CLEAN": "깨끗함", "NEEDS_CLEANING": "치울 것", "LEFT_ITEMS": "두고 간 물건"}
 CHOICES = {"1": "CLEAN", "2": "NEEDS_CLEANING", "3": "LEFT_ITEMS"}
 GOAL_ACCURACY = 0.95
-GOAL_SECONDS = 1.0
+GOAL_SECONDS = 10.0  # 정리 확인은 퇴실 뒤 한 번만 봐서 10초면 충분 (11/11 수연). 시연 땐 정확도가 비슷하면 빠른 쪽
 DEFAULT_DIR = "eval/tidy"
 RESULT_MARK = "TIDY_RESULT "
 # 모델 파일 이름 → 라이선스 (포트폴리오·배포 때 확인용). 모르는 모델은 "확인 필요"

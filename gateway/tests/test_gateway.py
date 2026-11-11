@@ -436,3 +436,31 @@ def test_remote_http_server_exits():
     cfg = gateway.Config(port="/dev/null", device_token="t", server="http://core.example.com")
     with pytest.raises(SystemExit, match="https"):
         gateway.main(cfg)
+
+
+# ---- 정리 확인 사진 전송 (PhotoSender, core #115) ----
+
+def test_photo_sender_posts_multipart_and_drops_rejected(monkeypatch, capsys):
+    sent = []
+    replies = [FakeResponse(status=201), FakeResponse(status=503), FakeResponse(status=201), FakeResponse(status=400)]
+
+    def fake_post(url, data=None, files=None, timeout=None, headers=None, allow_redirects=True):
+        sent.append((url, data, files, headers, allow_redirects))
+        return replies.pop(0)
+
+    monkeypatch.setattr(gateway.requests, "post", fake_post)
+    s = gateway.PhotoSender("https://core.example", "test-token", 2)
+    s.push({"reservationId": 7, "phase": "FIRST", "deviceId": "camera-2", "jpg": b"\xff\xd8a"})
+    assert s.step() == 0 and not s.queue
+    url, data, files, headers, redirects = sent[0]
+    assert url == "https://core.example/api/rooms/2/tidy-photos"
+    assert data == {"reservationId": "7", "phase": "FIRST", "deviceId": "camera-2"}
+    assert files == {"file": ("first.jpg", b"\xff\xd8a", "image/jpeg")}
+    assert headers == {"Authorization": "Bearer test-token"} and redirects is False
+    s.push({"reservationId": 7, "phase": "RECHECK", "deviceId": "camera-2", "jpg": b"b"})
+    assert s.step() == 1 and len(s.queue) == 1  # 서버 문제면 다시
+    assert s.step() == 0 and not s.queue
+    s.push({"reservationId": 7, "phase": "ENTRY", "deviceId": "camera-2", "jpg": b"c"})
+    assert s.step() == 0 and not s.queue  # core가 ENTRY를 아직 안 받으면(400) 그 장만 버림
+    assert "이것만 버려요" in capsys.readouterr().out
+    assert s.queue.maxlen == gateway.PHOTO_QUEUE_MAX

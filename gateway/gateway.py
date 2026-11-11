@@ -89,6 +89,7 @@ class Config:
     desk_thresh: int = 35                  # 책상 비교: 밝기 차이가 이보다 크면 "달라짐" (DESK_THRESH, 1~255)
     desk_min_area: float = 0.0012          # 책상 비교: 책상 넓이의 이 비율보다 작은 차이는 무시 (DESK_MIN_AREA)
     desk_light: str = "mean"               # 책상 비교 밝기 맞추기: mean(전체) / local(자리마다, DESK_LIGHT=local)
+    tidy_photos: bool = False              # True면 정리 확인 때 빈 방 사진(입실 전·퇴실 뒤·3시간 뒤)을 core로 올린다 (Q-27)
     label_model: str | None = None         # 달라진 곳에 이름 붙일 모델 (YOLO-World ONNX). 없으면 YOLO_MODEL로
     baseline_file: str | None = "room_baseline.json"  # 깨끗한 방 기준을 적어 두는 파일. BASELINE_FILE=off면 메모리에만
     mqtt_room: int | None = None           # 교육장 MQTT 센서 값을 이 방 CO2·온도·습도로 보낸다 (Q-21 시연). 비우면 끔
@@ -140,6 +141,7 @@ def load_config(env=None):
         desk_thresh=parse_number(env, "DESK_THRESH", Config.desk_thresh, 1, 255, int),
         desk_min_area=parse_number(env, "DESK_MIN_AREA", Config.desk_min_area, 0.0, 0.3, float),
         desk_light="local" if env.get("DESK_LIGHT") == "local" else Config.desk_light,
+        tidy_photos=env.get("TIDY_PHOTOS") == "1",
         label_model=env.get("LABEL_MODEL") or None,
         baseline_file=(None if env.get("BASELINE_FILE") == "off"
                        else env.get("BASELINE_FILE") or Config.baseline_file),
@@ -340,9 +342,7 @@ class SensorSender:
                 return None
             body = self.queue[0]
         try:
-            r = requests.post(self.url, json=body, timeout=(CONNECT_TIMEOUT, TIMEOUT), headers=self.headers,
-                              allow_redirects=False)  # 리디렉션을 따라가면 토큰이 다른 곳으로 갈 수 있다
-            status = r.status_code
+            status = self.post(body).status_code
         except requests.RequestException as e:
             status = None
             print(f"[{self.name}] 연결 실패, 다시 보내요: {e.__class__.__name__}")
@@ -360,6 +360,10 @@ class SensorSender:
         wait = self.backoff
         self.backoff = min(self.backoff * 2, RETRY_MAX)
         return wait
+
+    def post(self, body):
+        return requests.post(self.url, json=body, timeout=(CONNECT_TIMEOUT, TIMEOUT), headers=self.headers,
+                             allow_redirects=False)  # 리디렉션을 따라가면 토큰이 다른 곳으로 갈 수 있다
 
     def run_forever(self):
         while True:
@@ -381,6 +385,28 @@ class SensorSender:
 POLL_SEC = 10  # 10초마다 서버에 "지금 이 방 예약 상태"를 묻는다 (core #81 GET /api/rooms/{id}/current)
 RECHECK_MARGIN_SEC = 60  # 다시 확인은 at보다 1분 늦게. 젯슨 시계가 core보다 조금 빨라도 TOO_EARLY(409)로 버려지지 않게
 TIDY_DROP = SENSOR_DROP | {404}  # 404 = 다른 방 예약이거나 서버에 아직 API가 없음 → 다시 보내도 같다
+
+
+PHOTO_QUEUE_MAX = 12  # 끊긴 동안 모아 둘 사진 수 (한 장 0.1~1MB라 메모리를 아낀다). 넘치면 오래된 것부터 버린다
+# 400 = 사진이 이상하거나 core가 그 단계(ENTRY)를 아직 안 받음, 409 = 이미 올렸거나 마지막 퇴실 예약이 아님
+PHOTO_DROP = TIDY_DROP
+
+
+class PhotoSender(SensorSender):
+    """정리 확인 사진을 POST /api/rooms/{roomId}/tidy-photos (core #115)로 multipart로 올린다.
+
+    다시 보내기·버리기 규칙은 SensorSender와 같다. 사진은 메모리 줄에만 있고 다 보내면 사라진다.
+    """
+
+    def __init__(self, server, token, room, name="정리 확인 사진 전송"):
+        super().__init__(server, token, path=f"/api/rooms/{room}/tidy-photos", drop=PHOTO_DROP, name=name)
+        self.queue = deque(maxlen=PHOTO_QUEUE_MAX)
+
+    def post(self, body):
+        fields = {"reservationId": str(body["reservationId"]), "phase": body["phase"], "deviceId": body["deviceId"]}
+        files = {"file": (f"{body['phase'].lower()}.jpg", body["jpg"], "image/jpeg")}
+        return requests.post(self.url, data=fields, files=files, timeout=(CONNECT_TIMEOUT, TIMEOUT),
+                             headers=self.headers, allow_redirects=False)
 
 
 class CheckoutPoller:
@@ -784,15 +810,19 @@ def start_room_camera(config, sensors):
         import desk_diff
         path = os.path.splitext(config.baseline_file)[0] + "_entry_desk.png" if config.baseline_file else None
         entry_desk = desk_diff.DeskCompare(config.desk_area, path=path, **desk_diff.settings(config))
+    photos = config.tidy_photos and on_checkout  # 연습 모드는 서버로 안 보내니 사진도 안 찍는다
     watcher = room_camera.RoomWatcher(room, check_objects=detector.finds_objects, room_items=config.room_items,
                                       on_checkout=on_checkout, baseline_path=config.baseline_file,
-                                      desk=desk, labeler=labeler, entry_desk=entry_desk)
+                                      desk=desk, labeler=labeler, entry_desk=entry_desk, photos=photos)
     cam = room_camera.open_camera(config.room_camera)
-    send_check = None
+    send_check = send_photo = None
     if on_checkout:
         tidy = SensorSender(config.server, config.device_token, path=f"/api/rooms/{room}/tidy-checks",
                             drop=TIDY_DROP, name="정리 확인 전송").start()
         send_check = tidy.push
+        if photos:
+            send_photo = PhotoSender(config.server, config.device_token, room).start().push
+            print("정리 확인 사진: 사람 0명인 빈 방 사진을 core에 올려요 (입실 전·퇴실 뒤·3시간 뒤, 30일 보관)")
         CheckoutPoller(config.server, config.device_token, room,
                        lambda rid: watcher.request_check(rid, time.monotonic()),
                        on_recheck=lambda rid: watcher.request_check(rid, time.monotonic(), "RECHECK"),
@@ -807,7 +837,7 @@ def start_room_camera(config, sensors):
                                lambda: fresh_pir(room)),
                          kwargs={"preview": start_preview(config.preview_port, config.preview_host),
                                  "on_frame": lambda: CAMERA_ROOMS.__setitem__(room, time.monotonic()),
-                                 "send_check": send_check},
+                                 "send_check": send_check, "send_photo": send_photo},
                          daemon=True)
     t.start()
     return t

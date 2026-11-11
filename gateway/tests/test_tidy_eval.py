@@ -304,7 +304,7 @@ def test_capture_stops_when_photo_not_saved(tmp_path):
     assert not (tmp_path / "answers.csv").exists()
 
 
-def test_run_one_uses_default_timeout_for_bad_value():
+def test_run_one_uses_default_timeout_for_bad_value(tmp_path):
     seen = []
 
     class Done:
@@ -315,8 +315,8 @@ def test_run_one_uses_default_timeout_for_bad_value():
         return Done()
 
     for bad in ("abc", "0", "-5", "inf"):
-        te.run_one("eval/tidy", te.Candidate("a", {"TIDY_TIMEOUT": bad}), {}, run=run)
-    te.run_one("eval/tidy", te.Candidate("a", {"TIDY_TIMEOUT": "60"}), {}, run=run)
+        te.run_one(str(tmp_path / "없음"), te.Candidate("a", {"TIDY_TIMEOUT": bad}), {}, run=run)
+    te.run_one(str(tmp_path / "없음"), te.Candidate("a", {"TIDY_TIMEOUT": "60"}), {}, run=run)
     assert seen == [1800.0, 1800.0, 1800.0, 1800.0, 60.0]  # 문제집이 없으면 최소 30분
 
 

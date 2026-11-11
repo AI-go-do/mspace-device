@@ -19,7 +19,12 @@ MIN_AREA = 0.0012    # 책상 넓이의 이 비율보다 작은 차이는 무시
 MAX_AREA = 0.35      # 이보다 크면 물건이 아니라 조명·카메라가 바뀐 것으로 본다
 LIGHT_BLUR = 0.05    # DESK_LIGHT=local: 책상 폭의 이 비율 크기로 흐린 사진(= 그 자리 밝기)으로 나눠서 비교한다
 SSIM_SIGMA = 3.0     # DESK_LIGHT=ssim: 모양을 비교할 작은 창 크기 (가우스 시그마, 640폭 기준 약 15×15)
-LIGHT_MODES = ("mean", "local", "ssim")
+LIGHT_MODES = ("mean", "local", "ssim", "dino")
+DINO_MODEL = "gateway/dinov2_small.onnx"  # DESK_LIGHT=dino: DINOv2-small 특징 모델 (DESK_DINO_MODEL로 바꿈)
+DINO_SIZE = (518, 448)  # 모델에 넣는 책상 크기 (폭, 높이). 14의 배수, 내보낼 때와 같아야 함 → 37×32칸
+DINO_MEAN = (0.485, 0.456, 0.406)
+DINO_STD = (0.229, 0.224, 0.225)
+_dino_sessions = {}
 GONE_RATIO = 1.5     # DESK_GONE=1: 기준 사진 쪽 가장자리가 지금보다 이만큼 더 많으면 "치운 자리"로 보고 뺀다
 
 
@@ -80,6 +85,44 @@ def ssim_diff(base, now, sigma=SSIM_SIGMA):
     return np.clip((1.0 - ssim) * 127.5, 0, 255).astype(np.uint8)
 
 
+def dino_session(path):
+    """DINOv2 ONNX 모델을 한 번만 불러 둔다 (젯슨 GPU가 되면 GPU, 아니면 CPU)."""
+    if path not in _dino_sessions:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"DINOv2 모델 파일이 없어요: {path} (README 실험 기록의 내보내기 방법 참고)")
+        import onnxruntime as ort
+        providers = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider") if p in ort.get_available_providers()]
+        _dino_sessions[path] = ort.InferenceSession(path, providers=providers)
+    return _dino_sessions[path]
+
+
+def dino_features(img, path):
+    """책상 사진(흑백) → 14×14칸마다 "무엇이 있나" 특징 (길이 1로 맞춘 벡터). 모양 (32, 37, 384)."""
+    import cv2
+    import numpy as np
+    w, h = DINO_SIZE
+    x = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
+    x = np.repeat(x[None, None], 3, axis=1)
+    x = (x - np.array(DINO_MEAN, np.float32)[None, :, None, None]) / np.array(DINO_STD, np.float32)[None, :, None, None]
+    session = dino_session(path)
+    feats = session.run(None, {session.get_inputs()[0].name: x})[0][0]
+    feats = feats / (np.linalg.norm(feats, axis=-1, keepdims=True) + 1e-6)
+    return feats.reshape(h // 14, w // 14, -1)
+
+
+def dino_diff(base, now, path=DINO_MODEL):
+    """자리마다 "무엇이 있나"가 얼마나 달라졌나를 0~255로 (DINOv2 특징의 코사인 거리).
+
+    픽셀 밝기 대신 AI 특징을 비교한다 (ICRA 2025 "Robust Scene Change Detection Using Visual Foundation Models",
+    CVPR 2025 GeSCF와 같은 방향). 불을 끄거나 그림자가 져도 같은 책상이면 특징이 비슷해서 덜 예민하다.
+    """
+    import cv2
+    import numpy as np
+    a, b = dino_features(base, path), dino_features(now, path)
+    dist = np.clip((1.0 - (a * b).sum(-1)) * 255.0, 0, 255).astype(np.float32)
+    return cv2.resize(dist, (base.shape[1], base.shape[0]), interpolation=cv2.INTER_LINEAR).astype(np.uint8)
+
+
 def edge_energy(img):
     """가장자리(무늬)가 얼마나 많은지 (소벨 크기 평균). 맨 책상은 작고, 물건이 있으면 크다."""
     import cv2
@@ -110,11 +153,12 @@ def match_contrast(base, now):
 
 
 def find_changes(base, now, thresh=DIFF_THRESH, min_area=MIN_AREA, max_area=MAX_AREA, light="mean",
-                 gone=False, eq=False):
+                 gone=False, eq=False, model=DINO_MODEL):
     """두 책상 사진(prepare 결과)에서 달라진 곳 상자 (x, y, w, h) 목록. 조명이 통째로 바뀌었으면 None.
 
     light="mean": 사진 전체 밝기만 맞춘다 (원래 방식). "local": 자리마다 밝기를 고르게 한 뒤 비교한다.
-    "ssim": 밝기 차이 대신 자리마다 모양(무늬)이 달라졌는지 본다 (빛·그림자에 가장 덜 예민, 조금 느림).
+    "ssim": 밝기 차이 대신 자리마다 모양(무늬)이 달라졌는지 본다 (빛·그림자에 덜 예민, 조금 느림).
+    "dino": DINOv2 특징으로 "무엇이 있나"가 달라졌는지 본다 (model = ONNX 파일, 실험).
     gone=True: 물건을 치운 자리는 뺀다 (DESK_GONE=1). eq=True: 지금 사진의 밝기·대비를 기준에 먼저 맞춘다 (DESK_EQ=1).
     """
     import cv2
@@ -123,7 +167,9 @@ def find_changes(base, now, thresh=DIFF_THRESH, min_area=MIN_AREA, max_area=MAX_
         return None
     if eq:
         now = match_contrast(base, now)
-    if light == "ssim":
+    if light == "dino":
+        diff = dino_diff(base, now, model)
+    elif light == "ssim":
         diff = ssim_diff(base, now)
     elif light == "local":
         diff = cv2.absdiff(flatten_light(base), flatten_light(now))
@@ -179,10 +225,11 @@ def fingerprint(img):
 class DeskCompare:
     """깨끗한 책상 사진 한 장을 들고 있다가 퇴실 뒤 책상과 비교한다."""
 
-    def __init__(self, area, path=None, thresh=DIFF_THRESH, min_area=MIN_AREA, light="mean", gone=False, eq=False):
+    def __init__(self, area, path=None, thresh=DIFF_THRESH, min_area=MIN_AREA, light="mean", gone=False, eq=False,
+                 model=DINO_MODEL):
         self.area = area
-        # DESK_THRESH·DESK_MIN_AREA·DESK_LIGHT·DESK_GONE·DESK_EQ
-        self.tune = {"thresh": thresh, "min_area": min_area, "light": light, "gone": gone, "eq": eq}
+        # DESK_THRESH·DESK_MIN_AREA·DESK_LIGHT·DESK_GONE·DESK_EQ·DESK_DINO_MODEL
+        self.tune = {"thresh": thresh, "min_area": min_area, "light": light, "gone": gone, "eq": eq, "model": model}
         self.path = path              # 껐다 켜도 남게 저장할 파일 (.png). None이면 메모리에만
         self.base = None              # 깨끗한 책상 (prepare 결과)
         self.known = []               # 기준 때 모델이 찾은 물건 자리 (리모컨을 옮기면 빈 자리도 "달라짐"이라 뺀다)
@@ -264,4 +311,4 @@ class DeskCompare:
 def settings(config):
     """게이트웨이 설정(DESK_THRESH, DESK_MIN_AREA, DESK_LIGHT, DESK_GONE, DESK_EQ) → DeskCompare에 넘길 값."""
     return {"thresh": config.desk_thresh, "min_area": config.desk_min_area, "light": config.desk_light,
-            "gone": config.desk_gone, "eq": config.desk_eq}
+            "gone": config.desk_gone, "eq": config.desk_eq, "model": config.desk_dino_model}

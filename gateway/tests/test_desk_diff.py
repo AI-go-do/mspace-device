@@ -86,12 +86,46 @@ def test_eq_still_finds_things_in_a_dark_room():
     assert find_changes(base, prepare(desk(PHONE, light=0.2, noise=6), AREA)[0], light="ssim") is None  # 끄면 건너뜀
 
 
+class FakeDino:
+    """DINOv2 대신: 14×14칸마다 (밝기 평균을 0~1로 편 값, 무늬 세기, 1)을 특징으로 돌려준다."""
+
+    class Input:
+        name = "pixel_values"
+
+    def get_inputs(self):
+        return [self.Input()]
+
+    def run(self, _, feeds):
+        x = feeds["pixel_values"][0, 0]
+        h, w = x.shape[0] // 14, x.shape[1] // 14
+        blocks = x[:h * 14, :w * 14].reshape(h, 14, w, 14).transpose(0, 2, 1, 3).reshape(h * w, -1)
+        mean = blocks.mean(1)
+        mean = (mean - mean.min()) / (np.ptp(mean) + 1e-6)
+        return [np.stack([mean, blocks.std(1) * 4, np.ones_like(mean)], 1)[None]]
+
+
+def test_dino_finds_things_with_feature_distance(monkeypatch):
+    import desk_diff
+    monkeypatch.setattr(desk_diff, "dino_session", lambda path: FakeDino())
+    base, _ = prepare(desk(noise=6), AREA)
+    assert find_changes(base, prepare(desk(noise=6), AREA)[0], light="dino") == []
+    assert len(find_changes(base, prepare(desk(PHONE, noise=6), AREA)[0], light="dino")) == 1
+
+
+def test_dino_says_clearly_when_model_file_is_missing(tmp_path):
+    import desk_diff
+    with pytest.raises(FileNotFoundError, match="DINOv2 모델 파일이 없어요"):
+        desk_diff.dino_session(str(tmp_path / "없음.onnx"))
+
+
 def test_desk_settings_come_from_env(capsys):
     import desk_diff
     import gateway
     config = gateway.load_config({"DESK_THRESH": "50", "DESK_MIN_AREA": "0.004", "DESK_LIGHT": "local", "PORT": "x"})
     d = DeskCompare(AREA, **desk_diff.settings(config))
-    assert d.tune == {"thresh": 50, "min_area": 0.004, "light": "local", "gone": False, "eq": False}
+    assert d.tune == {"thresh": 50, "min_area": 0.004, "light": "local", "gone": False, "eq": False,
+                      "model": "gateway/dinov2_small.onnx"}
+    assert gateway.load_config({"DESK_LIGHT": "dino", "DESK_DINO_MODEL": "m.onnx", "PORT": "x"}).desk_dino_model == "m.onnx"
     config = gateway.load_config({"DESK_GONE": "1", "DESK_EQ": "1", "PORT": "x"})
     assert (config.desk_gone, config.desk_eq) == (True, True)
     config = gateway.load_config({"DESK_THRESH": "999", "DESK_MIN_AREA": "abc", "PORT": "x"})

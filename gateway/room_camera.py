@@ -1013,9 +1013,11 @@ def tidy_body(check, device_id, event_id=None, model=None):
         scores = list(conf.get(label, []))[:n]
         scores += [None] * (n - len(scores))
         for c in scores:
-            c = yes if yes is not None else c if c is not None else DESK_DIFF_CONF
-            items.append({"name": label, "confidence": round(float(c), 3)})
-    items.sort(key=lambda i: -i["confidence"])  # 20개가 넘으면 확신이 큰 것부터 남긴다
+            rank = c if c is not None else yes if yes is not None else DESK_DIFF_CONF
+            c = yes if yes is not None else rank
+            items.append(({"name": label, "confidence": round(float(c), 3)}, float(rank)))
+    # 20개가 넘으면 확신이 큰 것부터 남긴다. VLM 확률은 모두 같아서 순서는 YOLO 점수로 정한다
+    items = [item for item, _ in sorted(items, key=lambda pair: (-pair[0]["confidence"], -pair[1]))]
     body = {
         "eventId": event_id or str(uuid.uuid4()),
         "reservationId": check["reservationId"],
@@ -1186,10 +1188,10 @@ def apply_vlm(check, new_item, rule, yes=None):
     vlm: VLM 답만 쓴다
     """
     check["vlm"] = new_item
+    if new_item is None:  # 못 알아들은 답의 확률은 쓰지 않는다 (YOLO 점수 그대로)
+        return check
     if yes is not None:
         check["vlmYes"] = yes  # 이 사진 두 장에서 VLM이 "새 물건 있음"이라 할 확률
-    if new_item is None:
-        return check
     clean = check["status"] == "CLEAN"
     if new_item and clean and rule in ("or", "vlm"):
         check["trash"] = {**check["trash"], UNKNOWN: check["trash"].get(UNKNOWN, 0) + 1}

@@ -229,3 +229,43 @@ def test_make_vlm_uses_the_same_photo_settings_as_scoring():
     assert (vlm.side, vlm.eq) == (512, True)
     plain = gateway.make_vlm(gateway.load_config({"PORT": "x", "VLM_URL": "http://127.0.0.1:1"}))
     assert (plain.side, plain.eq) == (vc.SIDE, False)
+    assert vlm.timeout == vc.GATEWAY_TIMEOUT < vc.TIMEOUT  # 게이트웨이는 짧게, 채점은 길게
+    assert vc.from_env({"VLM_URL": "http://127.0.0.1:1"}).timeout == vc.TIMEOUT
+
+
+def test_vlm_check_passes_its_timeout_to_the_server_call(monkeypatch):
+    seen = []
+    monkeypatch.setattr(vc, "model_name", lambda url: "m")
+    monkeypatch.setattr(vc.DIRECT, "open", lambda req, timeout: seen.append(timeout) or (_ for _ in ()).throw(OSError("x")))
+    check = vc.VlmCheck("http://127.0.0.1:1", timeout=90)
+    with pytest.raises(OSError):
+        check.send(check.url, {})
+    assert seen == [90]
+
+
+def test_vlm_requests_ignore_proxy_settings(monkeypatch):
+    import http.server
+    import threading
+    seen = []
+
+    class Answer(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            seen.append(self.path)
+            body = json.dumps({"choices": [{"message": {"content": "NO"}}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Answer)
+    threading.Thread(target=server.handle_request, daemon=True).start()
+    monkeypatch.setenv("http_proxy", "http://10.255.255.1:9")  # 이 프록시로 가면 실패한다
+    monkeypatch.setenv("no_proxy", "")
+    import importlib
+    importlib.reload(vc)  # 프록시 설정이 있는 젯슨에서 게이트웨이를 켠 것처럼
+    assert vc.post(f"http://127.0.0.1:{server.server_port}", {}, timeout=5) == "NO"  # 사진은 젯슨 안에서 바로 간다
+    assert seen == ["/v1/chat/completions"]
+    server.server_close()

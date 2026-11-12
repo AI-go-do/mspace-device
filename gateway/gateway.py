@@ -852,8 +852,9 @@ def make_vlm(config):
     if rule not in vlm_check.RULES:
         print(f"VLM_RULE은 {', '.join(vlm_check.RULES)} 중 하나예요. or로 해요: {rule!r}")
         rule = "or"
-    vlm = vlm_check.VlmCheck(config.vlm_url, rule=rule, side=config.vlm_side, eq=config.vlm_eq)
-    print(f"정리 확인: VLM에게 한 번 더 물어요 ({vlm.model or '모델 이름 못 읽음'}, 규칙 {vlm.rule}, 퇴실 뒤 30초쯤 더 걸림)")
+    vlm = vlm_check.VlmCheck(config.vlm_url, rule=rule, side=config.vlm_side, eq=config.vlm_eq,
+                             timeout=vlm_check.GATEWAY_TIMEOUT)
+    print(f"정리 확인: VLM에게 한 번 더 물어요 ({vlm.model or '모델 이름 못 읽음'}, 규칙 {vlm.rule}, 퇴실 뒤 30초쯤 더 걸림, {vlm.timeout}초 넘으면 YOLO 결과만)")
     return vlm
 
 
@@ -879,12 +880,9 @@ def start_room_camera(config, sensors):
     send_check = send_photo = None
     if on_checkout:
         import model_score
-        score = model_score.find(config, load_config, config.tidy_results,
-                                 vlm_model=vlm.model if vlm is not None else None)
-        watcher.presence = score.pop("presence", None) if score else None  # 표는 core에 안 보내고 확신도에만 쓴다
-        watcher.model_score = score
-        print(model_score.describe(score))
-        print(model_score.describe_presence(watcher.presence))
+        watcher.model_score = model_score.find(config, load_config, config.tidy_results,
+                                               vlm_model=vlm.model if vlm is not None else None)
+        print(model_score.describe(watcher.model_score))
         tidy = SensorSender(config.server, config.device_token, path=f"/api/rooms/{room}/tidy-checks",
                             drop=TIDY_DROP, name="정리 확인 전송", say_ok=True).start()
         send_check = tidy.push

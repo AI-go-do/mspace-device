@@ -85,6 +85,7 @@ class Config:
     yolo_model: str | None = None          # YOLO ONNX 모델 파일. 없으면 사람만 세는 기본 방식(HOG)
     room_items: dict = field(default_factory=dict)  # 방 비품 {"remote": 1}: 그 개수까지는 있어도 없어도 괜찮음
     desk_area: tuple | None = None         # 책상 부분 (x1, y1, x2, y2) 화면 비율. 정리 확인 때 책상만 확대해서 한 번 더 본다
+    tile_grid: int = 2                     # 정리 확인 때 화면을 몇 줄로 잘라 보나 (TILE_GRID, 2 = 4조각, 3 = 9조각)
     floor_area: tuple | None = None        # 바닥 부분 (x1, y1, x2, y2) 화면 비율. 정리 확인 때 바닥도 확대해서 한 번 더 본다
     desk_photo: bool = False               # True면 깨끗한 책상 사진(사람 0명일 때)을 젯슨에만 두고 퇴실 뒤 책상과 비교
     desk_thresh: int = 35                  # 책상 비교: 밝기 차이가 이보다 크면 "달라짐" (DESK_THRESH, 1~255)
@@ -147,6 +148,7 @@ def load_config(env=None):
         room_items=parse_room_items(env.get("ROOM_ITEMS", "")),
         desk_area=parse_desk_area(env.get("DESK_AREA", "")),
         floor_area=parse_desk_area(env.get("FLOOR_AREA", ""), "FLOOR_AREA"),
+        tile_grid=parse_number(env, "TILE_GRID", Config.tile_grid, 2, 4, int),
         desk_photo=env.get("DESK_PHOTO") == "1",
         desk_thresh=parse_number(env, "DESK_THRESH", Config.desk_thresh, 1, 255, int),
         desk_min_area=parse_number(env, "DESK_MIN_AREA", Config.desk_min_area, 0.0, 0.3, float),
@@ -889,7 +891,7 @@ def start_room_camera(config, sensors):
     import room_camera  # 켤 때만 불러온다 (OpenCV는 젯슨에만 있으면 됨)
     room = config.room_camera_room
     CAMERA_ROOMS[room] = time.monotonic()  # 켤 때 한 번 잡고, 이후 사진을 읽을 때마다 새로 적는다
-    detector = room_camera.make_detector(config.yolo_model, config.desk_area, config.floor_area)
+    detector = room_camera.make_detector(config.yolo_model, config.desk_area, config.floor_area, config.tile_grid)
     on_checkout = sensors is not None  # 서버로 보내는 중이면 "퇴실하면 확인", 아니면(연습) "30초 빈 방"
     desk, labeler = desk_compare(config, detector)
     entry_desk = None
@@ -902,7 +904,7 @@ def start_room_camera(config, sensors):
     watcher = room_camera.RoomWatcher(room, check_objects=detector.finds_objects, room_items=config.room_items,
                                       on_checkout=on_checkout, baseline_path=config.baseline_file,
                                       desk=desk, labeler=labeler, entry_desk=entry_desk, photos=photos, vlm=vlm,
-                                      retrieve_sec=config.retrieve_recheck_min * 60)
+                                      retrieve_sec=config.retrieve_recheck_min * 60, tile_grid=config.tile_grid)
     cam = room_camera.open_camera(config.room_camera)
     send_check = send_photo = None
     if on_checkout:

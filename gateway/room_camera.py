@@ -184,23 +184,32 @@ def parse_yolo(output, scale_x, scale_y, conf=OBJECT_CONF, person_conf=PERSON_CO
 
 
 TILE_FRAC = 0.55  # 4조각 하나의 크기 (화면 가로·세로의 55%, 가운데가 조금씩 겹침)
+TILE_GRID = 2     # 정리 확인 때 화면을 가로·세로 몇 줄로 자르나 (TILE_GRID). 2 = 4조각(지금까지), 3 = 9조각
+TILE_OVERLAP = 1.1  # 3줄 이상일 때 조각 하나 = 화면의 1/줄 수 × 1.1 (옆 조각과 조금씩 겹침)
 
 
-def tile_boxes(width, height, frac=TILE_FRAC):
-    """화면을 네 귀퉁이 조각으로 나눈 (x, y, w, h). 가운데가 겹쳐서 경계에 걸친 물건도 잘리지 않는다."""
+def tile_boxes(width, height, frac=TILE_FRAC, grid=2):
+    """화면을 grid × grid 조각으로 나눈 (x, y, w, h). 옆 조각과 겹쳐서 경계에 걸친 물건도 어느 한 조각에는 통째로 들어간다.
+
+    grid 2는 지금까지와 같은 네 귀퉁이 조각(각 55%). 3 이상은 조각 하나가 1/grid × TILE_OVERLAP.
+    """
+    if grid > 2:
+        frac = min(1.0, TILE_OVERLAP / grid)
     tw, th = int(width * frac), int(height * frac)
-    return [(0, 0, tw, th), (width - tw, 0, tw, th), (0, height - th, tw, th), (width - tw, height - th, tw, th)]
+    xs = [round(i * (width - tw) / (grid - 1)) for i in range(grid)]
+    ys = [round(j * (height - th) / (grid - 1)) for j in range(grid)]
+    return [(x, y, tw, th) for y in ys for x in xs]
 
 
-def detect_tiled(detect, frame):
-    """한 장 전체 + 4조각을 각각 찾아서 합친다. 조각은 덜 줄어들어서 멀리 있는 작은 물건이 보인다.
+def detect_tiled(detect, frame, grid=2):
+    """한 장 전체 + grid × grid 조각을 각각 찾아서 합친다. 조각은 덜 줄어들어서 멀리 있는 작은 물건이 보인다.
 
-    퇴실 뒤 정리 확인처럼 가끔 한 번만 쓴다 (한 장보다 5배 느림).
+    퇴실 뒤 정리 확인처럼 가끔 한 번만 쓴다 (4조각이면 한 장보다 5배, 9조각이면 10배 느림).
     """
     h, w = frame.shape[:2]
     whole = list(detect(frame))
     extra = []
-    for x, y, tw, th in tile_boxes(w, h):
+    for x, y, tw, th in tile_boxes(w, h, grid=grid):
         if tw < 2 or th < 2:
             continue  # 아주 작은 부분(DESK_AREA·FLOOR_AREA가 몇 픽셀)이면 조각이 비어서 모델이 오류를 낸다
         for d in detect(frame[y:y + th, x:x + tw]):
@@ -278,10 +287,11 @@ class YoloDetector:
     """
     finds_objects = True
 
-    def __init__(self, model_path, size=640, desk_area=None, floor_area=None):
+    def __init__(self, model_path, size=640, desk_area=None, floor_area=None, tile_grid=TILE_GRID):
         import cv2
         self.cv2 = cv2
         self.size = size
+        self.tile_grid = tile_grid  # 정리 확인 때 화면 전체를 몇 줄로 자르나 (책상 확대는 늘 4조각)
         self.desk_area = desk_area  # (x1, y1, x2, y2) 비율. 정리 확인 때 책상만 잘라 한 번 더 본다
         self.floor_area = floor_area  # 같은 모양. 바닥(가방·에어팟 케이스가 떨어지는 곳)도 잘라 한 번 더 본다
         self.names = load_names(model_path)
@@ -317,8 +327,8 @@ class YoloDetector:
         return parse_yolo(output, w / self.size, h / self.size, names=self.names)
 
     def detect_detailed(self, frame):
-        """정리 확인·기준 저장 때만: 한 장 전체 + 4조각, 그리고 DESK_AREA·FLOOR_AREA가 있으면 그 부분 확대까지 합친다."""
-        found = detect_tiled(self.detect, frame)
+        """정리 확인·기준 저장 때만: 한 장 전체 + 조각(TILE_GRID), 그리고 DESK_AREA·FLOOR_AREA가 있으면 그 부분 확대까지 합친다."""
+        found = detect_tiled(self.detect, frame, getattr(self, "tile_grid", TILE_GRID))
         for area in (self.desk_area, self.floor_area):
             if area:
                 found = merge(found, detect_desk(self.detect, frame, area))
@@ -373,8 +383,10 @@ class RoomWatcher:
 
     def __init__(self, room_id, check_objects=True, now=None, room_items=None, on_checkout=False,
                  baseline_path=None, desk=None, labeler=None, entry_desk=None, photos=False, vlm=None,
-                 retrieve_sec=RETRIEVE_RECHECK_SEC):
+                 retrieve_sec=RETRIEVE_RECHECK_SEC, tile_grid=TILE_GRID):
         self.room_id = room_id
+        # 기준 개수를 센 조각 수 (TILE_GRID). 조각 수가 다르면 같은 방도 물건 수가 달라져서, 다른 조각 수로 센 기준 파일은 쓰지 않는다
+        self.tile_grid = tile_grid
         # 찾으러 온 뒤 다시 찍기 (11/12 재웅·지영): 두고 간 물건을 찾으러 10분 QR(purpose RETRIEVE)로 들어오면
         # 앞 예약 다시 확인을 취소하지 않고, QR 시각 + retrieve_sec 뒤 방이 비면 RECHECK를 찍어 보낸다
         self.retrieve_sec = retrieve_sec
@@ -437,6 +449,9 @@ class RoomWatcher:
             if saved.get("roomId") != self.room_id or not isinstance(objects, dict):
                 print(f"기준 파일이 {self.room_id}번 방 것이 아니라 새로 찍어요: {self.baseline_path}")
                 return
+            if saved.get("tileGrid", TILE_GRID) != self.tile_grid:  # 적히지 않은 옛 파일은 기본(4조각)으로 센 것
+                print(f"기준 파일이 다른 조각 수(TILE_GRID)로 센 것이라 새로 찍어요: {self.baseline_path}")
+                return
             self.baseline = {str(k): int(v) for k, v in objects.items()}
         except (OSError, ValueError, KeyError, TypeError) as e:
             print(f"기준 파일을 못 읽어서 새로 찍어요 ({self.baseline_path}: {e})")
@@ -448,7 +463,7 @@ class RoomWatcher:
         """기준을 파일에 적는다. 임시 파일에 쓰고 바꿔치기해서, 쓰다가 꺼져도 파일이 깨지지 않게 한다."""
         if not self.baseline_path:
             return
-        record = {"roomId": self.room_id, "objects": self.baseline,
+        record = {"roomId": self.room_id, "objects": self.baseline, "tileGrid": self.tile_grid,
                   "savedAt": now_iso or datetime.now(KST).isoformat(timespec="seconds")}
         tmp = self.baseline_path + ".tmp"
         try:
@@ -470,6 +485,8 @@ class RoomWatcher:
             if (not isinstance(saved, dict) or saved.get("roomId") != self.room_id
                     or not isinstance(saved.get("objects"), dict)):
                 raise ValueError("다른 방 기준이거나 모양이 다름")
+            if saved.get("tileGrid", TILE_GRID) != self.tile_grid:
+                raise ValueError("다른 조각 수(TILE_GRID)로 센 기준")
             objects = {str(k): int(v) for k, v in saved["objects"].items()}
             desk_sum = (fingerprint(self.entry_desk.base)
                         if self.entry_desk is not None and self.entry_desk.ready else None)
@@ -522,7 +539,7 @@ class RoomWatcher:
             else:
                 self.entry_desk.clear()
         if self.entry_path:
-            record = {"roomId": self.room_id, "objects": snap["objects"],
+            record = {"roomId": self.room_id, "objects": snap["objects"], "tileGrid": self.tile_grid,
                       "savedAt": now_iso or datetime.now(KST).isoformat(timespec="seconds")}
             if self.entry_desk is not None:  # 사진 지문을 같이 적어 같은 때 저장된 짝인지 켤 때 확인한다
                 record["deskSum"] = fingerprint(self.entry_desk.base) if self.entry_desk.ready else None
@@ -1203,14 +1220,16 @@ def yolo_threads(env=None):
     return max(0, n)
 
 
-def make_detector(model_path, desk_area=None, floor_area=None):
+def make_detector(model_path, desk_area=None, floor_area=None, tile_grid=TILE_GRID):
     if model_path:
         print("인원 세기: YOLO 모델", model_path)
+        if tile_grid != TILE_GRID:
+            print(f"정리 확인: 화면을 {tile_grid}×{tile_grid}={tile_grid * tile_grid}조각으로 나눠 봐요 (TILE_GRID)")
         if desk_area:
             print("정리 확인: 책상 부분(DESK_AREA) %.2f,%.2f,%.2f,%.2f도 확대해서 봐요" % tuple(desk_area))
         if floor_area:
             print("정리 확인: 바닥 부분(FLOOR_AREA) %.2f,%.2f,%.2f,%.2f도 확대해서 봐요" % tuple(floor_area))
-        return YoloDetector(model_path, desk_area=desk_area, floor_area=floor_area)
+        return YoloDetector(model_path, desk_area=desk_area, floor_area=floor_area, tile_grid=tile_grid)
     print("인원 세기: 모델 파일이 없어 OpenCV 기본 사람 찾기(HOG)를 써요. 정리 확인은 꺼져요 (YOLO_MODEL 참고)")
     return HogPersonDetector()
 

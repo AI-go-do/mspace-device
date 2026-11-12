@@ -252,6 +252,20 @@ def test_tile_boxes_cover_screen_with_overlap():
     assert tiles[0][2] > tiles[1][0]  # 왼쪽 조각 끝(1056)이 오른쪽 조각 시작(864)보다 뒤: 가운데가 겹침
 
 
+def test_tile_grid_3_makes_nine_overlapping_tiles():
+    """TILE_GRID=3: 9조각. 조각 하나 = 화면의 1/3 × 1.1, 옆 조각과 겹치고 화면 끝까지 덮는다 (책상 상자 없이 작은 물건 보기)."""
+    tiles = tile_boxes(1920, 1080, grid=3)
+    assert len(tiles) == 9 and tiles[0] == (0, 0, 704, 396) and tiles[-1] == (1216, 684, 704, 396)
+    assert tiles[0][0] + tiles[0][2] > tiles[1][0]  # 첫 조각 끝(704)이 둘째 조각 시작(608)보다 뒤: 겹침
+    assert tile_boxes(1920, 1080, grid=2) == tile_boxes(1920, 1080)  # 2는 지금까지와 똑같음
+
+
+def test_tile_grid_setting():
+    assert gateway.load_config({}).tile_grid == 2
+    assert gateway.load_config({"TILE_GRID": "3"}).tile_grid == 3
+    assert gateway.load_config({"TILE_GRID": "9"}).tile_grid == 2  # 범위(2~4) 밖이면 기본값
+
+
 def test_detect_tiled_moves_boxes_back_and_merges():
     frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
     sizes = []
@@ -791,7 +805,7 @@ def test_start_room_camera(monkeypatch):
     class Det:
         finds_objects = False
 
-    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None: Det())
+    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None, grid=2: Det())
     monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
 
     def fake_run(watcher, cam, detector, push, pir_now, on_frame=None, preview=None, send_check=None,
@@ -814,7 +828,7 @@ def test_start_room_camera_uses_checkout_mode_when_sending(monkeypatch):
     class Det:
         finds_objects = True
 
-    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None: Det())
+    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None, grid=2: Det())
     monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
     monkeypatch.setattr(gateway.SensorSender, "start", lambda self: self)
     monkeypatch.setattr(gateway.CheckoutPoller, "start", lambda self: polled.append(self.url) or self)
@@ -1444,7 +1458,7 @@ def test_start_room_camera_turns_on_photo_sender(monkeypatch):
     class Det:
         finds_objects = True
 
-    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None: Det())
+    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None, grid=2: Det())
     monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
     monkeypatch.setattr(gateway.SensorSender, "start", lambda self: self)
     monkeypatch.setattr(gateway.CheckoutPoller, "start", lambda self: self)

@@ -577,3 +577,8 @@ def test_judge_records_how_many_places_the_desk_photo_changed():
     check, _ = te.judge(before, lit, lambda f: [], desk=desk, labeler=lambda f, b: None)
     assert check["deskChanges"] is None and check["status"] == "CLEAN"
     assert "deskChanges" not in te.judge(frame(0), frame(1), finder({0: [], 1: []}))[0]  # 사진 비교 꺼짐
+
+
+def test_new_desk_settings_are_in_the_candidate_name():
+    name = te.candidate_name({"DESK_KEEP_SMALL": "0.05", "DESK_FURNITURE_SMALL": "0.5"})
+    assert "DESK_KEEP_SMALL=0.05" in name and "DESK_FURNITURE_SMALL=0.5" in name

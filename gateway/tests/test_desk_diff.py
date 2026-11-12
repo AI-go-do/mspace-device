@@ -73,7 +73,8 @@ def test_desk_settings_come_from_env(capsys):
     import gateway
     config = gateway.load_config({"DESK_THRESH": "50", "DESK_MIN_AREA": "0.004", "DESK_LIGHT": "local", "PORT": "x"})
     d = DeskCompare(AREA, **desk_diff.settings(config))
-    assert d.tune == {"thresh": 50, "min_area": 0.004, "light": "local", "move": False, "move_same": 1.0}
+    assert d.tune == {"thresh": 50, "min_area": 0.004, "light": "local", "move": False, "move_same": 1.0,
+                      "keep_small": 0.0}
     config = gateway.load_config({"DESK_THRESH": "999", "DESK_MIN_AREA": "abc", "PORT": "x"})
     assert (config.desk_thresh, config.desk_min_area, config.desk_light) == (35, 0.0012, "mean")
     assert "DESK_THRESH가 이상해서" in capsys.readouterr().out
@@ -466,3 +467,53 @@ def test_entry_desk_keeps_known_labels_for_move():
     assert d.known_labels == ["remote"]
     d.clear()
     assert d.known_labels == [] and d.moved == []
+
+
+def test_keep_small_still_finds_things_when_much_of_the_view_changed():
+    """DESK_KEEP_SMALL: 화면이 크게 달라져도(35% 넘게) 포기하지 않고 물건 크기 변화만 본다 (11/12 1차 11쌍)."""
+    base, _ = prepare(desk(), AREA)
+    shade = (500, 230, 600, 720, (0, 0, 0))  # 책상 왼쪽 절반 넘게 어둡게 (그늘)
+    phone = (1300, 400, 40, 80, (20, 20, 20))
+    now, _ = prepare(desk(shade, phone), AREA)
+    assert find_changes(base, now, light="ssim") is None  # 예전처럼 비교를 건너뜀
+    found = find_changes(base, now, light="ssim", keep_small=0.05)
+    assert len(found) == 1  # 크게 바뀐 곳은 빼고 휴대폰 자리만
+    x, y, w, h = found[0]
+    assert w * h < 0.05 * base.shape[0] * base.shape[1]
+    assert find_changes(base, prepare(desk(shade), AREA)[0], light="ssim", keep_small=0.05) == []  # 그늘만이면 없음
+
+
+def test_keep_small_changes_nothing_when_the_view_did_not_change_much():
+    base, _ = prepare(desk(noise=6), AREA)
+    now, _ = prepare(desk(PHONE, PAPER, CARD, noise=6), AREA)
+    assert find_changes(base, now, keep_small=0.05) == find_changes(base, now)
+
+
+def test_small_change_on_a_chair_is_a_thing_with_furniture_small():
+    """DESK_FURNITURE_SMALL: 의자로 이름 붙은 곳이라도 의자보다 훨씬 작으면 의자 위·옆 물건 (11/12 035 가방)."""
+    chair = Detection("chair", 0.8, (1000, 500, 400, 400))
+    w = RoomWatcher(1, desk=DeskCompare(AREA), labeler=lambda frame, box: "chair")
+    assert visit(w, [chair], desk(PAPER))["status"] == "CLEAN"  # 기본(0)은 예전처럼 가구로 보고 뺀다
+    w = RoomWatcher(1, desk=DeskCompare(AREA, furniture_small=0.5), labeler=lambda frame, box: "chair")
+    check = visit(w, [chair], desk(PAPER))
+    assert check["status"] == "NEEDS_CLEANING" and check["trash"] == {"unknown": 1}
+
+
+def test_chair_sized_change_is_still_the_chair_with_furniture_small():
+    """의자만큼 달라진 곳(의자를 옮김)은 그대로 가구로 보고 뺀다. 가구를 못 찾았을 때도 예전처럼 뺀다."""
+    chair = Detection("chair", 0.8, (1090, 590, 140, 110))
+    w = RoomWatcher(1, desk=DeskCompare(AREA, furniture_small=0.5), labeler=lambda frame, box: "chair")
+    assert visit(w, [chair], desk(PAPER))["status"] == "CLEAN"
+    w = RoomWatcher(1, desk=DeskCompare(AREA, furniture_small=0.5), labeler=lambda frame, box: "chair")
+    assert visit(w, [], desk(PAPER))["status"] == "CLEAN"
+
+
+def test_keep_small_and_furniture_small_settings():
+    import desk_diff
+    import gateway
+    config = gateway.load_config({"DESK_KEEP_SMALL": "0.05", "DESK_FURNITURE_SMALL": "0.5", "PORT": "x"})
+    assert config.desk_keep_small == 0.05 and config.desk_furniture_small == 0.5
+    d = DeskCompare(AREA, **desk_diff.settings(config))
+    assert d.tune["keep_small"] == 0.05 and d.furniture_small == 0.5
+    off = gateway.load_config({"PORT": "x"})
+    assert off.desk_keep_small == 0.0 and off.desk_furniture_small == 0.0  # 기본은 예전과 같음

@@ -93,6 +93,8 @@ class Config:
     desk_light: str = "mean"               # 책상 비교 방식: mean(전체 밝기) / local(자리마다 밝기) / ssim(모양 비교)
     desk_move: bool = False                # 책상 비교: 원래 있던 걸 옮기거나 뒤집은 것은 새 물건으로 안 셈 (DESK_MOVE=1, 9판)
     desk_move_same: float = 1.0            # DESK_MOVE에서 "원래 있던 자리"로 볼 기준 (DESK_MOVE_SAME, 높을수록 덜 뺌. 9판 1등 1.0)
+    desk_keep_small: float = 0.0           # 화면이 크게 달라도 비교를 포기하지 않고, 화면의 이 비율보다 작은 곳만 본다 (DESK_KEEP_SMALL, 0이면 끔: 포기)
+    desk_furniture_small: float = 0.0      # 의자 등 가구로 이름 붙은 곳이라도 그 가구 상자의 이 비율보다 작으면 물건으로 본다 (DESK_FURNITURE_SMALL, 0이면 끔)
     vlm_url: str | None = None             # 정리 확인을 VLM(llama-server, 127.0.0.1)에게 한 번 더 물음 (VLM_URL, 10판). 비우면 끔
     vlm_rule: str = "or"                   # YOLO와 합치는 법: or(하나라도 남음이면 남음, 10판 1등) / and / vlm (VLM_RULE)
     vlm_side: int = 768                    # VLM에 보내기 전 사진 긴 변 크기 (VLM_SIDE, 채점과 같은 값)
@@ -155,6 +157,8 @@ def load_config(env=None):
         desk_light=env.get("DESK_LIGHT") if env.get("DESK_LIGHT") in ("local", "ssim") else Config.desk_light,
         desk_move=env.get("DESK_MOVE") == "1",
         desk_move_same=parse_number(env, "DESK_MOVE_SAME", Config.desk_move_same, 0.1, 10.0, float),
+        desk_keep_small=parse_number(env, "DESK_KEEP_SMALL", Config.desk_keep_small, 0.0, 1.0, float),
+        desk_furniture_small=parse_number(env, "DESK_FURNITURE_SMALL", Config.desk_furniture_small, 0.0, 1.0, float),
         vlm_url=(env.get("VLM_URL") or "").strip() or None,
         vlm_rule=(env.get("VLM_RULE") or Config.vlm_rule).strip().lower(),
         vlm_side=parse_number(env, "VLM_SIDE", Config.vlm_side, 64, 4096, int),

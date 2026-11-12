@@ -289,9 +289,13 @@ class YoloDetector:
             import onnxruntime as ort
             providers = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider")
                          if p in ort.get_available_providers()]
-            self.session = ort.InferenceSession(model_path, providers=providers)
+            opts = ort.SessionOptions()
+            # 젯슨 CPU를 YOLO가 다 쓰면 VLM이 3배 느려져 90초 안에 답을 못 한다 (11/12 #43: CPU 477%, VLM TimeoutError)
+            opts.intra_op_num_threads = yolo_threads()
+            opts.inter_op_num_threads = 1
+            self.session = ort.InferenceSession(model_path, sess_options=opts, providers=providers)
             self.input_name = self.session.get_inputs()[0].name
-            print("인원 세기: onnxruntime", providers[0])
+            print(f"인원 세기: onnxruntime {providers[0]} (CPU 스레드 {opts.intra_op_num_threads}개, YOLO_THREADS)")
         except ImportError:
             self.net = cv2.dnn.readNetFromONNX(model_path)
             try:  # 젯슨 GPU(CUDA)를 쓸 수 있으면 쓴다. 안 되면 CPU
@@ -1121,6 +1125,20 @@ def make_labeler(detector, label_model=None):
             return label_region(labeler.detect, frame, box)
 
     return label
+
+
+YOLO_THREADS = 2  # 나머지 코어는 VLM(llama-server -t 6)과 QR 카메라에 남긴다
+
+
+def yolo_threads(env=None):
+    """YOLO(onnxruntime)가 쓸 CPU 스레드 수. YOLO_THREADS로 바꾸고, 0이면 onnxruntime 기본(코어 전부)."""
+    value = (os.environ if env is None else env).get("YOLO_THREADS", "").strip()
+    try:
+        n = int(value) if value else YOLO_THREADS
+    except ValueError:
+        print(f"YOLO_THREADS는 0 이상 정수예요. {YOLO_THREADS}개로 해요: {value!r}")
+        return YOLO_THREADS
+    return max(0, n)
 
 
 def make_detector(model_path, desk_area=None, floor_area=None):

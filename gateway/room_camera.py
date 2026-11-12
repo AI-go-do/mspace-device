@@ -936,7 +936,7 @@ class RoomWatcher:
         for label, n in extra.items():  # 책상 사진 비교로 찾은 것: 자리가 새로 생긴 것이라 기준 개수와 빼지 않는다
             group = left if label in BELONGINGS else trash  # 이름 모름(unknown)·쓰레기는 치울 것
             group[label] = group.get(label, 0) + n
-            confidence[label] = confidence.get(label, []) + [DESK_DIFF_CONF] * n
+            confidence[label] = confidence.get(label, []) + [None] * n  # 자기 점수 없음: 보낼 때 VLM 확률로 채운다
         status = "LEFT_ITEMS" if left else "NEEDS_CLEANING" if trash else "CLEAN"
         if own and status == "CLEAN" and compared:  # 비교를 건너뛰었으면 물건이 있을 수 있어 사진을 바꾸지 않는다
             self.desk.set_base(photo(), self.objects(dets))  # 깨끗하면 책상 사진도 새로 (햇빛·조명이 천천히 바뀌는 것 따라감)
@@ -950,7 +950,7 @@ class RoomWatcher:
             "status": status,
             "trash": trash,
             "leftItems": left,
-            "confidence": confidence,  # {이름: [물건마다 확신도 0~1]}. 서버 items에 같이 실린다
+            "confidence": confidence,  # {이름: [물건마다 YOLO 점수 0~1 또는 None(책상 비교로만 찾음)]}
             "evidence": {"yolo": by_yolo, "desk": bool(extra)},  # 무엇이 찾았나 (물건이 있을 확률 표의 열쇠)
             "checkedAt": now_iso or datetime.now(KST).isoformat(timespec="seconds"),
         }
@@ -979,7 +979,7 @@ def check_key(check):
     return evidence_key(check.get("evidence"), check.get("vlm", "unused"), check.get("phase", "FIRST"))
 
 
-def tidy_body(check, device_id, event_id=None, model=None, presence=None):
+def tidy_body(check, device_id, event_id=None, model=None):
     """정리 확인 결과를 서버 POST /api/rooms/{roomId}/tidy-checks 형식으로 바꾼다 (10차, 11/10 지영과 맞춤).
 
     10차: 쓰레기든 물건이든 종류 구분 없이 "두고 감". 장치 결과(치울 것·두고 간 물건) → 서버 2가지:
@@ -987,21 +987,21 @@ def tidy_body(check, device_id, event_id=None, model=None, presence=None):
     items = 물건마다 {"name": 모델 이름(영어), "confidence": 0~1}. 한글 바꾸기·경고 기준(확신도)은 core가 한다.
     phase = FIRST(퇴실 직후, 알림만) | RECHECK(3시간 뒤, 그래도 남았으면 core가 경고).
     model = 지금 설정의 시험 점수 (model_score.find). 같은 설정으로 채점한 기록이 있을 때만 붙인다.
-    presence = 물건이 있을 확률 표 {열쇠: 0~1} (model_score.presence_table, 11/12 core와 맞춤).
-      있으면 confidence는 "이 이름일 확률"이 아니라 "여기 물건이 남아 있을 확률"이다:
-      무엇이 찾았나(check_key)가 같은 경우에 채점에서 실제로 물건이 남아 있던 비율. 이름이 틀려도 안 떨어진다.
-      표에 없는 경우는 DESK_DIFF_CONF(경고 기준보다 낮게: 알림만). 표가 없으면 예전처럼 이름별 점수.
+
+    confidence = 이 사진에서 그 물건이 정말 있을 확률 (11/12 수연: 채점 표 값이 아니라 이 사진 기준).
+      YOLO가 찾은 물건은 YOLO 점수, 책상 비교로만 찾은 물건은 VLM이 이 사진 두 장에 "새 물건 있음"이라 할 확률.
+      둘 다 있으면 큰 쪽. 둘 다 없으면 DESK_DIFF_CONF (경고 기준보다 낮게: 알림만).
     """
     found = {**check["leftItems"], **check["trash"]}
     conf = check.get("confidence", {})
-    room = presence.get(check_key(check), DESK_DIFF_CONF) if presence is not None else None
+    yes = check.get("vlmYes")
     items = []
     for label, n in sorted(found.items()):
-        scores = list(conf.get(label, []))
-        scores += [DESK_DIFF_CONF] * (n - len(scores))  # 점수가 없으면 경고 기준보다 낮은 값
-        if room is not None:
-            scores = [room] * n
-        items += [{"name": label, "confidence": c} for c in scores[:n]]
+        scores = list(conf.get(label, []))[:n]
+        scores += [None] * (n - len(scores))
+        for c in scores:
+            c = max(x for x in (c, yes) if x is not None) if (c, yes) != (None, None) else DESK_DIFF_CONF
+            items.append({"name": label, "confidence": round(float(c), 3)})
     items.sort(key=lambda i: -i["confidence"])  # 20개가 넘으면 확신이 큰 것부터 남긴다
     body = {
         "eventId": event_id or str(uuid.uuid4()),
@@ -1151,20 +1151,22 @@ def start_thread(target, *args):
     threading.Thread(target=target, args=args, daemon=True).start()
 
 
-def apply_vlm(check, new_item, rule):
+def apply_vlm(check, new_item, rule, yes=None):
     """VLM 답(새 물건 있음 True / 없음 False / 못 알아들음 None)을 정리 확인 결과에 합친다 (10판, VLM_RULE).
 
-    or : YOLO가 깨끗하다 해도 VLM이 "있다"면 이름 모르는 물건 1개로 더한다 (확신도 0.5라 알림만, 경고는 안 감)
+    or : YOLO가 깨끗하다 해도 VLM이 "있다"면 이름 모르는 물건 1개로 더한다 (확신도는 VLM이 YES라 한 확률)
     and: YOLO가 찾았어도 VLM이 "없다"면 깨끗함으로 바꾼다
     vlm: VLM 답만 쓴다
     """
     check["vlm"] = new_item
+    if yes is not None:
+        check["vlmYes"] = yes  # 이 사진 두 장에서 VLM이 "새 물건 있음"이라 할 확률
     if new_item is None:
         return check
     clean = check["status"] == "CLEAN"
     if new_item and clean and rule in ("or", "vlm"):
         check["trash"] = {**check["trash"], UNKNOWN: check["trash"].get(UNKNOWN, 0) + 1}
-        check.setdefault("confidence", {})[UNKNOWN] = check.get("confidence", {}).get(UNKNOWN, []) + [DESK_DIFF_CONF]
+        check.setdefault("confidence", {})[UNKNOWN] = check.get("confidence", {}).get(UNKNOWN, []) + [None]
         check["status"] = "NEEDS_CLEANING"
     elif not new_item and not clean and rule in ("and", "vlm"):
         check["trash"], check["leftItems"], check["confidence"] = {}, {}, {}
@@ -1175,10 +1177,11 @@ def apply_vlm(check, new_item, rule):
 def ask_vlm_then_finish(watcher, check, pair, log_path, send_check, send_photo):
     """VLM에게 묻고(따로 도는 스레드) 결과를 합친 뒤 보낸다. VLM이 안 되면 YOLO 결과 그대로 보낸다."""
     try:
-        new_item, seconds = watcher.vlm.ask_jpeg(*pair)
+        new_item, seconds, yes = watcher.vlm.ask_jpeg(*pair)
         answer = {True: "새 물건 있음", False: "새 물건 없음", None: "못 알아들음"}[new_item]
-        print(f"VLM {watcher.room_id}번 방 예약 {check['reservationId']}: {answer} ({seconds:.0f}초)")
-        apply_vlm(check, new_item, watcher.vlm.rule)
+        sure = f", 있음 확률 {yes:.0%}" if yes is not None else ""
+        print(f"VLM {watcher.room_id}번 방 예약 {check['reservationId']}: {answer} ({seconds:.0f}초{sure})")
+        apply_vlm(check, new_item, watcher.vlm.rule, yes)
     except Exception as e:  # 서버가 꺼졌거나 오래 걸림: 결과를 버리지 않고 YOLO 결과로 보낸다
         print(f"VLM에게 못 물었어요 ({e.__class__.__name__}). YOLO 결과만 보내요")
     del pair
@@ -1190,8 +1193,7 @@ def finish_check(watcher, check, log_path, send_check, send_photo):
     print(check_message(check))
     safe_log(log_path, check)
     if send_check is not None and "reservationId" in check:
-        send_check(tidy_body(check, f"camera-{watcher.room_id}", model=getattr(watcher, "model_score", None),
-                             presence=getattr(watcher, "presence", None)))
+        send_check(tidy_body(check, f"camera-{watcher.room_id}", model=getattr(watcher, "model_score", None)))
         if getattr(watcher, "photos", False):
             print(photo_message(check, photos))
         if send_photo is not None and photos:

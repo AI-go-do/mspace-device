@@ -478,6 +478,43 @@ def test_entry_baseline_survives_restart_and_is_deleted_after_check(tmp_path):
     assert not entry.exists()  # 보냈으면 지움
 
 
+def test_entry_loaded_after_restart_is_replaced_at_next_entry(tmp_path, capsys):
+    """11/12 #47: 다시 켜기 전 기준(가짜 노트북 포함)을 그대로 써서 두고 간 노트북을 놓쳤다 → 다음 입실 때 새로 잡는다."""
+    base = str(tmp_path / "room_baseline.json")
+    r = Room(RoomWatcher(1, on_checkout=True, baseline_path=base))
+    r.run([thing("laptop")], 5).run([person(), thing("laptop")], 3)
+    assert r.w.entry["objects"] == {"laptop": 1}
+    r2 = Room(RoomWatcher(1, on_checkout=True, baseline_path=base), t=100)  # 젯슨을 껐다 켬
+    assert r2.w.entry.get("loaded")
+    r2.run([], 5).run([person()], 3)  # 빈 방(노트북 없음) 뒤 사람이 들어옴: QR이 없어도 새로 잡는다
+    assert r2.w.entry["objects"] == {} and not r2.w.entry.get("loaded")
+    assert "다시 켜기 전 기준 대신" in capsys.readouterr().out
+    r2.run([person()], 2).run([], 5).run([person()], 3)  # 그 뒤 화장실은 처음 기준 그대로
+    assert r2.w.entry["objects"] == {}
+
+
+def test_qr_entry_uses_empty_room_held_from_a_person_seen_just_before(capsys):
+    """QR이 처리되기 직전 사람이 먼저 잡혀 빈 방 후보를 써 버려도, 그 후보로 기준을 다시 잡는다."""
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([thing("cup")], 5).run([person(), thing("cup")], 3)  # 앞 사람이 잡은 기준 (컵 있음)
+    r.run([], 5)  # 빈 방 후보 (컵 치움)
+    r.run([person()], 1)  # 문 앞에서 먼저 잡힘: 화장실 규칙으로 후보를 안 씀 (들고만 있음)
+    assert r.w.entry["objects"] == {"cup": 1} and r.w.held_snapshot is not None
+    r.w.door_opened("CHECKIN", r.t)
+    r.run([person()], 2)
+    assert r.w.entry["objects"] == {}
+    assert "입실 문이 열려 그 직전 빈 방으로" in capsys.readouterr().out
+
+
+def test_held_empty_room_is_not_used_when_too_old():
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([thing("cup")], 5).run([person(), thing("cup")], 3).run([], 5).run([person()], 1)
+    r.run([person()], room_camera.HELD_SNAPSHOT_SEC + 5)
+    r.w.door_opened("CHECKIN", r.t)
+    r.run([person()], 2)
+    assert r.w.entry["objects"] == {"cup": 1}
+
+
 @pytest.mark.parametrize("text", ["{broken", "null", "[]", '"x"', "1", '{"roomId": 2, "objects": {}}',
                                   '{"roomId": 1, "objects": {"cup": Infinity}}'])
 def test_broken_entry_file_is_ignored(tmp_path, capsys, text):
@@ -1288,6 +1325,20 @@ class PhotoRoom(Room):
                 self.out.append(c)
             self.t += 1
         return self
+
+
+def test_entry_loaded_after_restart_still_asks_vlm_with_saved_photo(tmp_path):
+    """다시 켜서 메모리의 VLM 사진이 없어도, 저장된 입실 전 사진으로 VLM에게 묻는다 (11/12 #47)."""
+    import vlm_check as vc
+    base = str(tmp_path / "room_baseline.json")
+    r = PhotoRoom(RoomWatcher(1, on_checkout=True, baseline_path=base, photos=True))
+    r.run([], 5).run([person()], 3)
+    vlm = vc.VlmCheck("http://127.0.0.1:1", send=lambda url, body: ("YES", 0.9))
+    r2 = PhotoRoom(RoomWatcher(1, on_checkout=True, baseline_path=base, photos=True, vlm=vlm), t=100)
+    assert r2.w.entry["jpg"] and not r2.w.entry.get("vlm")
+    r2.run([person()], 3).checkout(5).run([thing("laptop")], SETTLE_SEC + 6)
+    a, b = r2.out[0]["vlmPhotos"]
+    assert a[:2] == b[:2] == b"\xff\xd8"
 
 
 def is_jpeg(b):

@@ -92,6 +92,7 @@ EMPTY_CHECK_SEC = 30   # (연습 모드) 모두 나가고 30초 뒤에 정리 �
 SETTLE_SEC = 10        # (퇴실 모드) 퇴실 뒤 방이 10초 비어 있으면 확인 (나가는 사람이 찍히지 않게)
 PENDING_MAX_SEC = 600  # (퇴실 모드) 퇴실 뒤 10분 안에 방이 비지 않으면 그 예약 확인은 포기 (다음 사람 물건을 탓하지 않게)
 ENTRY_EMPTY_SEC = 3    # (퇴실 모드) 한 장씩 셌을 때 0명이 연속 3초면 "빈 방"으로 보고 다음 예약 기준 후보로 든다 (Q-22)
+HELD_SNAPSHOT_SEC = 15  # (퇴실 모드) 사람이 잠깐 보여 못 쓴 빈 방 후보를 이만큼 들고 있다가, 바로 뒤 QR 입실이면 그것으로 기준을 잡는다
 SNAPSHOT_SEC = 60      # (퇴실 모드) 빈 방이 계속되면 후보를 1분마다 새로 찍는다 (햇빛·조명 변화 따라감)
 DESK_DIFF_CONF = 0.5   # 책상 사진 비교로 찾은 물건의 확신도. 모델 점수가 없어서 core 경고 기준(기본 0.8)보다 낮게 둔다
                        # → 알림은 가도 이것만으로 경고는 안 간다 (잘못 본 그림자·빛으로 경고하지 않게)
@@ -384,6 +385,7 @@ class RoomWatcher:
         # 퇴실 뒤 처음 문이 열리면(찾으러 온 QR 빼고) 다음에 사람이 보일 때 기준을 새로 굳힌다. 그 뒤 문 열림(화장실)은 그대로
         self.checkin_seen = False    # 마지막 퇴실 뒤 입실 문 열림을 이미 봤나
         self.rebase_entry = False    # 다음에 사람이 보이면 기준을 새로 굳힌다
+        self.held_snapshot = None    # (후보, 시각): 사람이 보였지만 기준으로 안 쓴 빈 방 후보 (QR보다 사람이 먼저 잡힌 때 씀)
         # vlm (VLM_URL, 10판): 퇴실 뒤 첫 확인 때 입실 전·퇴실 뒤 사진을 VLM에게 한 번 더 묻는다 (vlm_check.VlmCheck).
         # 입실 전 사진은 VLM에 보낼 크기로만 메모리에 둔다 (파일로 안 씀, 젯슨이 꺼지면 YOLO 결과만 보냄)
         self.vlm = vlm
@@ -479,8 +481,10 @@ class RoomWatcher:
             self.clear_entry()
             return
         self.entry = {"objects": objects, "at": float("-inf"),  # 켜기 전에 잡은 것 = 어떤 퇴실 알림보다 먼저
-                      "jpg": self.load_entry_photo(saved.get("photoSum"))}
-        print(f"저장된 예약 기준 불러옴 {self.room_id}번 방 ({saved.get('savedAt', '시각 모름')})")
+                      "jpg": self.load_entry_photo(saved.get("photoSum")),
+                      "loaded": True}  # 다음에 사람이 들어오면 새로 잡는다 (11/12 #47: 옛 기준으로 노트북을 놓침)
+        print(f"저장된 예약 기준 불러옴 {self.room_id}번 방 ({saved.get('savedAt', '시각 모름')}) · "
+              "다음 입실 때 새로 잡아요")
 
     def load_entry_photo(self, want):
         """입실 전 사진을 읽는다. 개수 파일에 적힌 지문과 다르면(사진만 바뀐 채 꺼짐) 쓰지 않는다."""
@@ -558,6 +562,11 @@ class RoomWatcher:
             self.raw_empty_since = None
             pir_since, self.pir_since = self.pir_since, None
             rebase, self.rebase_entry = self.rebase_entry, False
+            held, self.held_snapshot = self.held_snapshot, None
+            if self.snapshot is None and rebase and held is not None and now - held[1] <= HELD_SNAPSHOT_SEC:
+                self.snapshot = held[0]  # QR보다 사람이 먼저 잡혀 후보를 써 버렸다: 그 빈 방으로 기준을 잡는다
+            elif self.snapshot is None and rebase:
+                print(f"예약 기준 {self.room_id}번 방: 입실 문이 열렸지만 직전 빈 방 사진이 없어 기준을 새로 못 잡음")
             if self.snapshot is not None:
                 snap, self.snapshot = self.snapshot, None
                 if self.retrieve is not None:
@@ -571,7 +580,8 @@ class RoomWatcher:
                     # 카메라엔 안 보였지만 PIR이 오래 켜져 있었다. 그 사이 뭘 두었을 수 있어 이 후보는 버린다
                     print(f"예약 기준 {self.room_id}번 방: 사람이 보이기 전 PIR이 오래 켜져 있어 후보를 쓰지 않음")
                     return
-                self.confirm_entry(snap, now, now_iso, rebase=rebase)
+                if not self.confirm_entry(snap, now, now_iso, rebase=rebase):
+                    self.held_snapshot = (snap, now)  # 안 썼으면 잠깐 들고 있는다 (바로 뒤 QR 입실이면 씀)
             return
         if pir:  # 카메라엔 안 보여도 누가 있을 수 있다. 후보를 새로 찍지 않는다
             self.raw_empty_since = None
@@ -642,20 +652,45 @@ class RoomWatcher:
             self.recheck_base = self.recheck_pending = None
 
     def confirm_entry(self, snap, now, now_iso, rebase=False):
+        """빈 방 후보를 예약 기준으로 굳힌다. 썼으면 True, 화장실처럼 처음 기준을 둘 때는 False."""
         pending_at = self.pending[1] if self.pending else None
         if rebase and self.entry is not None:
             print(f"예약 기준 {self.room_id}번 방: 입실 문이 열려 그 직전 빈 방으로 기준을 다시 잡아요 "
                   "(그 전에 들어왔던 것은 기준으로 안 씀)")
+        elif self.entry is not None and self.entry.get("loaded"):
+            print(f"예약 기준 {self.room_id}번 방: 다시 켜기 전 기준 대신 지금 입실 직전 빈 방으로 새로 잡아요")
         elif self.entry is not None and (pending_at is None or self.entry["at"] >= pending_at):
-            return  # 같은 예약 사람이 잠깐 나갔다 온 것 (화장실). 처음 기준을 그대로 둔다
+            return False  # 같은 예약 사람이 잠깐 나갔다 온 것 (화장실). 처음 기준을 그대로 둔다
         if self.pending:
             # 앞 예약이 끝났는데 방이 10초 비기 전에 다음 사람이 들어옴. 앞 예약은 결과를 내지 않는다 (신고가 받음)
             print(f"정리 확인 {self.room_id}번 방: 예약 {self.pending[0]} 확인 전에 다음 사람이 들어와 건너뜀")
             self.pending = None
         self.set_entry(snap, now, now_iso)
+        return True
 
     def people(self, dets):
         return sum(1 for d in dets if d.label == "person")
+
+    def entry_vlm(self):
+        """입실 전 사진의 VLM용 JPEG. 메모리에 없으면(젯슨을 다시 켬) 저장된 입실 전 사진(TIDY_PHOTOS)으로 만든다."""
+        if self.vlm is None or self.entry is None:
+            return None
+        if self.entry.get("vlm"):
+            return self.entry["vlm"]
+        jpg = self.entry.get("jpg")
+        if not jpg:
+            return None
+        try:
+            import cv2
+            import numpy as np
+            img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
+            if img is None:
+                raise ValueError("입실 전 사진을 못 읽음")
+            self.entry["vlm"] = self.vlm.prepare(img)
+            return self.entry["vlm"]
+        except Exception as e:  # 못 만들어도 YOLO 확인은 그대로
+            print(f"입실 전 사진으로 VLM 사진을 못 만들었어요 ({e.__class__.__name__}). YOLO 결과만 써요")
+            return None
 
     def vlm_photo(self, photo, *seen):
         """VLM_URL일 때 지금 화면을 VLM에 보낼 크기 JPEG로 (메모리에만). 사람이 보이면 None."""
@@ -783,9 +818,10 @@ class RoomWatcher:
         check = self.check(seen, now_iso, photo=photo if desk else None, base=self.entry["objects"], desk=desk)
         check["reservationId"] = reservation_id
         check["phase"] = "FIRST"
-        after = self.vlm_photo(photo, dets, seen) if self.entry.get("vlm") else None
+        before = self.entry_vlm()
+        after = self.vlm_photo(photo, dets, seen) if before else None
         if after:  # VLM은 카메라 스레드를 막지 않게 run_room_camera가 따로 묻는다 (사진은 결과를 보내면 버림)
-            check["vlmPhotos"] = (self.entry["vlm"], after)
+            check["vlmPhotos"] = (before, after)
         photos = {"FIRST": self.room_photo(photo, dets, seen), "ENTRY": self.entry.get("jpg") if self.photos else None}
         photos = {k: v for k, v in photos.items() if v}  # 퇴실 뒤 사진부터 (입실 전은 core가 아직 안 받을 수 있음)
         if photos:
@@ -795,8 +831,8 @@ class RoomWatcher:
         # YOLO가 깨끗하다 해도 VLM 답("or")으로 남음이 될 수 있어, VLM에게 물을 때는 일단 남긴다
         keep = check["status"] != "CLEAN" or "vlmPhotos" in check
         self.recheck_base = ({"reservationId": reservation_id, "objects": dict(self.entry["objects"])} if keep else None)
-        if keep and self.entry.get("vlm"):
-            self.recheck_base["vlm"] = self.entry["vlm"]
+        if keep and before:
+            self.recheck_base["vlm"] = before
         self.clear_entry()  # 보냈으면 지운다 (다음 예약은 다음 빈 방에서 새로)
         return check
 

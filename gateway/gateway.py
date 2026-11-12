@@ -913,7 +913,7 @@ def start_room_camera(config, sensors):
             score.pop("presence", None)  # 채점 표는 core에 안 보낸다. 확신도는 사진마다 (tidy_body)
         watcher.model_score = score
         print(model_score.describe(score))
-        print("물건마다 확신도: 이 사진에서 YOLO 점수, 책상 비교로만 찾은 건 VLM이 \"있음\"이라 할 확률 (둘 다 없으면 50%)")
+        print("물건마다 확신도: VLM이 답하면 \"새 물건 있음\"이라 할 확률, 답이 없으면 YOLO 점수 (둘 다 없으면 50%)")
         tidy = SensorSender(config.server, config.device_token, path=f"/api/rooms/{room}/tidy-checks",
                             drop=TIDY_DROP, name="정리 확인 전송", say_ok=True).start()
         send_check = tidy.push

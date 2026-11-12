@@ -119,14 +119,14 @@ def test_find_keeps_the_presence_table_of_that_record(tmp_path):
 
 
 def test_confidence_is_about_this_photo():
-    """11/12 수연: 확신도는 채점 표 값이 아니라 이 사진에서 그 물건이 정말 있을 확률."""
+    """11/12 수연: 확신도는 이름이 맞을 확률이 아니라 이 사진 두 장에서 새 물건이 정말 있을 확률."""
     check = {"reservationId": 37, "phase": "FIRST", "leftItems": {"handbag": 1}, "trash": {"unknown": 1, "cup": 1},
              "confidence": {"handbag": [None], "unknown": [None], "cup": [0.57]},
              "checkedAt": "2026-11-12T13:00:00+09:00"}
     by = lambda body: {i["name"]: i["confidence"] for i in body["items"]}
-    assert by(tidy_body({**check, "vlmYes": 0.98}, "camera-1", "e1")) == {"handbag": 0.98, "unknown": 0.98, "cup": 0.57}
-    assert by(tidy_body({**check, "vlmYes": 0.2}, "camera-1", "e1")) == {"handbag": 0.2, "unknown": 0.2, "cup": 0.57}
-    assert by(tidy_body(check, "camera-1", "e1")) == {"handbag": 0.5, "unknown": 0.5, "cup": 0.57}  # VLM 확률 없음
+    assert by(tidy_body({**check, "vlmYes": 0.98}, "camera-1", "e1")) == {"handbag": 0.98, "unknown": 0.98, "cup": 0.98}
+    assert by(tidy_body({**check, "vlmYes": 0.2}, "camera-1", "e1")) == {"handbag": 0.2, "unknown": 0.2, "cup": 0.2}
+    assert by(tidy_body(check, "camera-1", "e1")) == {"handbag": 0.5, "unknown": 0.5, "cup": 0.57}  # VLM 답 없음: YOLO 점수
 
 
 def test_evidence_keys():

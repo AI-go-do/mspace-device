@@ -153,6 +153,51 @@ def test_watcher_keeps_vlm_entry_photo_and_attaches_pair_to_first_check():
     assert a[:2] == b[:2] == b"\xff\xd8" and entry_jpg is None  # 보낸 뒤 기준은 지운다
 
 
+def test_recheck_asks_vlm_again_with_kept_entry_photo():
+    """11/12 수연: 3시간 뒤에도 입실 전 사진과 지금 사진을 VLM에게 다시 묻는다 (입실 전 사진은 메모리에만 보관)."""
+    vlm = vc.VlmCheck("http://127.0.0.1:1", send=fake_send("YES", []))
+    w = RoomWatcher(1, on_checkout=True, vlm=vlm)
+    run_room(w, [], 0, 5)
+    run_room(w, [person()], 5, 5)
+    entry = w.entry["vlm"]
+    w.request_check(1, 10)
+    first = run_room(w, [], 10, SETTLE_SEC + 6)[0]
+    assert first["status"] == "CLEAN" and "vlmPhotos" in first  # YOLO는 깨끗해도 VLM 답을 기다리니 기준을 남긴다
+    assert w.recheck_base["vlm"] == entry and w.entry is None
+    w.request_check(1, 100, "RECHECK")
+    again = run_room(w, [], 100, SETTLE_SEC + 6)[0]
+    assert again["phase"] == "RECHECK" and again["vlmPhotos"][0] == entry
+    assert w.recheck_base is None  # 다시 확인이 끝나면 사진도 버린다
+
+
+def test_first_check_clean_by_vlm_too_drops_kept_photo(tmp_path):
+    w = RoomWatcher(1, on_checkout=True, vlm=vc.VlmCheck("http://127.0.0.1:1", send=fake_send("NO", [])))
+    w.recheck_base = {"reservationId": 7, "objects": {}, "vlm": b"x"}
+    room_camera.ask_vlm_then_finish(w, base_check(), (b"a", b"b"), str(tmp_path / "log.jsonl"), None, None)
+    assert w.recheck_base is None
+
+
+def test_recheck_vlm_photo_is_dropped_when_someone_enters():
+    vlm = vc.VlmCheck("http://127.0.0.1:1", send=fake_send("YES", []))
+    w = RoomWatcher(1, on_checkout=True, vlm=vlm)
+    run_room(w, [], 0, 5)
+    run_room(w, [person()], 5, 5)
+    w.request_check(1, 10)
+    run_room(w, [], 10, SETTLE_SEC + 6)
+    assert w.recheck_base["vlm"]
+    run_room(w, [person()], 40, 5)
+    assert w.recheck_base is None
+
+
+def test_ask_vlm_on_recheck_sends_vlm_confidence(tmp_path):
+    sent = []
+    w = RoomWatcher(1, on_checkout=True, vlm=vc.VlmCheck("http://127.0.0.1:1", send=lambda url, body: ("YES", 0.97)))
+    check = {**base_check("LEFT_ITEMS", left={"handbag": 1}), "phase": "RECHECK",
+             "confidence": {"handbag": [0.6]}}
+    room_camera.ask_vlm_then_finish(w, check, (b"a", b"b"), str(tmp_path / "log.jsonl"), sent.append, None)
+    assert sent[0]["phase"] == "RECHECK" and sent[0]["items"] == [{"name": "handbag", "confidence": 0.97}]
+
+
 def test_watcher_without_vlm_attaches_nothing():
     w = RoomWatcher(1, on_checkout=True)
     run_room(w, [], 0, 5)

@@ -790,17 +790,21 @@ class RoomWatcher:
         photos = {k: v for k, v in photos.items() if v}  # 퇴실 뒤 사진부터 (입실 전은 core가 아직 안 받을 수 있음)
         if photos:
             check["photos"] = photos
-        # 물건이 남았으면 3시간 뒤 다시 확인할 때 쓰게 기준 개수만 남긴다 (책상 사진은 지움)
-        self.recheck_base = ({"reservationId": reservation_id, "objects": dict(self.entry["objects"])}
-                             if check["status"] != "CLEAN" else None)
+        # 물건이 남았으면 3시간 뒤 다시 확인할 때 쓰게 기준 개수와 VLM용 입실 전 사진을 남긴다 (책상 사진은 지움).
+        # VLM 사진은 젯슨 메모리에만 두고, 다시 확인이 끝나거나 취소되면(다음 팀 입실 등) 버린다 (11/12 수연: 보관).
+        # YOLO가 깨끗하다 해도 VLM 답("or")으로 남음이 될 수 있어, VLM에게 물을 때는 일단 남긴다
+        keep = check["status"] != "CLEAN" or "vlmPhotos" in check
+        self.recheck_base = ({"reservationId": reservation_id, "objects": dict(self.entry["objects"])} if keep else None)
+        if keep and self.entry.get("vlm"):
+            self.recheck_base["vlm"] = self.entry["vlm"]
         self.clear_entry()  # 보냈으면 지운다 (다음 예약은 다음 빈 방에서 새로)
         return check
 
     def recheck(self, reservation_id, dets, now_iso, detail, photo=None):
-        """3시간 뒤 다시 확인 (RECHECK). 첫 확인 때와 같은 기준(입실 직전 빈 방)과 개수로만 비교한다.
+        """3시간 뒤 다시 확인 (RECHECK). 첫 확인 때와 같은 기준(입실 직전 빈 방)과 개수로 비교하고,
+        VLM을 켰으면 남겨 둔 입실 전 사진과 지금 사진을 VLM에게 다시 묻는다 (확신도 = 지금 "새 물건 있음" 확률).
 
-        책상 사진 비교는 하지 않는다 (사진은 첫 확인 뒤 지움). 그래서 사진 비교로만 찾았던 물건은 여기서
-        안 잡혀 경고가 안 간다 (잘못 경고하지 않는 쪽).
+        책상 사진 비교는 하지 않는다 (책상 사진은 첫 확인 뒤 지움).
         """
         base, self.recheck_base = self.recheck_base, None
         retrieved = self.retrieve_rid == reservation_id
@@ -812,6 +816,9 @@ class RoomWatcher:
         check = self.check(seen, now_iso, base=base["objects"])
         check["reservationId"] = reservation_id
         check["phase"] = "RECHECK"
+        after = self.vlm_photo(photo, dets, seen) if base.get("vlm") else None
+        if after:  # FIRST처럼 run_room_camera가 따로 묻는다
+            check["vlmPhotos"] = (base["vlm"], after)
         if retrieved:
             check["afterRetrieve"] = True  # 화면 출력용 (core로는 안 보냄)
             if check["status"] != "CLEAN":
@@ -995,7 +1002,8 @@ def tidy_body(check, device_id, event_id=None, model=None):
 
     confidence = 이 사진 두 장에서 새 물건이 정말 있을 확률 (11/12 수연: 이름이 맞을 확률이 아니라 "물건이다"의 확률).
       VLM이 답했으면 모든 물건에 VLM이 "새 물건 있음"이라 할 확률 (YOLO 점수는 이름이 맞을 확률이라 쓰지 않는다).
-      VLM 답이 없으면(RECHECK·VLM 꺼짐·시간 초과) YOLO 점수, 그것도 없으면 DESK_DIFF_CONF.
+      VLM 답이 없으면(VLM 꺼짐·시간 초과·젯슨 재시작으로 입실 전 사진 없음) YOLO 점수, 그것도 없으면 DESK_DIFF_CONF.
+      RECHECK도 VLM에게 다시 물어서, 경고(core, RECHECK + 0.8 이상)는 3시간 뒤 사진의 VLM 확률로 정해진다.
     """
     found = {**check["leftItems"], **check["trash"]}
     conf = check.get("confidence", {})
@@ -1005,9 +1013,11 @@ def tidy_body(check, device_id, event_id=None, model=None):
         scores = list(conf.get(label, []))[:n]
         scores += [None] * (n - len(scores))
         for c in scores:
-            c = yes if yes is not None else c if c is not None else DESK_DIFF_CONF
-            items.append({"name": label, "confidence": round(float(c), 3)})
-    items.sort(key=lambda i: -i["confidence"])  # 20개가 넘으면 확신이 큰 것부터 남긴다
+            rank = c if c is not None else yes if yes is not None else DESK_DIFF_CONF
+            c = yes if yes is not None else rank
+            items.append(({"name": label, "confidence": round(float(c), 3)}, float(rank)))
+    # 20개가 넘으면 확신이 큰 것부터 남긴다. VLM 확률은 모두 같아서 순서는 YOLO 점수로 정한다
+    items = [item for item, _ in sorted(items, key=lambda pair: (-pair[0]["confidence"], -pair[1]))]
     body = {
         "eventId": event_id or str(uuid.uuid4()),
         "reservationId": check["reservationId"],
@@ -1178,10 +1188,10 @@ def apply_vlm(check, new_item, rule, yes=None):
     vlm: VLM 답만 쓴다
     """
     check["vlm"] = new_item
+    if new_item is None:  # 못 알아들은 답의 확률은 쓰지 않는다 (YOLO 점수 그대로)
+        return check
     if yes is not None:
         check["vlmYes"] = yes  # 이 사진 두 장에서 VLM이 "새 물건 있음"이라 할 확률
-    if new_item is None:
-        return check
     clean = check["status"] == "CLEAN"
     if new_item and clean and rule in ("or", "vlm"):
         check["trash"] = {**check["trash"], UNKNOWN: check["trash"].get(UNKNOWN, 0) + 1}
@@ -1201,6 +1211,10 @@ def ask_vlm_then_finish(watcher, check, pair, log_path, send_check, send_photo):
         sure = f", 있음 확률 {yes:.0%}" if yes is not None else ""
         print(f"VLM {watcher.room_id}번 방 예약 {check['reservationId']}: {answer} ({seconds:.0f}초{sure})")
         apply_vlm(check, new_item, watcher.vlm.rule, yes)
+        base = getattr(watcher, "recheck_base", None)
+        if (check.get("phase", "FIRST") == "FIRST" and check["status"] == "CLEAN" and base
+                and base.get("reservationId") == check.get("reservationId")):
+            watcher.recheck_base = None  # VLM도 깨끗하다 함: 3시간 뒤 확인이 없으니 남겨 둔 입실 전 사진을 버린다
     except Exception as e:  # 서버가 꺼졌거나 오래 걸림: 결과를 버리지 않고 YOLO 결과로 보낸다
         print(f"VLM에게 못 물었어요 ({e.__class__.__name__}). YOLO 결과만 보내요")
     del pair

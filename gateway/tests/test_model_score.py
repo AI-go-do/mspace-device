@@ -129,6 +129,24 @@ def test_confidence_is_about_this_photo():
     assert by(tidy_body(check, "camera-1", "e1")) == {"handbag": 0.5, "unknown": 0.5, "cup": 0.57}  # VLM 답 없음: YOLO 점수
 
 
+def test_vlm_confidence_keeps_yolo_order_for_the_item_limit():
+    """VLM 확률은 모두 같아서, 20개 제한에서 남길 순서는 YOLO 점수로 (CodeRabbit #72)."""
+    from room_camera import MAX_SERVER_ITEMS
+    n = MAX_SERVER_ITEMS + 1
+    check = {"reservationId": 1, "phase": "FIRST", "leftItems": {"aaa": n - 1, "zzz": 1}, "trash": {},
+             "confidence": {"aaa": [0.3] * (n - 1), "zzz": [0.9]}, "vlmYes": 0.95, "checkedAt": "t"}
+    items = tidy_body(check, "camera-1", "e1")["items"]
+    assert len(items) == MAX_SERVER_ITEMS and items[0] == {"name": "zzz", "confidence": 0.95}
+
+
+def test_unparsed_vlm_answer_keeps_yolo_confidence():
+    from room_camera import apply_vlm
+    check = {"reservationId": 1, "status": "LEFT_ITEMS", "leftItems": {"cup": 1}, "trash": {},
+             "confidence": {"cup": [0.57]}, "checkedAt": "t"}
+    apply_vlm(check, None, "or", 0.9)
+    assert "vlmYes" not in check and tidy_body(check, "camera-1", "e1")["items"] == [{"name": "cup", "confidence": 0.57}]
+
+
 def test_evidence_keys():
     from room_camera import evidence_key
     assert evidence_key({"yolo": True, "desk": False}) == "yolo"

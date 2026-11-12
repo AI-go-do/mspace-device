@@ -220,12 +220,14 @@ def report(result, candidate, out=print):
         f"| {result['medianSeconds']:.2f}초 | (바꾼 것) | 문제 {result['cases']}개, 틀림 {names} |")
 
 
-def save_result(folder, result, candidate):
+def save_result(folder, result, candidate, compare=False):
     """results.jsonl에 한 줄 더한다. core로 보낼 때 쓰는 eventId도 같이 적어, 다시 보내도 한 번만 저장되게 한다."""
     record = {"at": datetime.now(KST).isoformat(timespec="seconds"), "eventId": str(uuid.uuid4()), "candidate": candidate,
               **{k: v for k, v in result.items() if k != "rows"},
               "wrong": [r["case"] for r in result["rows"] if not r["ok"]],
               "evidence": [r["evidence"] for r in result["rows"] if r.get("evidence")]}
+    if compare:  # compare 후보 줄. push-last가 다시 보낼 대상에서 뺀다 (core에는 고른 score 결과만)
+        record["compare"] = True
     os.makedirs(folder, exist_ok=True)
     with open(os.path.join(folder, "results.jsonl"), "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -246,7 +248,7 @@ def model_name(candidate):
 def score_body(record):
     """채점 기록 한 줄 → core POST body. 숫자만 보낸다 (사진·문제 이름·후보 설정은 안 보낸다). 정확도는 0~1 소수."""
     return {"eventId": record["eventId"], "kind": "TIDY", "model": model_name(record.get("candidate")),
-            "accuracy": round(record["leftAccuracy"], 4), "accuracy3": round(record["accuracy"], 4),
+            "accuracy": round(main_accuracy(record), 4), "accuracy3": round(record["accuracy"], 4),
             "cases": record["cases"], "serious": record["serious"], "medianSeconds": record["medianSeconds"],
             "measuredAt": record["at"]}
 
@@ -270,8 +272,9 @@ def push_score(record, env, out=print, post=None):
         import requests
         post = requests.post
     try:
-        r = post(url, json=body, headers={"Authorization": f"Bearer {config.device_token}"},
-                 timeout=(gateway.CONNECT_TIMEOUT, gateway.TIMEOUT), allow_redirects=False)
+        extra = {"proxies": {"http": None, "https": None}} if gateway.is_loopback(config.server) else {}
+        r = post(url, json=body, headers={"Authorization": f"Bearer {config.device_token}"},  # 내 컴퓨터(http)면 프록시를 안 거침
+                 timeout=(gateway.CONNECT_TIMEOUT, gateway.TIMEOUT), allow_redirects=False, **extra)
     except Exception as e:  # noqa: BLE001 - 채점 결과는 이미 저장됨. 오류 이름만 한 줄
         out(f"점수 보내기 실패: {e.__class__.__name__} (채점 기록은 그대로, push-last로 다시 보내요)")
         return None
@@ -284,14 +287,15 @@ def push_score(record, env, out=print, post=None):
 
 
 def last_record(folder):
-    """results.jsonl 마지막 줄. eventId가 없는 옛 줄이면 그 자리에서 정해 보낸다 (그 줄은 고치지 않는다)."""
+    """results.jsonl에서 compare 후보가 아닌 마지막 줄. eventId가 없는 옛 줄이면 그 자리에서 정해 보낸다 (그 줄은 고치지 않는다)."""
     path = os.path.join(folder, "results.jsonl")
     if not os.path.exists(path):
         raise SystemExit(f"{path}가 없어요. 먼저 score를 돌려요")
     with open(path, encoding="utf-8") as f:
         lines = [line for line in f if line.strip()]
+    lines = [line for line in lines if not json.loads(line).get("compare")]
     if not lines:
-        raise SystemExit(f"{path}가 비었어요")
+        raise SystemExit(f"{path}에 보낼 score 결과가 없어요 (compare 후보 줄만 있음)")
     record = json.loads(lines[-1])
     record.setdefault("eventId", str(uuid.uuid5(uuid.NAMESPACE_URL, "mspace-tidy-score:" + lines[-1].strip())))
     return record
@@ -356,7 +360,7 @@ def run_score(folder, env, out=print, as_json=False, clock=time.perf_counter, pu
     result["vlmModel"] = vlm.model if vlm is not None else None  # 게이트웨이가 같은 VLM 모델의 점수만 쓰게 (model_score)
     candidate = candidate_name(env)
     report(result, candidate, out)
-    record = save_result(folder, result, candidate)
+    record = save_result(folder, result, candidate, compare=as_json)
     if as_json:  # compare가 읽는 줄
         summary = {k: v for k, v in result.items() if k != "rows"}
         summary["wrong"] = [r["case"] for r in result["rows"] if not r["ok"]]

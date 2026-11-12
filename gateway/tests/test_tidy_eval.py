@@ -498,3 +498,27 @@ def test_run_score_pushes_only_when_not_compare(tmp_path, monkeypatch):
     te.run_score(str(tmp_path), {"YOLO_MODEL": "m.onnx"}, out=lambda s: None)
     te.run_score(str(tmp_path), {"YOLO_MODEL": "m.onnx"}, out=lambda s: None, as_json=True)
     assert len(pushed) == 1
+
+
+def test_push_last_skips_compare_rows_and_old_accuracy(tmp_path):
+    scored = scored_record(tmp_path)
+    result = te.score([te.Case("001", "CLEAN")], lambda c: ({"status": "CLEAN"}, 1.0))
+    te.save_result(str(tmp_path), result, "후보", compare=True)
+    assert te.last_record(str(tmp_path))["eventId"] == scored["eventId"]
+    old = {"eventId": "x", "at": "t", "candidate": "", "accuracy": 0.5, "cases": 2, "serious": 0, "medianSeconds": 1}
+    assert te.score_body(old)["accuracy"] == 0.5  # leftAccuracy가 없던 옛 줄
+
+
+def test_push_score_loopback_skips_proxy(tmp_path):
+    record = scored_record(tmp_path)
+    seen = {}
+
+    def post(url, **kw):
+        seen.update(kw)
+        return FakeResponse(200)
+
+    te.push_score(record, {"SERVER": "http://127.0.0.1:8080", "DEVICE_TOKEN": "t"}, lambda s: None, post=post)
+    assert seen["proxies"] == {"http": None, "https": None}
+    seen.clear()
+    te.push_score(record, {"SERVER": "https://dev.example", "DEVICE_TOKEN": "t"}, lambda s: None, post=post)
+    assert "proxies" not in seen

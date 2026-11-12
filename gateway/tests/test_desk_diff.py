@@ -519,15 +519,13 @@ def test_keep_small_and_furniture_small_settings():
     assert off.desk_keep_small == 0.0 and off.desk_furniture_small == 0.0  # 기본은 예전과 같음
 
 
-def test_keep_small_keeps_a_thing_right_next_to_the_shade():
-    """그늘 바로 옆 물건이 그늘과 하나로 이어져 같이 빠지지 않는다 (CodeRabbit #81)."""
+def test_keep_small_does_not_turn_shade_edges_into_things():
+    """그늘 바로 옆 변화는 그늘과 하나로 보고 뺀다. 그늘 가장자리 조각을 물건으로 세지 않기 위함 (CodeRabbit #81)."""
     base, _ = prepare(desk(), AREA)
     shade = (500, 230, 600, 720, (0, 0, 0))
-    phone = (1160, 400, 40, 80, (20, 20, 20))  # 그늘 끝 가까이 (줄인 사진에서 join_near 간격 안). 예전 코드는 둘을 이어 같이 뺐다
-    now, _ = prepare(desk(shade, phone), AREA)
-    found = find_changes(base, now, light="ssim", keep_small=0.05)
-    assert len(found) == 1
-
+    edge = (1160, 300, 30, 30, (0, 0, 0))  # 그늘 끝 가까이 떨어진 작은 조각 (join_near 간격 안)
+    now, _ = prepare(desk(shade, edge), AREA)
+    assert find_changes(base, now, light="ssim", keep_small=0.05) == []
 
 def test_partial_compare_does_not_refresh_desk_photo():
     """큰 변화를 빼고 일부만 본 비교는 깨끗해도 기준 사진을 바꾸지 않는다 (CodeRabbit #81)."""

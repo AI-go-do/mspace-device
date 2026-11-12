@@ -156,15 +156,14 @@ def find_changes(base, now, thresh=DIFF_THRESH, min_area=MIN_AREA, max_area=MAX_
     if too_much and not keep_small:
         return None
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    raw = [tuple(int(v) for v in cv2.boundingRect(c)) for c in contours]
-    if too_much:  # 큰 덩어리(조명·그림자)를 잇기 전에 뺀다. 그래야 그림자 옆 물건이 그림자에 붙어 같이 빠지지 않는다
-        raw = [b for b in raw if b[2] * b[3] <= keep_small * total]
+    boxes = join_near([tuple(int(v) for v in cv2.boundingRect(c)) for c in contours])
+    boxes = [b for b in boxes if b[2] * b[3] >= min_area * total]
+    if too_much:  # 큰 변화(조명·그림자)는 빼고 물건 크기만 남긴다.
+        # 잇기 전에 큰 덩어리를 빼면 그림자 가장자리 조각이 따로 남아 물건으로 잘못 잡힌다.
+        # 그래서 그림자에 붙은 물건은 같이 빠질 수 있다 (오알람보다 놓침을 택함)
+        boxes = [b for b in boxes if b[2] * b[3] <= keep_small * total]
         if partial is not None:
             partial.append(True)
-    boxes = join_near(raw)
-    boxes = [b for b in boxes if b[2] * b[3] >= min_area * total]
-    if too_much:  # 작은 조각이 이어져 다시 커진 것도 빛 얼룩으로 본다
-        boxes = [b for b in boxes if b[2] * b[3] <= keep_small * total]
     if move:
         boxes, out = split_moved(base, now, boxes, same=move_same)
         if moved is not None:

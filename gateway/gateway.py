@@ -90,6 +90,10 @@ class Config:
     desk_thresh: int = 35                  # 책상 비교: 밝기 차이가 이보다 크면 "달라짐" (DESK_THRESH, 1~255)
     desk_min_area: float = 0.0012          # 책상 비교: 책상 넓이의 이 비율보다 작은 차이는 무시 (DESK_MIN_AREA)
     desk_light: str = "mean"               # 책상 비교 방식: mean(전체 밝기) / local(자리마다 밝기) / ssim(모양 비교)
+    desk_move: bool = False                # 책상 비교: 원래 있던 걸 옮기거나 뒤집은 것은 새 물건으로 안 셈 (DESK_MOVE=1, 9판)
+    desk_move_same: float = 1.0            # DESK_MOVE에서 "원래 있던 자리"로 볼 기준 (DESK_MOVE_SAME, 높을수록 덜 뺌. 9판 1등 1.0)
+    vlm_url: str | None = None             # 정리 확인을 VLM(llama-server, 127.0.0.1)에게 한 번 더 물음 (VLM_URL, 10판). 비우면 끔
+    vlm_rule: str = "or"                   # YOLO와 합치는 법: or(하나라도 남음이면 남음, 10판 1등) / and / vlm (VLM_RULE)
     tidy_photos: bool = False              # True면 정리 확인 때 빈 방 사진(입실 전·퇴실 뒤·3시간 뒤)을 core로 올린다 (Q-27)
     label_model: str | None = None         # 달라진 곳에 이름 붙일 모델 (YOLO-World ONNX). 없으면 YOLO_MODEL로
     baseline_file: str | None = "room_baseline.json"  # 깨끗한 방 기준을 적어 두는 파일. BASELINE_FILE=off면 메모리에만
@@ -143,6 +147,10 @@ def load_config(env=None):
         desk_thresh=parse_number(env, "DESK_THRESH", Config.desk_thresh, 1, 255, int),
         desk_min_area=parse_number(env, "DESK_MIN_AREA", Config.desk_min_area, 0.0, 0.3, float),
         desk_light=env.get("DESK_LIGHT") if env.get("DESK_LIGHT") in ("local", "ssim") else Config.desk_light,
+        desk_move=env.get("DESK_MOVE") == "1",
+        desk_move_same=parse_number(env, "DESK_MOVE_SAME", Config.desk_move_same, 0.1, 10.0, float),
+        vlm_url=(env.get("VLM_URL") or "").strip() or None,
+        vlm_rule=(env.get("VLM_RULE") or Config.vlm_rule).strip().lower(),
         tidy_photos=env.get("TIDY_PHOTOS") == "1",
         label_model=env.get("LABEL_MODEL") or None,
         baseline_file=(None if env.get("BASELINE_FILE") == "off"
@@ -825,6 +833,24 @@ def desk_compare(config, detector):
             room_camera.make_labeler(detector, config.label_model))
 
 
+def make_vlm(config):
+    """VLM_URL이 있으면 VLM 확인을 만든다 (10판). llama-server는 젯슨 안(127.0.0.1)에서만 받는다."""
+    if not config.vlm_url:
+        return None
+    from urllib.parse import urlparse
+    import vlm_check
+    if urlparse(config.vlm_url).hostname not in ("127.0.0.1", "localhost", "::1"):
+        print(f"VLM_URL은 젯슨 안(127.0.0.1)만 돼요. 사진이 밖으로 나가지 않게 VLM은 꺼요: {config.vlm_url}")
+        return None
+    rule = config.vlm_rule
+    if rule not in vlm_check.RULES:
+        print(f"VLM_RULE은 {', '.join(vlm_check.RULES)} 중 하나예요. or로 해요: {rule!r}")
+        rule = "or"
+    vlm = vlm_check.VlmCheck(config.vlm_url, rule=rule)
+    print(f"정리 확인: VLM에게 한 번 더 물어요 ({vlm.model or '모델 이름 못 읽음'}, 규칙 {vlm.rule}, 퇴실 뒤 30초쯤 더 걸림)")
+    return vlm
+
+
 def start_room_camera(config, sensors):
     """방 안 웹캠 인원 세기·정리 확인을 뒤에서(스레드) 켠다."""
     import room_camera  # 켤 때만 불러온다 (OpenCV는 젯슨에만 있으면 됨)
@@ -839,9 +865,10 @@ def start_room_camera(config, sensors):
         path = os.path.splitext(config.baseline_file)[0] + "_entry_desk.png" if config.baseline_file else None
         entry_desk = desk_diff.DeskCompare(config.desk_area, path=path, **desk_diff.settings(config))
     photos = config.tidy_photos and on_checkout  # 연습 모드는 서버로 안 보내니 사진도 안 찍는다
+    vlm = make_vlm(config) if on_checkout and detector.finds_objects else None
     watcher = room_camera.RoomWatcher(room, check_objects=detector.finds_objects, room_items=config.room_items,
                                       on_checkout=on_checkout, baseline_path=config.baseline_file,
-                                      desk=desk, labeler=labeler, entry_desk=entry_desk, photos=photos)
+                                      desk=desk, labeler=labeler, entry_desk=entry_desk, photos=photos, vlm=vlm)
     cam = room_camera.open_camera(config.room_camera)
     send_check = send_photo = None
     if on_checkout:

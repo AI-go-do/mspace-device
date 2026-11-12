@@ -73,7 +73,7 @@ def test_desk_settings_come_from_env(capsys):
     import gateway
     config = gateway.load_config({"DESK_THRESH": "50", "DESK_MIN_AREA": "0.004", "DESK_LIGHT": "local", "PORT": "x"})
     d = DeskCompare(AREA, **desk_diff.settings(config))
-    assert d.tune == {"thresh": 50, "min_area": 0.004, "light": "local"}
+    assert d.tune == {"thresh": 50, "min_area": 0.004, "light": "local", "move": False, "move_same": 1.0}
     config = gateway.load_config({"DESK_THRESH": "999", "DESK_MIN_AREA": "abc", "PORT": "x"})
     assert (config.desk_thresh, config.desk_min_area, config.desk_light) == (35, 0.0012, "mean")
     assert "DESK_THRESH가 이상해서" in capsys.readouterr().out
@@ -392,3 +392,66 @@ def test_entry_photo_and_counts_from_different_saves_are_not_mixed(tmp_path, cap
     w3.update([who], now=5, photo=lambda: desk())
     ok2 = DeskCompare(AREA, path=str(tmp_path / "c_entry_desk.png"))
     assert RoomWatcher(1, on_checkout=True, baseline_path=str(tmp_path / "c.json"), entry_desk=ok2).entry is not None
+
+
+REMOTE = (700, 700, 45, 30, (30, 30, 30))
+MOVED_REMOTE = (1000, 800, 30, 45, (30, 30, 30))      # 옮기면서 돌림
+FLIPPED_REMOTE = (700, 700, 45, 30, (120, 120, 170))  # 같은 자리에서 뒤집음 (뒷면 색이 다름)
+
+
+@pytest.mark.parametrize("same", [0.67, 1.0])
+def test_move_drops_moved_and_flipped_room_things_but_keeps_new_ones(same):
+    """원래 있던 리모컨을 옮기거나 뒤집은 것은 빼고, 새로 둔 물건은 남긴다 (DESK_MOVE=1)."""
+    base, _ = prepare(desk(REMOTE, noise=6), AREA)
+    moved_img, _ = prepare(desk(MOVED_REMOTE, noise=6), AREA)
+    flipped, _ = prepare(desk(FLIPPED_REMOTE, noise=6), AREA)
+    assert len(find_changes(base, moved_img, light="ssim")) == 2   # 끄면 빈자리·새 자리 둘 다 "달라짐"
+    out = []
+    assert find_changes(base, moved_img, light="ssim", move=True, moved=out, move_same=same) == []
+    assert len(out) == 2
+    assert len(find_changes(base, flipped, light="ssim")) == 1
+    assert find_changes(base, flipped, light="ssim", move=True, move_same=same) == []
+    assert len(find_changes(base, flipped, light="ssim", move=True, move_same=5.0)) == 1  # 기준을 높이면 덜 뺌
+    with_paper, _ = prepare(desk(MOVED_REMOTE, PAPER, noise=6), AREA)
+    assert len(find_changes(base, with_paper, light="ssim", move=True, move_same=same)) == 1  # 크기가 다른 새 물건은 그대로
+    empty, _ = prepare(desk(noise=6), AREA)
+    assert len(find_changes(empty, prepare(desk(PHONE, noise=6), AREA)[0], light="ssim", move=True, move_same=same)) == 1
+
+
+def test_move_does_not_count_a_flipped_remote_seen_as_laptop():
+    """뒤집힌 리모컨을 YOLO가 laptop으로 봐도, 기준 때 리모컨이 있던 자리·크기면 새 물건으로 안 센다."""
+    import tidy_eval
+    before, after = desk(REMOTE, noise=6), desk(FLIPPED_REMOTE, noise=6)
+    remote = Detection("remote", 0.8, (700, 700, 45, 30))
+    laptop = Detection("laptop", 0.4, (698, 699, 50, 33))
+
+    def find(frame):
+        return [remote] if frame is before else [laptop]
+
+    check, _ = tidy_eval.judge(before, after, find, room_items={"remote": 1}, desk=DeskCompare(AREA, light="ssim", move=True))
+    assert check["status"] == "CLEAN"
+    check, _ = tidy_eval.judge(before, after, find, room_items={"remote": 1}, desk=DeskCompare(AREA, light="ssim"))
+    assert check["leftItems"] == {"laptop": 1}  # 끄면 지금처럼 잘못 신고
+    phone = Detection("cell phone", 0.7, (900, 400, 40, 80))
+    check, _ = tidy_eval.judge(before, desk(FLIPPED_REMOTE, PHONE, noise=6),
+                               lambda f: [remote] if f is before else [laptop, phone],
+                               room_items={"remote": 1}, desk=DeskCompare(AREA, light="ssim", move=True))
+    assert check["leftItems"] == {"cell phone": 1}  # 새로 둔 휴대폰은 그대로
+
+
+def test_move_settings_come_from_env():
+    import desk_diff
+    import gateway
+    config = gateway.load_config({"DESK_MOVE": "1", "DESK_MOVE_SAME": "0.67", "DESK_LIGHT": "ssim", "PORT": "x"})
+    assert desk_diff.settings(config)["move"] is True and desk_diff.settings(config)["move_same"] == 0.67
+    assert config.desk_light == "ssim"
+    assert gateway.load_config({"PORT": "x"}).desk_move_same == 1.0  # 9판 1등
+
+
+def test_entry_desk_keeps_known_labels_for_move():
+    """예약 기준 책상 사진에도 기준 때 물건 이름을 같이 둔다 (뒤집힌 리모컨을 laptop으로 봐도 빼게)."""
+    d = DeskCompare(AREA, light="ssim", move=True)
+    d.set_prepared(d.look(desk(REMOTE)), [(700, 700, 45, 30)], ["remote"])
+    assert d.known_labels == ["remote"]
+    d.clear()
+    assert d.known_labels == [] and d.moved == []

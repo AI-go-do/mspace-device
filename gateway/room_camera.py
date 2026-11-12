@@ -39,6 +39,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import time
 import uuid
 from collections import deque
@@ -235,6 +236,12 @@ def cut_by_tile(box, x, y, tw, th, width, height, margin=3):
             or (bx + bw >= tw - margin and x + tw < width) or (by + bh >= th - margin and y + th < height))
 
 
+def similar_size(a, b, ratio=2.5):
+    """두 상자 넓이가 ratio배 안으로 비슷한지."""
+    small, big = sorted((a[2] * a[3], b[2] * b[3]))
+    return small > 0 and big <= ratio * small
+
+
 def overlaps(a, b, ratio=0.3):
     """두 상자가 작은 쪽 넓이의 ratio 넘게 겹치는지."""
     return inside(a, b, ratio)
@@ -359,8 +366,11 @@ class RoomWatcher:
     """찾은 목록을 받아서 (1) core에 보낼 재실 이벤트 (2) 정리 확인 결과를 만든다."""
 
     def __init__(self, room_id, check_objects=True, now=None, room_items=None, on_checkout=False,
-                 baseline_path=None, desk=None, labeler=None, entry_desk=None, photos=False):
+                 baseline_path=None, desk=None, labeler=None, entry_desk=None, photos=False, vlm=None):
         self.room_id = room_id
+        # vlm (VLM_URL, 10판): 퇴실 뒤 첫 확인 때 입실 전·퇴실 뒤 사진을 VLM에게 한 번 더 묻는다 (vlm_check.VlmCheck).
+        # 입실 전 사진은 VLM에 보낼 크기로만 메모리에 둔다 (파일로 안 씀, 젯슨이 꺼지면 YOLO 결과만 보냄)
+        self.vlm = vlm
         # photos (TIDY_PHOTOS=1, docs Q-27): 퇴실 모드에서 입실 전(ENTRY)·퇴실 뒤(FIRST)·3시간 뒤(RECHECK) 빈 방 컬러 사진을
         # 결과에 붙여 core로 올린다. 사람이 0명인 장만 찍는다. 입실 전 사진은 정리 확인을 보내면 젯슨에서 지운다
         self.photos = photos
@@ -484,11 +494,11 @@ class RoomWatcher:
 
     def set_entry(self, snap, now, now_iso):
         jpg = snap.get("jpg")
-        self.entry = {"objects": snap["objects"], "at": now, "jpg": jpg}
+        self.entry = {"objects": snap["objects"], "at": now, "jpg": jpg, "vlm": snap.get("vlm")}
         self.write_entry_photo(jpg)
         if self.entry_desk is not None:
             if snap["img"] is not None:
-                self.entry_desk.set_prepared(snap["img"], snap["known"])
+                self.entry_desk.set_prepared(snap["img"], snap["known"], snap.get("labels") or ())
             else:
                 self.entry_desk.clear()
         if self.entry_path:
@@ -553,11 +563,14 @@ class RoomWatcher:
             return  # (PIR이 켜졌던 후보는 다시 비면 바로 새로 찍는다)
         seen = detail() if detail else dets
         img = known = None
+        labels = []
         if self.entry_desk is not None and photo is not None:
             img = self.entry_desk.look(photo())  # 책상 부분만 흑백·작게. 메모리에만
             known = [d.box for d in self.objects(seen)]
+            labels = [d.label for d in self.objects(seen)]
         jpg = self.room_photo(photo, dets, seen)  # 입실 전 사진 (TIDY_PHOTOS)
-        self.snapshot = {"objects": self.count(seen), "img": img, "known": known, "jpg": jpg, "at": now}
+        self.snapshot = {"objects": self.count(seen), "img": img, "known": known, "labels": labels, "jpg": jpg,
+                         "vlm": self.vlm_photo(photo, dets, seen), "at": now}
         self.pir_since = None
 
     def drop_recheck_on_entry(self):
@@ -580,6 +593,16 @@ class RoomWatcher:
 
     def people(self, dets):
         return sum(1 for d in dets if d.label == "person")
+
+    def vlm_photo(self, photo, *seen):
+        """VLM_URL일 때 지금 화면을 VLM에 보낼 크기 JPEG로 (메모리에만). 사람이 보이면 None."""
+        if self.vlm is None or photo is None or any(self.people(d) for d in seen):
+            return None
+        try:
+            return self.vlm.prepare(photo())
+        except Exception as e:  # 사진을 못 만들어도 YOLO 확인은 그대로
+            print(f"VLM 사진을 못 만들었어요 ({e.__class__.__name__}). YOLO 결과만 써요")
+            return None
 
     def room_photo(self, photo, *seen):
         """TIDY_PHOTOS일 때 지금 화면을 JPEG로. 빠르게 센 것·자세히 찾은 것 어디에도 사람이 없을 때만 (사람 사진은 안 올림)."""
@@ -685,6 +708,9 @@ class RoomWatcher:
         check = self.check(seen, now_iso, photo=photo if desk else None, base=self.entry["objects"], desk=desk)
         check["reservationId"] = reservation_id
         check["phase"] = "FIRST"
+        after = self.vlm_photo(photo, dets, seen) if self.entry.get("vlm") else None
+        if after:  # VLM은 카메라 스레드를 막지 않게 run_room_camera가 따로 묻는다 (사진은 결과를 보내면 버림)
+            check["vlmPhotos"] = (self.entry["vlm"], after)
         photos = {"FIRST": self.room_photo(photo, dets, seen), "ENTRY": self.entry.get("jpg") if self.photos else None}
         photos = {k: v for k, v in photos.items() if v}  # 퇴실 뒤 사진부터 (입실 전은 core가 아직 안 받을 수 있음)
         if photos:
@@ -778,6 +804,23 @@ class RoomWatcher:
             items[label] = items.get(label, 0) + 1
         return items
 
+    def not_moved(self, dets, now_items, base, desk):
+        """DESK_MOVE=1: 늘어난 물건 중 "원래 있던 걸 옮기거나 다른 이름으로 잘못 본 것"은 빼고 다시 센다 (9판).
+
+        - 책상 비교가 "옮긴 자리"로 본 곳에 있는 것 (리모컨을 옮김·뒤집음)
+        - 기준 때 다른 이름의 물건이 있던 자리에, 비슷한 크기로 잡힌 것 (뒤집힌 리모컨을 laptop으로 봄)
+        개수가 기준보다 늘어난 이름만 본다. 기준에 있던 같은 이름의 물건은 원래대로 센다.
+        """
+        known = list(zip(desk.known, desk.known_labels))
+        items = dict(now_items)
+        for d in self.objects(dets):
+            if items.get(d.label, 0) <= max(base.get(d.label, 0), self.room_items.get(d.label, 0)):
+                continue
+            renamed = any(label != d.label and overlaps(d.box, box) and similar_size(d.box, box) for box, label in known)
+            if renamed or any(overlaps(d.box, box) for box in desk.moved):
+                items[d.label] -= 1
+        return {k: v for k, v in items.items() if v > 0}
+
     def check(self, dets, now_iso, photo=None, base=None, desk=None):
         """깨끗할 때보다 늘어난 물건만 골라 결과를 만든다 (종류별 개수, 자리는 보지 않음).
 
@@ -800,6 +843,8 @@ class RoomWatcher:
             extra = found or {}
             if not compared:
                 print(f"정리 확인 {self.room_id}번 방: 책상 사진 비교를 건너뜀 (조명·카메라가 크게 바뀜)")
+        if compared and desk.tune.get("move"):
+            now_items = self.not_moved(dets, now_items, base, desk)
         trash, left, confidence = {}, {}, {}
         scores = self.scores(dets)
         for label, n in now_items.items():
@@ -989,6 +1034,58 @@ def safe_log(log_path, record):
         print("기록 파일에 못 썼어요(계속 돌아요):", log_path, repr(e))
 
 
+def start_thread(target, *args):
+    threading.Thread(target=target, args=args, daemon=True).start()
+
+
+def apply_vlm(check, new_item, rule):
+    """VLM 답(새 물건 있음 True / 없음 False / 못 알아들음 None)을 정리 확인 결과에 합친다 (10판, VLM_RULE).
+
+    or : YOLO가 깨끗하다 해도 VLM이 "있다"면 이름 모르는 물건 1개로 더한다 (확신도 0.5라 알림만, 경고는 안 감)
+    and: YOLO가 찾았어도 VLM이 "없다"면 깨끗함으로 바꾼다
+    vlm: VLM 답만 쓴다
+    """
+    check["vlm"] = new_item
+    if new_item is None:
+        return check
+    clean = check["status"] == "CLEAN"
+    if new_item and clean and rule in ("or", "vlm"):
+        check["trash"] = {**check["trash"], UNKNOWN: check["trash"].get(UNKNOWN, 0) + 1}
+        check.setdefault("confidence", {})[UNKNOWN] = check.get("confidence", {}).get(UNKNOWN, []) + [DESK_DIFF_CONF]
+        check["status"] = "NEEDS_CLEANING"
+    elif not new_item and not clean and rule in ("and", "vlm"):
+        check["trash"], check["leftItems"], check["confidence"] = {}, {}, {}
+        check["status"] = "CLEAN"
+    return check
+
+
+def ask_vlm_then_finish(watcher, check, pair, log_path, send_check, send_photo):
+    """VLM에게 묻고(따로 도는 스레드) 결과를 합친 뒤 보낸다. VLM이 안 되면 YOLO 결과 그대로 보낸다."""
+    try:
+        new_item, seconds = watcher.vlm.ask_jpeg(*pair)
+        answer = {True: "새 물건 있음", False: "새 물건 없음", None: "못 알아들음"}[new_item]
+        print(f"VLM {watcher.room_id}번 방 예약 {check['reservationId']}: {answer} ({seconds:.0f}초)")
+        apply_vlm(check, new_item, watcher.vlm.rule)
+    except Exception as e:  # 서버가 꺼졌거나 오래 걸림: 결과를 버리지 않고 YOLO 결과로 보낸다
+        print(f"VLM에게 못 물었어요 ({e.__class__.__name__}). YOLO 결과만 보내요")
+    del pair
+    finish_check(watcher, check, log_path, send_check, send_photo)
+
+
+def finish_check(watcher, check, log_path, send_check, send_photo):
+    photos = check.pop("photos", None) or {}  # 사진 바이트는 기록 파일·화면에 남기지 않는다
+    print(check_message(check))
+    safe_log(log_path, check)
+    if send_check is not None and "reservationId" in check:
+        send_check(tidy_body(check, f"camera-{watcher.room_id}"))
+        if getattr(watcher, "photos", False):
+            print(photo_message(check, photos))
+        if send_photo is not None and photos:
+            for phase, jpg in photos.items():
+                send_photo(photo_body(check["reservationId"], phase, f"camera-{watcher.room_id}", jpg))
+            print(f"정리 확인 사진 {len(photos)}장 올리기 대기 ({', '.join(photos)})")
+
+
 def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path="room_checks.jsonl",
                     every=1.0, clock=time.monotonic, sleep=time.sleep, on_frame=lambda: None, preview=None,
                     warn_every=10.0, send_check=None, send_photo=None):
@@ -1024,7 +1121,8 @@ def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path
                 detailed = getattr(detector, "detect_detailed", None)
                 detail = (lambda: detailed(frame)) if detailed else None  # 기준·정리 확인 때만 불림
                 # 책상 사진 비교(DESK_PHOTO)·정리 확인 사진(TIDY_PHOTOS) 때만 지금 화면을 쓴다
-                photo = (lambda: frame) if watcher.desk is not None or getattr(watcher, "photos", False) else None
+                photo = ((lambda: frame) if watcher.desk is not None or getattr(watcher, "photos", False)
+                         or getattr(watcher, "vlm", None) is not None else None)
                 event, check = watcher.update(dets, clock(), pir_now(), detail=detail, photo=photo)
                 del frame, detail, photo  # 사진은 바로 버린다
                 on_frame()  # 찾기까지 성공한 장만 "카메라 살아 있음"으로 친다
@@ -1032,18 +1130,12 @@ def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path
                     print(f"인원 {watcher.room_id}번 방: {event['sources']['people']}명")
                     push(event)
                 if check:
-                    photos = check.pop("photos", None) or {}  # 사진 바이트는 기록 파일·화면에 남기지 않는다
-                    print(check_message(check))
-                    safe_log(log_path, check)
-                    if send_check is not None and "reservationId" in check:
-                        send_check(tidy_body(check, f"camera-{watcher.room_id}"))
-                        if getattr(watcher, "photos", False):
-                            print(photo_message(check, photos))
-                        if send_photo is not None and photos:
-                            for phase, jpg in photos.items():
-                                send_photo(photo_body(check["reservationId"], phase, f"camera-{watcher.room_id}", jpg))
-                            print(f"정리 확인 사진 {len(photos)}장 올리기 대기 ({', '.join(photos)})")
-                    del photos
+                    pair = check.pop("vlmPhotos", None)
+                    if pair is not None:  # VLM은 30초쯤 걸려서 따로 묻고, 답을 합친 뒤 보낸다 (인원 세기는 계속)
+                        print(f"정리 확인 {watcher.room_id}번 방 예약 {check['reservationId']}: VLM에게 한 번 더 물어요 (30초쯤)")
+                        start_thread(ask_vlm_then_finish, watcher, check, pair, log_path, send_check, send_photo)
+                    else:
+                        finish_check(watcher, check, log_path, send_check, send_photo)
             except Exception as e:  # 한 장에서 오류가 나도 카메라 스레드는 계속 돈다
                 print("방 안 카메라 처리 오류(계속 돌아요):", repr(e))
         sleep(max(0.0, every - (clock() - started)))

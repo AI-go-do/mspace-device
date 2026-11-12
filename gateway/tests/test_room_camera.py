@@ -172,7 +172,7 @@ def test_trash_and_left_items():
     check = run_visit(RoomWatcher(1), after)
     assert check["status"] == "LEFT_ITEMS"
     assert check["trash"] == {"cup": 2} and check["leftItems"] == {"laptop": 1}
-    assert check_message(check) == "정리 확인 1번 방: 두고 간 물건 노트북 1 / 치울 것 컵 2"
+    assert check_message(check).splitlines()[0] == "정리 확인 1번 방: 두고 간 물건 노트북 1 / 치울 것 컵 2"
 
 
 def test_item_that_was_there_when_clean_is_ignored():
@@ -1630,3 +1630,10 @@ def test_yolo_threads_default_leaves_cores_for_vlm():
     assert yolo_threads({"YOLO_THREADS": "4"}) == 4
     assert yolo_threads({"YOLO_THREADS": "0"}) == 0  # onnxruntime 기본
     assert yolo_threads({"YOLO_THREADS": "abc"}) == 2
+
+
+def test_check_message_shows_yolo_score_per_item():
+    """11/12 수연: 서버엔 안 보내도 물건마다 YOLO 점수를 화면에서 보고 싶음."""
+    msg = check_message({"roomId": 1, "status": "LEFT_ITEMS", "leftItems": {"cell phone": 1, "handbag": 1},
+                         "trash": {"unknown": 1}, "confidence": {"cell phone": [0.72], "handbag": [0.6], "unknown": [None]}})
+    assert "휴대폰 72%" in msg and "손가방 60%" in msg and "점수 없음" in msg

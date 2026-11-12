@@ -1106,7 +1106,22 @@ def check_message(check):
         parts.append("두고 간 물건 " + describe(check["leftItems"]))
     if check["trash"]:
         parts.append("치울 것 " + describe(check["trash"]))
-    return f"정리 확인 {check['roomId']}번 방{again}: " + " / ".join(parts)
+    return f"정리 확인 {check['roomId']}번 방{again}: " + " / ".join(parts) + item_scores(check)
+
+
+def item_scores(check):
+    """화면에만: 물건마다 YOLO 점수 (11/12 수연. 서버로는 VLM 확률을 보내지만, 물건마다 얼마였는지 보고 싶음)."""
+    found = {**check.get("leftItems", {}), **check.get("trash", {})}
+    conf = check.get("confidence", {})
+    shown = []
+    for label, n in sorted(found.items()):
+        scores = list(conf.get(label, []))[:n]
+        scores += [None] * (n - len(scores))
+        for c in scores:
+            shown.append(f"{KOREAN.get(label, label)} {c:.0%}" if c is not None else f"{KOREAN.get(label, label)} 점수 없음")
+    if not shown:
+        return ""
+    return "\n  물건마다 YOLO 점수 (화면에만): " + ", ".join(shown) + " (점수 없음 = 책상 비교·VLM으로만 찾음)"
 
 
 # ---------- 카메라 루프 ----------

@@ -172,6 +172,8 @@ def candidate_name(env):
     """채점한 설정을 한 줄로 (README 기록용). 게이트웨이 설정 이름 그대로."""
     keys = ("YOLO_MODEL", "DESK_PHOTO", "DESK_AREA", "FLOOR_AREA", "DESK_LIGHT", "DESK_THRESH", "DESK_MIN_AREA",
             "DESK_MOVE", "DESK_MOVE_SAME", "LABEL_MODEL", "ROOM_ITEMS", "VLM_NAME", "VLM_RULE", "VLM_SIDE", "VLM_EQ")
+    if env.get("VLM_URL") and not (env.get("VLM_NAME") or env.get("VLM_RULE")):
+        env = {**env, "VLM_RULE": "or"}  # VLM_URL만 줘도 VLM을 켠 것 (기본 규칙 or). 주소는 안 적는다
     parts = [f"{k}={env[k]}" for k in keys if env.get(k)]
     return " ".join(parts) or "(설정 없음)"
 
@@ -266,6 +268,7 @@ def run_score(folder, env, out=print, as_json=False, clock=time.perf_counter):
     result["loadSeconds"] = round(load_seconds, 1)
     result["skipped"] = problems  # 건너뛴 문제. 비교표에 같이 적어 문제집이 다른 걸 알아보게 한다
     result["memoryMB"] = peak_memory_mb()
+    result["vlmModel"] = vlm.model if vlm is not None else None  # 게이트웨이가 같은 VLM 모델의 점수만 쓰게 (model_score)
     candidate = candidate_name(env)
     report(result, candidate, out)
     save_result(folder, result, candidate)

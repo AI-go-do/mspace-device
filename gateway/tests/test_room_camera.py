@@ -1521,3 +1521,31 @@ def test_door_notifying_verifier_passes_purpose_to_room():
 def test_retrieve_recheck_minutes_setting():
     assert gateway.load_config({"PORT": "x"}).retrieve_recheck_min == 10
     assert gateway.load_config({"PORT": "x", "RETRIEVE_RECHECK_MIN": "15"}).retrieve_recheck_min == 15
+
+
+def test_entry_baseline_is_the_empty_room_just_before_checkin_door():
+    """퇴실 뒤 치우러 잠깐 들어갔다 나와도(QR 없이), 실제 입실 문이 열린 직전 빈 방이 기준이 된다 (11/12 #39)."""
+    # given: 예약 1이 우산을 두고 퇴실
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([], 5).run([person()], 5).checkout(1).run([thing("umbrella")], SETTLE_SEC + 6)
+    r.run([thing("umbrella")], 5).run([person(), thing("umbrella")], 10)  # 치우러 들어감 (QR 없음)
+    assert r.w.entry["objects"] == {"umbrella": 1}
+    r.run([], 5)  # 우산 치우고 나감
+    # when: 예약 2가 QR로 입실
+    r.w.door_opened(None, r.t)
+    r.run([person()], 3)
+    # then
+    assert r.w.entry["objects"] == {}
+
+
+def test_bathroom_door_open_keeps_first_entry_baseline():
+    """입실 뒤 화장실 다녀와 문을 다시 열어도 기준은 처음 입실 직전 그대로 (그 사이 둔 컵을 놓치지 않게)."""
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([], 5)
+    r.w.door_opened(None, r.t)
+    r.run([person()], 5)
+    first = dict(r.w.entry)
+    r.run([thing("cup")], 5)  # 컵 두고 화장실
+    r.w.door_opened(None, r.t)
+    r.run([person(), thing("cup")], 3)
+    assert r.w.entry == first

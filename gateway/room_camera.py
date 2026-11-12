@@ -376,6 +376,10 @@ class RoomWatcher:
         self.retrieve = None         # {"reservationId", "at"}: 찾으러 온 QR을 받았고 아직 다시 찍을 때가 안 됨
         self.retrieve_rid = None     # 찾으러 온 뒤 다시 확인을 요청한 예약 (recheck_pending에 들어감)
         self.door_events = deque()   # 문 QR 스레드가 넣는 (purpose, 시각). 카메라 스레드가 update에서 꺼내 처리
+        # 입실 전 사진은 그 예약이 실제로 입실(QR·키패드)한 직전의 빈 방으로 (11/12 #39: 치우러 잠깐 들어간 것이 기준이 됨).
+        # 퇴실 뒤 처음 문이 열리면(찾으러 온 QR 빼고) 다음에 사람이 보일 때 기준을 새로 굳힌다. 그 뒤 문 열림(화장실)은 그대로
+        self.checkin_seen = False    # 마지막 퇴실 뒤 입실 문 열림을 이미 봤나
+        self.rebase_entry = False    # 다음에 사람이 보이면 기준을 새로 굳힌다
         # vlm (VLM_URL, 10판): 퇴실 뒤 첫 확인 때 입실 전·퇴실 뒤 사진을 VLM에게 한 번 더 묻는다 (vlm_check.VlmCheck).
         # 입실 전 사진은 VLM에 보낼 크기로만 메모리에 둔다 (파일로 안 씀, 젯슨이 꺼지면 YOLO 결과만 보냄)
         self.vlm = vlm
@@ -549,6 +553,7 @@ class RoomWatcher:
         if raw > 0:
             self.raw_empty_since = None
             pir_since, self.pir_since = self.pir_since, None
+            rebase, self.rebase_entry = self.rebase_entry, False
             if self.snapshot is not None:
                 snap, self.snapshot = self.snapshot, None
                 if self.retrieve is not None:
@@ -562,7 +567,7 @@ class RoomWatcher:
                     # 카메라엔 안 보였지만 PIR이 오래 켜져 있었다. 그 사이 뭘 두었을 수 있어 이 후보는 버린다
                     print(f"예약 기준 {self.room_id}번 방: 사람이 보이기 전 PIR이 오래 켜져 있어 후보를 쓰지 않음")
                     return
-                self.confirm_entry(snap, now, now_iso)
+                self.confirm_entry(snap, now, now_iso, rebase=rebase)
             return
         if pir:  # 카메라엔 안 보여도 누가 있을 수 있다. 후보를 새로 찍지 않는다
             self.raw_empty_since = None
@@ -606,6 +611,9 @@ class RoomWatcher:
                     self.recheck_pending = None  # 3시간 확인이 기다리던 중이었으면 찾으러 온 뒤 확인으로 대신한다
                 print(f"정리 확인 {self.room_id}번 방: 예약 {rid} 물건 찾으러 온 QR. {self.retrieve_sec // 60}분 뒤 빈 방이면 다시 찍어요")
             else:
+                if not self.checkin_seen:  # 퇴실 뒤 처음 입실 문 열림: 이 예약 기준을 그 직전 빈 방으로
+                    self.checkin_seen = True
+                    self.rebase_entry = True
                 if self.retrieve is not None or self.retrieve_rid is not None:
                     print(f"정리 확인 {self.room_id}번 방: 찾으러 온 뒤 다시 확인 전에 다른 QR로 들어와 취소")
                 self.retrieve = self.retrieve_rid = None
@@ -629,9 +637,12 @@ class RoomWatcher:
             print(f"정리 확인 {self.room_id}번 방: 예약 {rid} 퇴실 뒤 사람이 들어와 다시 확인은 하지 않음")
             self.recheck_base = self.recheck_pending = None
 
-    def confirm_entry(self, snap, now, now_iso):
+    def confirm_entry(self, snap, now, now_iso, rebase=False):
         pending_at = self.pending[1] if self.pending else None
-        if self.entry is not None and (pending_at is None or self.entry["at"] >= pending_at):
+        if rebase and self.entry is not None:
+            print(f"예약 기준 {self.room_id}번 방: 입실 문이 열려 그 직전 빈 방으로 기준을 다시 잡아요 "
+                  "(그 전에 들어왔던 것은 기준으로 안 씀)")
+        elif self.entry is not None and (pending_at is None or self.entry["at"] >= pending_at):
             return  # 같은 예약 사람이 잠깐 나갔다 온 것 (화장실). 처음 기준을 그대로 둔다
         if self.pending:
             # 앞 예약이 끝났는데 방이 10초 비기 전에 다음 사람이 들어옴. 앞 예약은 결과를 내지 않는다 (신고가 받음)
@@ -728,6 +739,7 @@ class RoomWatcher:
             self.recheck_pending = (reservation_id, now)
         else:
             self.pending = (reservation_id, now, "FIRST")
+            self.checkin_seen = False  # 다음 입실 문 열림이 다음 예약의 입실
 
     def cancel_recheck(self, reservation_id):
         """서버가 recheck를 뺐다(그 사이 다음 팀이 입실) 등: 그 예약은 다시 확인하지 않는다. 첫 확인(FIRST)은 그대로."""

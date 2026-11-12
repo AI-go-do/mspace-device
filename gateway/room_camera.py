@@ -736,6 +736,11 @@ class RoomWatcher:
         방이 비면(사람 0, PIR 없음) 확인한다.
         """
         if phase == "RECHECK":
+            waiting = (self.retrieve or {}).get("reservationId")
+            if reservation_id in (waiting, self.retrieve_rid):
+                # 찾으러 온 뒤 다시 확인을 기다리는 중: 그 확인이 대신한다 (N분 전에 찍지 않게, 기준도 지키게)
+                print(f"정리 확인 {self.room_id}번 방: 예약 {reservation_id} 3시간 확인은 찾으러 온 뒤 확인으로 대신해요")
+                return
             self.recheck_pending = (reservation_id, now)
         else:
             self.pending = (reservation_id, now, "FIRST")

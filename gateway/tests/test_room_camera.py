@@ -1549,3 +1549,19 @@ def test_bathroom_door_open_keeps_first_entry_baseline():
     r.w.door_opened(None, r.t)
     r.run([person(), thing("cup")], 3)
     assert r.w.entry == first
+
+
+def test_three_hour_recheck_during_retrieve_wait_is_replaced():
+    """찾으러 온 뒤 확인을 기다리는 중에 3시간 확인이 와도 N분 전에 찍지 않고, 찾으러 온 뒤 확인이 대신한다."""
+    # given
+    r = left_umbrella(retrieve_sec=120)
+    r.w.door_opened("RETRIEVE", r.t)
+    r.run([person(), thing("umbrella")], 10)
+    # when: 3시간 확인이 먼저 옴, 방은 바로 빔
+    r.w.request_check(1, r.t, "RECHECK")
+    r.run([], 60)
+    # then: 아직 안 찍음, 기준 그대로
+    assert [c["phase"] for c in r.out] == ["FIRST"] and r.w.recheck_base is not None
+    r.run([], 60 + SETTLE_SEC)
+    rechecks = [c for c in r.out if c.get("phase") == "RECHECK"]
+    assert len(rechecks) == 1 and rechecks[0].get("afterRetrieve") and rechecks[0]["status"] == "CLEAN"

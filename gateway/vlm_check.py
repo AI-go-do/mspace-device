@@ -66,10 +66,14 @@ def parse(text):
     return None
 
 
+# 환경변수 프록시(http_proxy 등)를 쓰지 않는 전송. 127.0.0.1로 보내도 프록시를 거치면 사진이 젯슨 밖으로 나간다
+DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def post(url, body, timeout=TIMEOUT):
     req = urllib.request.Request(url.rstrip("/") + "/v1/chat/completions", data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as res:
+    with DIRECT.open(req, timeout=timeout) as res:
         data = json.loads(res.read().decode())
     return data["choices"][0]["message"]["content"]
 
@@ -77,7 +81,7 @@ def post(url, body, timeout=TIMEOUT):
 def model_name(url, timeout=10):
     """서버가 띄운 모델 이름 (캐시 열쇠와 기록용). 못 읽으면 빈 문자열."""
     try:
-        with urllib.request.urlopen(url.rstrip("/") + "/v1/models", timeout=timeout) as res:
+        with DIRECT.open(url.rstrip("/") + "/v1/models", timeout=timeout) as res:
             data = json.loads(res.read().decode())
         return data["data"][0]["id"]
     except Exception:

@@ -322,10 +322,12 @@ class SensorSender:
     - 시리얼 읽기·QR 답이 늦어지지 않게 별도 스레드에서 보낸다
     """
 
-    def __init__(self, server, token, path="/api/sensor-events", drop=SENSOR_DROP, name="센서 전송"):
+    def __init__(self, server, token, path="/api/sensor-events", drop=SENSOR_DROP, name="센서 전송", say_ok=False):
         self.url = server + path
         self.drop = drop
         self.name = name
+        self.say_ok = say_ok    # True면 성공할 때마다 한 줄 (정리 확인 결과·사진처럼 가끔 보내는 것). 10초마다 가는 센서는 끔
+        self.failed = False     # 바로 전에 실패했나. 그 뒤 성공하면 성공 줄을 꼭 찍는다
         self.headers = {"Authorization": f"Bearer {token}"}
         self.queue = deque(maxlen=SENSOR_QUEUE_MAX)  # 꽉 차면 append가 가장 오래된 것을 밀어낸다
         self.lock = threading.Lock()
@@ -348,9 +350,15 @@ class SensorSender:
         except requests.RequestException as e:
             status = None
             print(f"[{self.name}] 연결 실패, 다시 보내요: {e.__class__.__name__}")
+        if status is None or not (200 <= status < 300 or status in self.drop):
+            self.failed = True
         if status is not None and (200 <= status < 300 or status in self.drop):
             if status in self.drop:
-                print(f"[{self.name}] 서버가 이것을 거부함({status}). 다시 보내도 같아서 이것만 버려요")
+                print(f"[{self.name}] 서버가 이것을 거부함({status}){self.describe(body)}. 다시 보내도 같아서 이것만 버려요")
+            elif self.say_ok or self.failed:
+                again = "다시 보내기 성공" if self.failed else "보냄"
+                print(f"[{self.name}] {again} ({status}){self.describe(body)}")
+            self.failed = False
             with self.lock:
                 if self.queue and self.queue[0] is body:
                     self.queue.popleft()
@@ -362,6 +370,14 @@ class SensorSender:
         wait = self.backoff
         self.backoff = min(self.backoff * 2, RETRY_MAX)
         return wait
+
+    @staticmethod
+    def describe(body):
+        """성공 줄에 붙일 짧은 설명 (예약 번호·단계·결과). 토큰이나 사진 내용은 안 찍는다."""
+        if not isinstance(body, dict) or "reservationId" not in body:
+            return ""
+        parts = [f"예약 {body['reservationId']}", body.get("phase"), body.get("result")]
+        return ": " + " ".join(str(p) for p in parts if p)
 
     def post(self, body):
         return requests.post(self.url, json=body, timeout=(CONNECT_TIMEOUT, TIMEOUT), headers=self.headers,
@@ -401,7 +417,7 @@ class PhotoSender(SensorSender):
     """
 
     def __init__(self, server, token, room, name="정리 확인 사진 전송"):
-        super().__init__(server, token, path=f"/api/rooms/{room}/tidy-photos", drop=PHOTO_DROP, name=name)
+        super().__init__(server, token, path=f"/api/rooms/{room}/tidy-photos", drop=PHOTO_DROP, name=name, say_ok=True)
         self.queue = deque(maxlen=PHOTO_QUEUE_MAX)
 
     def post(self, body):
@@ -830,7 +846,7 @@ def start_room_camera(config, sensors):
     send_check = send_photo = None
     if on_checkout:
         tidy = SensorSender(config.server, config.device_token, path=f"/api/rooms/{room}/tidy-checks",
-                            drop=TIDY_DROP, name="정리 확인 전송").start()
+                            drop=TIDY_DROP, name="정리 확인 전송", say_ok=True).start()
         send_check = tidy.push
         if photos:
             send_photo = PhotoSender(config.server, config.device_token, room).start().push

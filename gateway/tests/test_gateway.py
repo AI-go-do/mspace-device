@@ -391,6 +391,29 @@ def test_sensor_sender_keeps_event_on_config_or_server_error(sender, status):
     assert sent[0][1]["eventId"] == sent[1][1]["eventId"]  # 같은 eventId로 다시 보낸다
 
 
+def test_sensor_sender_quiet_on_success_but_says_recovery(sender, capsys):
+    s, _ = sender([FakeResponse({"result": "STORED"}), FakeResponse(status=503), FakeResponse({"result": "STORED"}),
+                   FakeResponse({"result": "STORED"})])
+    s.push(occ_body(1))
+    s.step()
+    assert "보냄" not in capsys.readouterr().out  # 10초마다 가는 센서는 성공해도 조용히
+    s.push(occ_body(2))
+    s.step()
+    s.step()
+    assert "[센서 전송] 다시 보내기 성공" in capsys.readouterr().out  # 실패 뒤 성공은 꼭 알림
+    s.push(occ_body(3))
+    s.step()
+    assert capsys.readouterr().out == ""
+
+
+def test_tidy_sender_says_ok_each_time(sender, capsys):
+    s, _ = sender([FakeResponse({"result": "STORED"})])
+    s.say_ok, s.name = True, "정리 확인 전송"
+    s.push({"reservationId": 36, "result": "CLEAN"})
+    s.step()
+    assert "[정리 확인 전송] 보냄 (200): 예약 36 CLEAN" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("status", [400, 409, 413, 422])
 def test_sensor_sender_drops_bad_event(sender, status, capsys):
     s, _ = sender([FakeResponse(status=status)])
@@ -490,5 +513,8 @@ def test_photo_sender_posts_multipart_and_drops_rejected(monkeypatch, capsys):
     assert s.step() == 0 and not s.queue
     s.push({"reservationId": 7, "phase": "ENTRY", "deviceId": "camera-2", "jpg": b"c"})
     assert s.step() == 0 and not s.queue  # core가 ENTRY를 아직 안 받으면(400) 그 장만 버림
-    assert "이것만 버려요" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "[정리 확인 사진 전송] 보냄 (201): 예약 7 FIRST" in out  # 사진은 성공할 때마다 한 줄
+    assert "다시 보내기 성공 (201): 예약 7 RECHECK" in out
+    assert "거부함(400): 예약 7 ENTRY. 다시 보내도 같아서 이것만 버려요" in out
     assert s.queue.maxlen == gateway.PHOTO_QUEUE_MAX

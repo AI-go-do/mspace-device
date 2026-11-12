@@ -550,3 +550,69 @@ def test_partial_compare_does_not_drop_renamed_things():
     d = DeskCompare(AREA, light="ssim", move=True, keep_small=0.05)
     check, _ = tidy_eval.judge(before, after, find, room_items={"remote": 1}, desk=d)
     assert d.partial and check["leftItems"] == {"laptop": 1}
+
+
+ADAPTER = (1000, 500, 60, 50, (30, 30, 30))      # 입실 사진에서 휴대폰으로 잘못 본 검은 상자 (11/13 2차)
+PEN = (1020, 510, 90, 30, (220, 60, 60))          # 그 상자에 걸쳐 둔 물건
+FAKE_PHONE = Detection("cell phone", 0.3, (1000, 500, 60, 50))
+
+
+def judge_with(desk_kwargs, before, after, before_dets, after_dets, labeler=None):
+    import tidy_eval
+    d = DeskCompare(AREA, light="ssim", move=True, **desk_kwargs)
+    check, _ = tidy_eval.judge(before, after, lambda f: before_dets if f is before else after_dets,
+                               desk=d, labeler=labeler)
+    return check
+
+
+def test_known_new_counts_a_new_thing_on_a_spot_seen_at_entry():
+    """DESK_KNOWN_NEW: 입실 때 물건(잘못 본 것 포함) 자리와 겹쳐도, 무늬가 늘어 새로 생긴 곳이면 센다 (2차 011 펜)."""
+    before, after = desk(ADAPTER, noise=6), desk(ADAPTER, PEN, noise=6)
+    assert judge_with({}, before, after, [FAKE_PHONE], [])["status"] == "CLEAN"  # 지금: 빈자리로 보고 뺌
+    check = judge_with({"known_new": True}, before, after, [FAKE_PHONE], [])
+    assert check["status"] == "NEEDS_CLEANING" and check["trash"] == {"unknown": 1}
+
+
+def test_known_new_still_skips_the_spot_of_a_thing_taken_away():
+    """원래 물건을 치운 자리(무늬가 줄어든 곳)는 그대로 뺀다."""
+    before, after = desk(ADAPTER, noise=6), desk(noise=6)
+    assert judge_with({"known_new": True}, before, after, [FAKE_PHONE], [])["status"] == "CLEAN"
+
+
+def test_same_new_counts_a_phone_hidden_by_a_wrong_phone_at_entry():
+    """DESK_SAME_NEW: 입실 때 다른 자리를 휴대폰으로 잘못 봐서 개수가 1→1이어도, 새 자리의 휴대폰은 센다 (2차 007)."""
+    before, after = desk(ADAPTER, noise=6), desk(ADAPTER, PHONE, noise=6)
+    phone = Detection("cell phone", 0.8, (900, 400, 40, 80))
+    assert judge_with({"known_new": True}, before, after, [FAKE_PHONE], [phone])["status"] == "CLEAN"  # 지금
+    check = judge_with({"known_new": True, "same_new": True}, before, after, [FAKE_PHONE], [phone])
+    assert check["leftItems"] == {"cell phone": 1}
+
+
+def test_same_new_does_not_count_a_phone_moved_on_the_desk():
+    """휴대폰을 옆으로 옮기기만 하면 원래 자리가 "없어진 곳"으로 짝지어져 새 물건이 아니다."""
+    moved_phone = (1100, 600, 40, 80, (20, 20, 20))
+    before, after = desk(PHONE, noise=6), desk(moved_phone, noise=6)
+    old = Detection("cell phone", 0.8, (900, 400, 40, 80))
+    new = Detection("cell phone", 0.8, (1100, 600, 40, 80))
+    assert judge_with({"known_new": True, "same_new": True}, before, after, [old], [new])["status"] == "CLEAN"
+
+
+def test_furniture_seen_counts_a_spot_only_named_chair():
+    """DESK_FURNITURE_SEEN: 이름 붙이기만 "의자"라 하고 모델이 그 자리에서 의자를 못 찾았으면 물건으로 센다 (2차 013)."""
+    before, after = desk(noise=6), desk(PAPER, noise=6)
+    chair_name = lambda frame, box: "chair"
+    assert judge_with({}, before, after, [], [], chair_name)["status"] == "CLEAN"  # 지금: 의자로 보고 뺌
+    check = judge_with({"furniture_seen": True}, before, after, [], [], chair_name)
+    assert check["trash"] == {"unknown": 1}
+    chair = Detection("chair", 0.8, (1090, 590, 140, 110))
+    assert judge_with({"furniture_seen": True}, before, after, [], [chair], chair_name)["status"] == "CLEAN"
+
+
+def test_new_rule_settings_come_from_env():
+    import desk_diff
+    import gateway
+    config = gateway.load_config({"DESK_KNOWN_NEW": "1", "DESK_SAME_NEW": "1", "DESK_FURNITURE_SEEN": "1", "PORT": "x"})
+    d = DeskCompare(AREA, **desk_diff.settings(config))
+    assert (d.known_new, d.same_new, d.furniture_seen) == (True, True, True)
+    off = DeskCompare(AREA, **desk_diff.settings(gateway.load_config({"PORT": "x"})))
+    assert (off.known_new, off.same_new, off.furniture_seen) == (False, False, False)  # 기본은 예전과 같음

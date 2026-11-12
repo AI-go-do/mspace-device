@@ -35,6 +35,8 @@ def setup_key(config, vlm=None):
     return (base(config.yolo_model), base(config.label_model), config.desk_photo, config.desk_area, config.floor_area,
             config.desk_light, config.desk_thresh, config.desk_min_area, config.desk_move, config.desk_move_same,
             getattr(config, "desk_keep_small", 0.0), getattr(config, "desk_furniture_small", 0.0),
+            getattr(config, "desk_known_new", False), getattr(config, "desk_same_new", False),
+            getattr(config, "desk_furniture_seen", False),
             tuple(sorted(config.room_items.items())), vlm, config.tile_grid,
             (config.vlm_rule, config.vlm_side, config.vlm_eq) if vlm else None)
 

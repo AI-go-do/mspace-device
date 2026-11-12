@@ -959,16 +959,41 @@ class RoomWatcher:
         changes = desk.changes(frame)
         if changes is None:
             return None  # 비교를 못 함 (기준 없음, 조명·카메라가 크게 바뀜). "달라진 곳 없음"과 구분
-        seen = [d.box for d in self.objects(dets)] + list(desk.known)
+        objects = self.objects(dets)
+        # DESK_KNOWN_NEW: DESK_MOVE를 켜면 changes는 이미 "무늬가 늘었고 옮겨 온 것도 아닌" 곳만 남는다.
+        # 그래서 원래 물건 자리와 겹쳐도 빈자리가 아니라 새로 생긴 곳이다 (11/13 2차 011 펜: 입실 때 잘못 본 자리 옆)
+        known_new = getattr(desk, "known_new", False) and desk.tune.get("move")
+        same_new = getattr(desk, "same_new", False) and desk.tune.get("move")
+        base_count = {}
+        for label in getattr(desk, "known_labels", []):
+            base_count[label] = base_count.get(label, 0) + 1
+        now_count = self.count(dets)
         items = {}
         for box in changes:
-            if any(overlaps(box, b) for b in seen):
-                continue  # 이미 개수로 센 물건이거나, 원래 있던 물건(리모컨)을 옮겨서 생긴 빈자리
+            hit = [d for d in objects if overlaps(box, d.box)]
+            if hit:
+                if not same_new:
+                    continue  # 이미 개수로 센 물건
+                # DESK_SAME_NEW: 개수가 안 늘어(입실 때 같은 이름을 잘못 봤거나 다른 자리에 있었음) 개수로는 안 세지는데,
+                # 사진 비교로는 새로 생긴 곳이고 입실 때 그 이름이 이 자리에 없었으면 센다 (11/13 2차 007 휴대폰)
+                label = hit[0].label
+                grew = now_count.get(label, 0) > max(base_count.get(label, 0), self.room_items.get(label, 0))
+                was_here = any(k == label and overlaps(box, b) for b, k in zip(desk.known, desk.known_labels))
+                if grew or was_here or not desk.known_labels:
+                    continue  # 개수로 이미 셌거나, 원래 그 자리에 있던 물건 (이름을 안 적던 옛 기준이면 예전처럼)
+                items[label] = items.get(label, 0) + 1
+                continue
+            if not known_new and any(overlaps(box, b) for b in desk.known):
+                continue  # 원래 있던 물건(리모컨)을 옮겨서 생긴 빈자리
             label = (self.labeler(frame, box) if self.labeler else None) or UNKNOWN
             if label in FURNITURE:
-                if not small_on_furniture(box, label, dets, getattr(desk, "furniture_small", 0.0)):
+                seen_there = any(d.label == label and overlaps(box, d.box) for d in dets)
+                if getattr(desk, "furniture_seen", False) and not seen_there:
+                    label = UNKNOWN  # DESK_FURNITURE_SEEN: 이름만 가구이고 모델은 거기서 가구를 못 봄 (11/13 2차 013 노트북)
+                elif not small_on_furniture(box, label, dets, getattr(desk, "furniture_small", 0.0)):
                     continue  # 의자를 빼 두거나 넣은 자리 (가구는 정리 대상이 아님)
-                label = UNKNOWN  # 의자보다 훨씬 작은 곳: 의자 위·옆에 둔 물건 (DESK_FURNITURE_SMALL, 11/12 035 가방)
+                else:
+                    label = UNKNOWN  # 의자보다 훨씬 작은 곳: 의자 위·옆에 둔 물건 (DESK_FURNITURE_SMALL, 11/12 035 가방)
             items[label] = items.get(label, 0) + 1
         return items
 

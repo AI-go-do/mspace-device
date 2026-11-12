@@ -192,7 +192,7 @@ def score(cases, run_case):
 def candidate_name(env):
     """채점한 설정을 한 줄로 (README 기록용). 게이트웨이 설정 이름 그대로."""
     keys = ("YOLO_MODEL", "DESK_PHOTO", "DESK_AREA", "FLOOR_AREA", "DESK_LIGHT", "DESK_THRESH", "DESK_MIN_AREA",
-            "TILE_GRID", "DESK_MOVE", "DESK_MOVE_SAME", "DESK_KEEP_SMALL", "DESK_FURNITURE_SMALL", "LABEL_MODEL", "ROOM_ITEMS", "VLM_NAME", "VLM_RULE", "VLM_SIDE", "VLM_EQ")
+            "TILE_GRID", "DESK_MOVE", "DESK_MOVE_SAME", "DESK_KEEP_SMALL", "DESK_FURNITURE_SMALL", "DESK_KNOWN_NEW", "DESK_SAME_NEW", "DESK_FURNITURE_SEEN", "LABEL_MODEL", "ROOM_ITEMS", "VLM_NAME", "VLM_RULE", "VLM_SIDE", "VLM_EQ")
     if env.get("VLM_URL") and not (env.get("VLM_NAME") or env.get("VLM_RULE")):
         env = {**env, "VLM_RULE": "or"}  # VLM_URL만 줘도 VLM을 켠 것 (기본 규칙 or). 주소는 안 적는다
     parts = [f"{k}={env[k]}" for k in keys if env.get(k)]

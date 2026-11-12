@@ -92,6 +92,8 @@ EMPTY_CHECK_SEC = 30   # (연습 모드) 모두 나가고 30초 뒤에 정리 �
 SETTLE_SEC = 10        # (퇴실 모드) 퇴실 뒤 방이 10초 비어 있으면 확인 (나가는 사람이 찍히지 않게)
 PENDING_MAX_SEC = 600  # (퇴실 모드) 퇴실 뒤 10분 안에 방이 비지 않으면 그 예약 확인은 포기 (다음 사람 물건을 탓하지 않게)
 ENTRY_EMPTY_SEC = 3    # (퇴실 모드) 한 장씩 셌을 때 0명이 연속 3초면 "빈 방"으로 보고 다음 예약 기준 후보로 든다 (Q-22)
+ENTRY_PERSON_SEC = 10  # (퇴실 모드) 한 장씩 셌을 때 사람이 이만큼 이어서 보여야 "들어왔다"로 본다. 11/12 예약 51: 빈 방에서
+                       # 사람을 3~5초 잘못 봐서(인원 1명→0명) 앞 예약 다시 확인이 취소됨. 진짜 들어온 사람은 몇 분씩 보인다
 HELD_SNAPSHOT_SEC = 15  # (퇴실 모드) 사람이 잠깐 보여 못 쓴 빈 방 후보를 이만큼 들고 있다가, 바로 뒤 QR 입실이면 그것으로 기준을 잡는다
 SNAPSHOT_SEC = 60      # (퇴실 모드) 빈 방이 계속되면 후보를 1분마다 새로 찍는다 (햇빛·조명 변화 따라감)
 DESK_DIFF_CONF = 0.5   # 책상 사진 비교로 찾은 물건의 확신도. 모델 점수가 없어서 core 경고 기준(기본 0.8)보다 낮게 둔다
@@ -419,6 +421,7 @@ class RoomWatcher:
         self.entry_path = (os.path.splitext(baseline_path)[0] + "_entry.json") if baseline_path else None
         self.entry_photo_path = (os.path.splitext(baseline_path)[0] + "_entry.jpg") if baseline_path else None
         self.raw_empty_since = None  # 한 장씩 셌을 때 0명이 된 시각 (가운데 값이 아니라 그 장 그대로)
+        self.person_since = None     # 한 장씩 셌을 때 사람이 처음 보인 시각 (ENTRY_PERSON_SEC 이어져야 들어온 것)
         self.snapshot = None         # 빈 방 후보 {"objects", "img", "known", "jpg", "at"}. 메모리에만
         self.entry = None            # 확정된 예약 기준 {"objects", "at", "jpg"(입실 전 사진, TIDY_PHOTOS일 때)}
         self.pir_since = None        # 후보를 찍은 뒤 카메라엔 0명인데 PIR이 처음 켜진 시각
@@ -559,7 +562,11 @@ class RoomWatcher:
         QR 순간이 아니라 "사람이 보이기 직전"이라 QR 없이 들어와도, 바로 들어와도 기준이 잡힌다.
         """
         if raw > 0:
-            self.raw_empty_since = None
+            self.raw_empty_since = None  # 사람이 보이는 동안은 빈 방 후보를 새로 찍지 않는다
+            if self.person_since is None:
+                self.person_since = now
+            if now - self.person_since < ENTRY_PERSON_SEC:
+                return  # 잠깐 잘못 본 사람일 수 있다. 후보와 앞 예약 다시 확인은 그대로 둔다
             pir_since, self.pir_since = self.pir_since, None
             rebase, self.rebase_entry = self.rebase_entry, False
             held, self.held_snapshot = self.held_snapshot, None
@@ -583,6 +590,7 @@ class RoomWatcher:
                 if not self.confirm_entry(snap, now, now_iso, rebase=rebase):
                     self.held_snapshot = (snap, now)  # 안 썼으면 잠깐 들고 있는다 (바로 뒤 QR 입실이면 씀)
             return
+        self.person_since = None
         if pir:  # 카메라엔 안 보여도 누가 있을 수 있다. 후보를 새로 찍지 않는다
             self.raw_empty_since = None
             if self.pir_since is None and self.snapshot is not None:

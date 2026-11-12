@@ -165,7 +165,7 @@ class VlmCheck:
     def ask_with_yes(self, a, b):
         """(답, 걸린 초, 캐시에서 꺼냈나, YES일 확률 또는 None). 확률을 바로 돌려줘서 두 스레드가 물어도 안 섞인다."""
         key = self.key(a, b)
-        if key in self.cache:
+        if key in self.cache and "yes" in self.cache[key]:  # 확률을 적기 전(#70 전) 캐시는 다시 묻는다
             hit = self.cache[key]
             return parse(hit["text"]), hit["seconds"], True, hit.get("yes")
         body = {"messages": [{"role": "user", "content": [

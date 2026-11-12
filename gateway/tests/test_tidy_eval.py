@@ -520,3 +520,24 @@ def test_http_post_loopback_ignores_all_proxy(monkeypatch):
     assert select_proxy(url, settings["proxies"]) is None  # 내 컴퓨터로 보낼 때는 ALL_PROXY도 안 거친다
     import requests
     assert te.http_post(False) is requests.post  # 원격은 원래 설정 그대로
+
+
+def test_vlm_yes_lines_split_by_answer():
+    """11/12 지영: camera-warn 켜기 전 깨끗한 방·물건 남은 방의 VLM 확률을 한 장씩."""
+    rows = [{"case": "c1", "answer": "CLEAN", "vlmYes": 0.12}, {"case": "c2", "answer": "CLEAN", "vlmYes": 0.85},
+            {"case": "l1", "answer": "LEFT_ITEMS", "vlmYes": 0.99}, {"case": "x", "answer": "CLEAN", "vlmYes": None}]
+    lines = te.vlm_yes_lines(rows)
+    assert lines[0].startswith("VLM 있음 확률 (사진 3쌍")
+    assert "c1 12%, c2 85%" in lines[1] and "80% 이상 1쌍" in lines[2]
+    assert "l1 99%" in lines[3]
+    assert te.vlm_yes_lines([{"case": "x", "answer": "CLEAN", "vlmYes": None}]) == []
+
+
+def test_old_vlm_cache_without_yes_is_asked_again(tmp_path):
+    import vlm_check as vc
+    path = tmp_path / "cache.json"
+    calls = []
+    v = vc.VlmCheck("http://127.0.0.1:1", send=lambda url, body: calls.append(1) or ("YES", 0.9), cache=str(path))
+    v.cache[v.key(b"a", b"b")] = {"text": "YES", "seconds": 1.0}  # 확률을 적기 전 캐시
+    assert v.ask_with_yes(b"a", b"b")[3] == 0.9 and calls == [1]
+    assert v.ask_with_yes(b"a", b"b")[2:] == (True, 0.9) and calls == [1]

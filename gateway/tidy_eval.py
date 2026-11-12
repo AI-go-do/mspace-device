@@ -138,9 +138,10 @@ def judge(before, after, find, room_items=None, desk=None, labeler=None, clock=t
     # 3시간 뒤 다시 확인(RECHECK)처럼 YOLO 개수만 봤으면 남음이었나 (물건이 있을 확률 표의 "recheck" 칸)
     check["evidence"]["count"] = watcher.check(found, "", base=base)["status"] != "CLEAN"
     if vlm is not None:  # VLM_URL (10판): 입실·퇴실 사진을 VLM에게 한 번 더 보여 준다
-        new_item, vlm_seconds, _ = vlm.ask(before, after)
+        new_item, vlm_seconds, _, yes = vlm.ask_with_yes(vlm.prepare(before), vlm.prepare(after))
         check["yoloStatus"] = check["status"]
-        room_camera.apply_vlm(check, new_item, vlm.rule)  # 게이트웨이와 같은 방법으로 합친다
+        room_camera.apply_vlm(check, new_item, vlm.rule, yes)
+        check["vlmYesRaw"] = yes  # 못 알아들은 답이어도 확률은 따로 남긴다 (채점 기록용)  # 게이트웨이와 같은 방법으로 합친다
         seconds += vlm_seconds  # 캐시에서 꺼냈어도 처음 물었을 때 걸린 시간을 더한다
     check["people"] = watcher.people(found)
     return check, seconds
@@ -166,7 +167,7 @@ def score(cases, run_case):
                      "ok": got == case.answer, "leftOk": left_ok(case.answer, got), "serious": is_serious(case.answer, got),
                      "trash": check.get("trash", {}), "leftItems": check.get("leftItems", {}),
                      "people": check.get("people", 0), "memo": case.memo,
-                     "yolo": check.get("yoloStatus"), "vlm": check.get("vlm"),
+                     "yolo": check.get("yoloStatus"), "vlm": check.get("vlm"), "vlmYes": check.get("vlmYesRaw"),
                      "evidence": evidence_row(case.answer, check)})
     n = len(rows)
     right = sum(r["ok"] for r in rows)
@@ -212,6 +213,8 @@ def report(result, candidate, out=print):
         person = f" (사람 {r['people']}명 보임: 다시 찍어요)" if r["people"] else ""
         out(f"  틀림{mark} {r['case']}: 정답 {KOREAN[r['answer']]} → {KOREAN[r['got']]} ({seen}){person}"
             f"{' - ' + r['memo'] if r['memo'] else ''}")
+    for line in vlm_yes_lines(result["rows"]):
+        out(line)
     out("통과" if result["passed"] else "아직 기준 못 넘음")
     names = " ".join(r["case"] for r in wrong) or "없음"
     out("README 실험 기록에 붙일 줄:")
@@ -220,11 +223,29 @@ def report(result, candidate, out=print):
         f"| {result['medianSeconds']:.2f}초 | (바꾼 것) | 문제 {result['cases']}개, 틀림 {names} |")
 
 
+def vlm_yes_lines(rows, limit=0.8):
+    """VLM이 "새 물건 있음"이라 할 확률을 정답별로 (11/12 지영: camera-warn 켜기 전 깨끗한 방 숫자)."""
+    have = [r for r in rows if r.get("vlmYes") is not None]
+    if not have:
+        return []
+    lines = [f"VLM 있음 확률 (사진 {len(have)}쌍, 경고 기준 {limit:.0%}):"]
+    for name, pick in (("깨끗함", lambda r: r["answer"] == "CLEAN"), ("물건 남음", lambda r: r["answer"] != "CLEAN")):
+        group = sorted((r for r in have if pick(r)), key=lambda r: r["vlmYes"])
+        if not group:
+            continue
+        over = sum(r["vlmYes"] >= limit for r in group)
+        lines.append(f"  정답 {name} {len(group)}쌍: " + ", ".join(f"{r['case']} {r['vlmYes']:.0%}" for r in group))
+        lines.append(f"    {limit:.0%} 이상 {over}쌍, 가장 낮음 {group[0]['vlmYes']:.0%}, 가장 높음 {group[-1]['vlmYes']:.0%}")
+    return lines
+
+
 def save_result(folder, result, candidate, compare=False):
     """results.jsonl에 한 줄 더한다. core로 보낼 때 쓰는 eventId도 같이 적어, 다시 보내도 한 번만 저장되게 한다."""
     record = {"at": datetime.now(KST).isoformat(timespec="seconds"), "eventId": str(uuid.uuid4()), "candidate": candidate,
               **{k: v for k, v in result.items() if k != "rows"},
               "wrong": [r["case"] for r in result["rows"] if not r["ok"]],
+              "vlmYes": [{"case": r["case"], "answer": r["answer"], "yes": r["vlmYes"]}
+                         for r in result["rows"] if r.get("vlmYes") is not None],
               "evidence": [r["evidence"] for r in result["rows"] if r.get("evidence")]}
     if compare:  # compare 후보 줄. push-last가 다시 보낼 대상에서 뺀다 (core에는 고른 score 결과만)
         record["compare"] = True

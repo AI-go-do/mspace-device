@@ -308,6 +308,8 @@ nano gateway.env                      # 설정 확인 (카메라 번호, DRY_RUN
 - 꺼지면 5초 뒤 다시 켜요. 자동 실행을 아예 없애려면 `bash deploy/install-service.sh remove`
 - 설정은 `gateway.env`, 토큰은 `.env`에 두고 둘 다 저장소에 안 올라가요. `gateway.env`에선 `$(tailscale ip -4)`를 못 써서 `PREVIEW_HOST=tailscale`로 쓰면 Tailscale 주소를 알아서 찾아요 (켜질 때 최대 1분 기다림)
 - 손으로 켜서 시험할 땐 먼저 `sudo systemctl stop mspace-gateway` (카메라를 둘이 같이 못 써요)
+- VLM 서버·가짜 센서도 같이 자동으로: `bash deploy/install-service.sh all` (`gateway.env`에 `MQTT_HOST=localhost`가 있어야 설치돼요. 예시는 `deploy/gateway.env.example` 아래쪽). VLM 서버는 127.0.0.1:8091에서만 받고, 출력은 `tail -f ~/vlm/vlm.log`, 가짜 센서는 `tail -f fake_sensors.log`
+- `.env`(토큰)를 먼저 읽고 `gateway.env`(설정)를 나중에 읽어서, 같은 이름이면 `gateway.env`가 이겨요. `.env`는 `KEY=값` 줄만 (앞에 `export`를 붙이면 systemd가 못 읽어요)
 
 ### 젯슨에서 올리기 (맥 IDE가 안 될 때)
 

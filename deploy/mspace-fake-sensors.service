@@ -1,0 +1,22 @@
+# 가짜 환경 센서(진짜 센서가 올 때까지)를 젯슨이 켜지면 자동으로 켠다.
+# 직접 고치지 말고 deploy/install-service.sh fake-sensors 로 설치한다 (@USER@, @REPO@, @PYTHON@을 채워 줌).
+# 젯슨 안 브로커(localhost)에만 올린다. fake_env_sensors.py가 localhost가 아니면 켜지지 않는다.
+# .env는 읽지 않는다 (교육장 브로커 주소·비밀번호가 섞이지 않게).
+[Unit]
+Description=M-SPACE fake env sensors (localhost MQTT only)
+Wants=mosquitto.service
+After=mosquitto.service
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@REPO@
+Environment=FAKE_ROOMS=1
+ExecStart=@PYTHON@ -u gateway/fake_env_sensors.py
+Restart=always
+RestartSec=5
+StandardOutput=append:@REPO@/fake_sensors.log
+StandardError=append:@REPO@/fake_sensors.log
+
+[Install]
+WantedBy=multi-user.target

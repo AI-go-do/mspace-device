@@ -12,6 +12,7 @@ room_checks.jsonl
 room_baseline.json*
 gateway.env
 gateway.log
+fake_sensors.log
 room_baseline_desk.png*
 room_baseline_entry.json*
 room_baseline_entry_desk.png*

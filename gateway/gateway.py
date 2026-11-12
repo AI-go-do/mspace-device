@@ -96,6 +96,7 @@ class Config:
     vlm_rule: str = "or"                   # YOLO와 합치는 법: or(하나라도 남음이면 남음, 10판 1등) / and / vlm (VLM_RULE)
     vlm_side: int = 768                    # VLM에 보내기 전 사진 긴 변 크기 (VLM_SIDE, 채점과 같은 값)
     vlm_eq: bool = False                   # 어두운 사진을 밝게 펴서 보냄 (VLM_EQ=1)
+    vlm_wait: float = 0                    # 켤 때 VLM 서버가 뜰 때까지 기다리는 초 (VLM_WAIT, 자동 실행은 120)
     tidy_photos: bool = False              # True면 정리 확인 때 빈 방 사진(입실 전·퇴실 뒤·3시간 뒤)을 core로 올린다 (Q-27)
     label_model: str | None = None         # 달라진 곳에 이름 붙일 모델 (YOLO-World ONNX). 없으면 YOLO_MODEL로
     baseline_file: str | None = "room_baseline.json"  # 깨끗한 방 기준을 적어 두는 파일. BASELINE_FILE=off면 메모리에만
@@ -155,6 +156,7 @@ def load_config(env=None):
         vlm_rule=(env.get("VLM_RULE") or Config.vlm_rule).strip().lower(),
         vlm_side=parse_number(env, "VLM_SIDE", Config.vlm_side, 64, 4096, int),
         vlm_eq=env.get("VLM_EQ") == "1",
+        vlm_wait=parse_number(env, "VLM_WAIT", Config.vlm_wait, 0, 600, float),
         tidy_photos=env.get("TIDY_PHOTOS") == "1",
         label_model=env.get("LABEL_MODEL") or None,
         baseline_file=(None if env.get("BASELINE_FILE") == "off"
@@ -837,8 +839,12 @@ def desk_compare(config, detector):
             room_camera.make_labeler(detector, config.label_model))
 
 
-def make_vlm(config):
-    """VLM_URL이 있으면 VLM 확인을 만든다 (10판). llama-server는 젯슨 안(127.0.0.1)에서만 받는다."""
+def make_vlm(config, clock=time.monotonic, sleep=time.sleep):
+    """VLM_URL이 있으면 VLM 확인을 만든다 (10판). llama-server는 젯슨 안(127.0.0.1)에서만 받는다.
+
+    VLM_WAIT(초): 젯슨이 막 켜졌을 때 VLM 서버가 모델을 올리는 동안 기다린다 (자동 실행).
+    모델 이름을 못 읽은 채로 켜면 시험 점수(model_score)를 못 맞춰서, 이름이 읽힐 때까지 기다린다.
+    """
     if not config.vlm_url:
         return None
     import vlm_check
@@ -851,6 +857,12 @@ def make_vlm(config):
         rule = "or"
     vlm = vlm_check.VlmCheck(config.vlm_url, rule=rule, side=config.vlm_side, eq=config.vlm_eq,
                              timeout=vlm_check.GATEWAY_TIMEOUT)
+    until = clock() + config.vlm_wait
+    if not vlm.model and config.vlm_wait > 0:
+        print(f"VLM 서버가 뜨기를 기다려요 (최대 {config.vlm_wait:.0f}초)")
+    while not vlm.model and clock() < until:
+        sleep(2)
+        vlm.model = vlm_check.model_name(config.vlm_url)
     print(f"정리 확인: VLM에게 한 번 더 물어요 ({vlm.model or '모델 이름 못 읽음'}, 규칙 {vlm.rule}, 퇴실 뒤 30초쯤 더 걸림, {vlm.timeout}초 넘으면 YOLO 결과만)")
     return vlm
 

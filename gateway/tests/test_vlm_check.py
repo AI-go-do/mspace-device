@@ -232,6 +232,31 @@ def test_make_vlm_uses_the_same_photo_settings_as_scoring():
     assert vc.from_env({"VLM_URL": "http://127.0.0.1:1"}).timeout == vc.TIMEOUT
 
 
+def test_make_vlm_waits_for_the_server_to_come_up(monkeypatch, capsys):
+    """자동 실행: 젯슨이 막 켜져 VLM 서버가 아직 모델을 올리는 중이면 이름이 읽힐 때까지 기다린다."""
+    answers = iter(["", "", "Qwen3-VL-2B-Instruct-Q8_0.gguf"])
+    monkeypatch.setattr(vc, "model_name", lambda url, timeout=10: next(answers))
+    now, slept = [0.0], []
+
+    def sleep(s):
+        slept.append(s)
+        now[0] += s
+
+    config = gateway.load_config({"PORT": "x", "VLM_URL": "http://127.0.0.1:8091", "VLM_WAIT": "120"})
+    vlm = gateway.make_vlm(config, clock=lambda: now[0], sleep=sleep)
+    assert vlm.model == "Qwen3-VL-2B-Instruct-Q8_0.gguf" and slept == [2, 2]
+    assert "뜨기를 기다려요" in capsys.readouterr().out
+    # 기다릴 시간이 지나면 이름 없이 켠다 (게이트웨이는 계속 돈다)
+    monkeypatch.setattr(vc, "model_name", lambda url, timeout=10: "")
+    now[0], slept[:] = 0.0, []
+    config = gateway.load_config({"PORT": "x", "VLM_URL": "http://127.0.0.1:8091", "VLM_WAIT": "10"})
+    assert gateway.make_vlm(config, clock=lambda: now[0], sleep=sleep).model == "" and len(slept) == 5
+    # 손으로 켤 땐(VLM_WAIT 없음) 기다리지 않는다
+    now[0], slept[:] = 0.0, []
+    assert gateway.make_vlm(gateway.load_config({"PORT": "x", "VLM_URL": "http://127.0.0.1:8091"}),
+                            clock=lambda: now[0], sleep=sleep).model == "" and slept == []
+
+
 def test_vlm_check_passes_its_timeout_to_the_server_call(monkeypatch):
     seen = []
     monkeypatch.setattr(vc, "model_name", lambda url: "m")

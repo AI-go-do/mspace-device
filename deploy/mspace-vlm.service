@@ -1,0 +1,17 @@
+# VLM 서버(llama.cpp llama-server)를 젯슨이 켜지면 자동으로 켠다. 정리 확인 때 게이트웨이가 사진 두 장을 물어본다.
+# 직접 고치지 말고 deploy/install-service.sh 로 설치한다 (@USER@, @HOME@을 채워 줌).
+# 127.0.0.1에서만 받는다: 사진이 젯슨 밖으로 나가지 않게. 8080은 다른 프로그램(ts-inference)이 써서 8091.
+[Unit]
+Description=M-SPACE VLM server (llama.cpp, 127.0.0.1:8091)
+
+[Service]
+Type=simple
+User=@USER@
+ExecStart=@HOME@/llama.cpp/build/bin/llama-server -m @HOME@/vlm/Qwen3-VL-2B-Instruct-Q8_0.gguf --mmproj @HOME@/vlm/mmproj-Qwen3-VL-2B-Instruct-Q8_0.gguf --host 127.0.0.1 --port 8091 -t 6 -c 8192
+Restart=always
+RestartSec=5
+StandardOutput=append:@HOME@/vlm/vlm.log
+StandardError=append:@HOME@/vlm/vlm.log
+
+[Install]
+WantedBy=multi-user.target

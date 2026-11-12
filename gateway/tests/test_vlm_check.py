@@ -279,8 +279,8 @@ def test_yes_probability_from_first_token():
         {"token": "Maybe", "logprob": -9}]}]}}
     assert vc.yes_probability(choice) == 0.9
     assert vc.yes_probability({"message": {"content": "YES"}}) is None  # 옛 서버: 후보 없음
-    only = {"logprobs": {"content": [{"token": "NO", "logprob": -0.01}]}}  # top_logprobs 없이 고른 토큰만
-    assert vc.yes_probability(only) == 0.0
+    only = {"logprobs": {"content": [{"token": "YES", "logprob": math.log(0.6)}]}}  # top_logprobs 없이 고른 토큰만
+    assert vc.yes_probability(only) is None  # 반대쪽 몫을 모르면 0.6을 1.0으로 부풀리지 않는다
 
 
 def test_ask_jpeg_returns_yes_probability(tmp_path):

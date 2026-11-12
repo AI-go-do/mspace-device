@@ -77,8 +77,7 @@ def yes_probability(choice):
     이 사진 두 장에 대해 VLM이 "새 물건 있음"을 얼마나 확신했나. 후보가 없으면(옛 서버) None.
     """
     try:
-        first = choice["logprobs"]["content"][0]
-        tops = first.get("top_logprobs") or [first]
+        tops = choice["logprobs"]["content"][0]["top_logprobs"]  # 고른 토큰 하나만으로는 반대쪽 몫을 몰라서 안 쓴다
     except (KeyError, IndexError, TypeError):
         return None
     yes = no = 0.0

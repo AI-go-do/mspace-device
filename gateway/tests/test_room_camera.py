@@ -1489,13 +1489,14 @@ def test_retrieve_qr_without_base_does_nothing(capsys):
     assert "기준이 없어 다시 찍지 않음" in capsys.readouterr().out
 
 
-def test_retrieve_recheck_room_never_empty_keeps_three_hour_base():
-    """찾으러 온 뒤 10분 더 방이 안 비면 그 확인만 건너뛰고 3시간 뒤 확인 기준은 남긴다."""
+def test_retrieve_recheck_waits_until_room_is_empty():
+    """찾으러 온 뒤 10분 넘게 방이 안 비어도 건너뛰지 않고, 빌 때 찍는다 (core #130은 따로 다시 부르지 않음)."""
     r = left_umbrella(retrieve_sec=60)
     r.w.door_opened("RETRIEVE", r.t)
-    r.run([person(), thing("umbrella")], 60 + PENDING_MAX_SEC + 5)
-    assert [c["phase"] for c in r.out] == ["FIRST"]
-    assert r.w.recheck_pending is None and r.w.recheck_base is not None and r.w.retrieve_rid is None
+    r.run([person(), thing("umbrella")], 60 + PENDING_MAX_SEC + 5)  # 20분쯤 머무름
+    assert [c["phase"] for c in r.out] == ["FIRST"] and r.w.recheck_pending is not None
+    r.run([], SETTLE_SEC + 6)  # 물건 챙겨 나감
+    assert [(c["phase"], c["status"]) for c in r.out] == [("FIRST", "LEFT_ITEMS"), ("RECHECK", "CLEAN")]
 
 
 def test_door_notifying_verifier_passes_purpose_to_room():

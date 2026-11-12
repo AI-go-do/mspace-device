@@ -720,14 +720,13 @@ class RoomWatcher:
             if self.entry is not None and self.entry["at"] < self.pending[1]:
                 self.clear_entry()  # 그 예약의 기준이었다. 다음 예약 탓으로 쓰지 않게 버린다
             self.pending = None
-        if self.on_checkout and self.recheck_pending and now - self.recheck_pending[1] >= PENDING_MAX_SEC:
+        if (self.on_checkout and self.recheck_pending and self.retrieve_rid != self.recheck_pending[0]
+                and now - self.recheck_pending[1] >= PENDING_MAX_SEC):
+            # 찾으러 온 뒤 확인은 10분 제한 없이 방이 빌 때까지 기다린다 (core #130은 recheck.at을 문 연 시각 + 10분으로
+            # 당기고 그 뒤 따로 부르지 않아서, 건너뛰면 다시 확인이 사라짐). 다음 팀 QR이면 handle_door가 취소한다
             rid = self.recheck_pending[0]
             print(f"정리 확인 {self.room_id}번 방: 예약 {rid} 다시 확인 시각 뒤 10분 동안 방이 비지 않아 건너뜀")
-            if self.retrieve_rid == rid:  # 찾으러 온 뒤 확인만 건너뛴다. 3시간 뒤 확인 기준은 남긴다
-                self.retrieve_rid = None
-                self.postpone_recheck(rid)
-            else:
-                self.cancel_recheck(rid)
+            self.cancel_recheck(rid)
         return event, check
 
     def request_check(self, reservation_id, now, phase="FIRST"):
@@ -812,7 +811,9 @@ class RoomWatcher:
         if retrieved:
             check["afterRetrieve"] = True  # 화면 출력용 (core로는 안 보냄)
             if check["status"] != "CLEAN":
-                self.recheck_base = base  # 아직 남음: 3시간 뒤 확인은 지금 규칙대로 (core가 그때 다시 부름)
+                # 아직 남음: 기준은 남겨 둔다. core는 예약마다 RECHECK를 한 번만 받아서(두 번째는 409) 보통 다시 부르지 않고,
+                # /current에서 recheck가 빠지면 on_recheck_gone이 지운다. 남은 물건은 core가 처리 (결정 30: 경고·알림 없음)
+                self.recheck_base = base
         jpg = self.room_photo(photo, dets, seen)
         if jpg:
             check["photos"] = {"RECHECK": jpg}

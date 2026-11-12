@@ -534,3 +534,19 @@ def test_partial_compare_does_not_refresh_desk_photo():
     check = visit(w, [], desk((500, 230, 600, 720, (0, 0, 0))))
     assert check["status"] == "CLEAN" and d.partial
     assert (d.base == prepare(desk(), AREA)[0]).all()  # 그늘 진 사진으로 바꾸지 않음
+
+
+def test_partial_compare_does_not_drop_renamed_things():
+    """일부만 본 비교는 못 본 자리가 있어 '이름만 바뀐 원래 물건' 빼기를 하지 않는다 (CodeRabbit #81). 예전 비교 건너뜀과 같음."""
+    import tidy_eval
+    shade = (500, 230, 400, 720, (0, 0, 0))
+    before, after = desk(REMOTE, noise=6), desk(FLIPPED_REMOTE, shade, noise=6)
+    remote = Detection("remote", 0.8, (700, 700, 45, 30))
+    laptop = Detection("laptop", 0.4, (698, 699, 50, 33))
+
+    def find(frame):
+        return [remote] if frame is before else [laptop]
+
+    d = DeskCompare(AREA, light="ssim", move=True, keep_small=0.05)
+    check, _ = tidy_eval.judge(before, after, find, room_items={"remote": 1}, desk=d)
+    assert d.partial and check["leftItems"] == {"laptop": 1}

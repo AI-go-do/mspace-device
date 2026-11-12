@@ -1011,7 +1011,8 @@ class RoomWatcher:
             extra = found or {}
             if not compared:
                 print(f"정리 확인 {self.room_id}번 방: 책상 사진 비교를 건너뜀 (조명·카메라가 크게 바뀜)")
-        if compared and desk.tune.get("move"):
+        if compared and desk.tune.get("move") and not getattr(desk, "partial", False):
+            # 일부만 본 비교(DESK_KEEP_SMALL)는 못 본 자리가 있어, 예전에 비교를 건너뛸 때처럼 빼지 않고 센다
             now_items = self.not_moved(dets, now_items, base, desk)
         trash, left, confidence = {}, {}, {}
         scores = self.scores(dets)

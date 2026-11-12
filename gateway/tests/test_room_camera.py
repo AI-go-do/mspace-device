@@ -1169,7 +1169,7 @@ def test_baseline_survives_restart(tmp_path, capsys):
     w = RoomWatcher(1, baseline_path=path)
     w.update([thing("remote")], now=0, now_iso="2026-11-06T17:00:00+09:00")
     with open(path) as f:
-        assert json.load(f) == {"roomId": 1, "objects": {"remote": 1}, "savedAt": "2026-11-06T17:00:00+09:00"}
+        assert json.load(f) == {"roomId": 1, "objects": {"remote": 1}, "tileGrid": 2, "savedAt": "2026-11-06T17:00:00+09:00"}
 
     again = RoomWatcher(1, baseline_path=path)  # 껐다 켬
     assert again.baseline == {"remote": 1}
@@ -1197,6 +1197,20 @@ def test_bad_baseline_file_takes_new_one(tmp_path, capsys, content):
     assert w.baseline is None and "새로 찍어요" in capsys.readouterr().out
     w.update([thing("remote")], now=0)
     assert json.loads(path.read_text())["objects"] == {"remote": 1}
+
+
+def test_saved_files_from_another_tile_grid_are_not_used(tmp_path, capsys):
+    """TILE_GRID를 바꾸고 다시 켜면 다른 조각 수로 센 기준·예약 기준은 버린다 (CodeRabbit #78). 옛 파일은 기본(2)으로 센 것."""
+    base, entry = tmp_path / "base.json", tmp_path / "base_entry.json"
+    base.write_text('{"roomId": 1, "objects": {"cup": 1}}')
+    entry.write_text('{"roomId": 1, "objects": {"cup": 1}}')
+    w = RoomWatcher(1, baseline_path=str(base), on_checkout=True)
+    assert w.baseline == {"cup": 1} and w.entry["objects"] == {"cup": 1}  # 옛 파일 + 기본 2: 그대로 씀
+    w = RoomWatcher(1, baseline_path=str(base), on_checkout=True, tile_grid=3)
+    out = capsys.readouterr().out
+    assert w.baseline is None and w.entry is None and "다른 조각 수" in out
+    w.update([thing("remote")], now=0)
+    assert json.loads(base.read_text())["tileGrid"] == 3
 
 
 def test_baseline_write_failure_keeps_running(tmp_path, capsys):

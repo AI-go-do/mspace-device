@@ -904,7 +904,7 @@ def start_room_camera(config, sensors):
     watcher = room_camera.RoomWatcher(room, check_objects=detector.finds_objects, room_items=config.room_items,
                                       on_checkout=on_checkout, baseline_path=config.baseline_file,
                                       desk=desk, labeler=labeler, entry_desk=entry_desk, photos=photos, vlm=vlm,
-                                      retrieve_sec=config.retrieve_recheck_min * 60)
+                                      retrieve_sec=config.retrieve_recheck_min * 60, tile_grid=config.tile_grid)
     cam = room_camera.open_camera(config.room_camera)
     send_check = send_photo = None
     if on_checkout:

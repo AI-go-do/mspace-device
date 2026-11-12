@@ -383,8 +383,10 @@ class RoomWatcher:
 
     def __init__(self, room_id, check_objects=True, now=None, room_items=None, on_checkout=False,
                  baseline_path=None, desk=None, labeler=None, entry_desk=None, photos=False, vlm=None,
-                 retrieve_sec=RETRIEVE_RECHECK_SEC):
+                 retrieve_sec=RETRIEVE_RECHECK_SEC, tile_grid=TILE_GRID):
         self.room_id = room_id
+        # 기준 개수를 센 조각 수 (TILE_GRID). 조각 수가 다르면 같은 방도 물건 수가 달라져서, 다른 조각 수로 센 기준 파일은 쓰지 않는다
+        self.tile_grid = tile_grid
         # 찾으러 온 뒤 다시 찍기 (11/12 재웅·지영): 두고 간 물건을 찾으러 10분 QR(purpose RETRIEVE)로 들어오면
         # 앞 예약 다시 확인을 취소하지 않고, QR 시각 + retrieve_sec 뒤 방이 비면 RECHECK를 찍어 보낸다
         self.retrieve_sec = retrieve_sec
@@ -447,6 +449,9 @@ class RoomWatcher:
             if saved.get("roomId") != self.room_id or not isinstance(objects, dict):
                 print(f"기준 파일이 {self.room_id}번 방 것이 아니라 새로 찍어요: {self.baseline_path}")
                 return
+            if saved.get("tileGrid", TILE_GRID) != self.tile_grid:  # 적히지 않은 옛 파일은 기본(4조각)으로 센 것
+                print(f"기준 파일이 다른 조각 수(TILE_GRID)로 센 것이라 새로 찍어요: {self.baseline_path}")
+                return
             self.baseline = {str(k): int(v) for k, v in objects.items()}
         except (OSError, ValueError, KeyError, TypeError) as e:
             print(f"기준 파일을 못 읽어서 새로 찍어요 ({self.baseline_path}: {e})")
@@ -458,7 +463,7 @@ class RoomWatcher:
         """기준을 파일에 적는다. 임시 파일에 쓰고 바꿔치기해서, 쓰다가 꺼져도 파일이 깨지지 않게 한다."""
         if not self.baseline_path:
             return
-        record = {"roomId": self.room_id, "objects": self.baseline,
+        record = {"roomId": self.room_id, "objects": self.baseline, "tileGrid": self.tile_grid,
                   "savedAt": now_iso or datetime.now(KST).isoformat(timespec="seconds")}
         tmp = self.baseline_path + ".tmp"
         try:
@@ -480,6 +485,8 @@ class RoomWatcher:
             if (not isinstance(saved, dict) or saved.get("roomId") != self.room_id
                     or not isinstance(saved.get("objects"), dict)):
                 raise ValueError("다른 방 기준이거나 모양이 다름")
+            if saved.get("tileGrid", TILE_GRID) != self.tile_grid:
+                raise ValueError("다른 조각 수(TILE_GRID)로 센 기준")
             objects = {str(k): int(v) for k, v in saved["objects"].items()}
             desk_sum = (fingerprint(self.entry_desk.base)
                         if self.entry_desk is not None and self.entry_desk.ready else None)
@@ -532,7 +539,7 @@ class RoomWatcher:
             else:
                 self.entry_desk.clear()
         if self.entry_path:
-            record = {"roomId": self.room_id, "objects": snap["objects"],
+            record = {"roomId": self.room_id, "objects": snap["objects"], "tileGrid": self.tile_grid,
                       "savedAt": now_iso or datetime.now(KST).isoformat(timespec="seconds")}
             if self.entry_desk is not None:  # 사진 지문을 같이 적어 같은 때 저장된 짝인지 켤 때 확인한다
                 record["deskSum"] = fingerprint(self.entry_desk.base) if self.entry_desk.ready else None

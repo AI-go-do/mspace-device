@@ -505,8 +505,11 @@ class RoomWatcher:
             except OSError as e:  # 못 써도 메모리엔 있음
                 print(f"예약 기준 파일을 못 썼어요 ({self.entry_path}: {e})")
         n = sum(snap["objects"].values())
+        shot = ""
+        if self.photos:  # 입실 전 사진을 찍었는지 같이 알린다 (11/12 수연)
+            shot = f" · 입실 전 사진 찍음 ({kb(jpg)})" if jpg else " · 입실 전 사진 없음"
         print(f"예약 기준 저장 {self.room_id}번 방: 입실 직전 빈 방 물건 {n}개"
-              f"{' (' + describe(snap['objects']) + ')' if n else ''}")
+              f"{' (' + describe(snap['objects']) + ')' if n else ''}{shot}")
 
     def clear_entry(self):
         """예약 기준을 지운다 (정리 확인을 보냈거나, 그 예약 확인을 포기했을 때)."""
@@ -863,6 +866,21 @@ def photo_body(reservation_id, phase, device_id, jpg):
     return {"reservationId": reservation_id, "phase": phase, "deviceId": device_id, "jpg": jpg}
 
 
+PHOTO_NAMES = {"ENTRY": "입실 전", "FIRST": "퇴실 뒤", "RECHECK": "3시간 뒤"}
+
+
+def kb(jpg):
+    return f"{max(1, round(len(jpg) / 1024))}KB"
+
+
+def photo_message(check, photos):
+    """정리 확인 때 어떤 사진을 찍었고 무엇이 없는지 한 줄로 (11/12 수연 "사진 찍은 것도 로그로")."""
+    want = ("ENTRY", "FIRST") if check.get("phase") == "FIRST" else (check.get("phase"),)
+    parts = [f"{PHOTO_NAMES.get(k, k)} 찍음 ({kb(photos[k])})" if photos.get(k)
+             else f"{PHOTO_NAMES.get(k, k)} 없음" for k in want]
+    return f"정리 확인 사진 {check['roomId']}번 방 예약 {check['reservationId']}: " + ", ".join(parts)
+
+
 def check_message(check):
     if check["status"] == "BASELINE_SAVED":
         n = sum(check["objects"].values())
@@ -1019,6 +1037,8 @@ def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path
                     safe_log(log_path, check)
                     if send_check is not None and "reservationId" in check:
                         send_check(tidy_body(check, f"camera-{watcher.room_id}"))
+                        if getattr(watcher, "photos", False):
+                            print(photo_message(check, photos))
                         if send_photo is not None and photos:
                             for phase, jpg in photos.items():
                                 send_photo(photo_body(check["reservationId"], phase, f"camera-{watcher.room_id}", jpg))

@@ -189,7 +189,7 @@ def score(cases, run_case):
 def candidate_name(env):
     """채점한 설정을 한 줄로 (README 기록용). 게이트웨이 설정 이름 그대로."""
     keys = ("YOLO_MODEL", "DESK_PHOTO", "DESK_AREA", "FLOOR_AREA", "DESK_LIGHT", "DESK_THRESH", "DESK_MIN_AREA",
-            "DESK_MOVE", "DESK_MOVE_SAME", "LABEL_MODEL", "ROOM_ITEMS", "VLM_NAME", "VLM_RULE", "VLM_SIDE", "VLM_EQ")
+            "TILE_GRID", "DESK_MOVE", "DESK_MOVE_SAME", "LABEL_MODEL", "ROOM_ITEMS", "VLM_NAME", "VLM_RULE", "VLM_SIDE", "VLM_EQ")
     if env.get("VLM_URL") and not (env.get("VLM_NAME") or env.get("VLM_RULE")):
         env = {**env, "VLM_RULE": "or"}  # VLM_URL만 줘도 VLM을 켠 것 (기본 규칙 or). 주소는 안 적는다
     parts = [f"{k}={env[k]}" for k in keys if env.get(k)]
@@ -358,7 +358,7 @@ def run_score(folder, env, out=print, as_json=False, clock=time.perf_counter, pu
     if not config.yolo_model:
         raise SystemExit("YOLO_MODEL을 넣어요. 예: YOLO_MODEL=gateway/yolov8s.onnx")
     loading = clock()
-    detector = room_camera.make_detector(config.yolo_model, config.desk_area, config.floor_area)
+    detector = room_camera.make_detector(config.yolo_model, config.desk_area, config.floor_area, config.tile_grid)
     find = getattr(detector, "detect_detailed", detector.detect)
     use_desk = config.desk_photo and config.desk_area
     if config.desk_photo and not config.desk_area:

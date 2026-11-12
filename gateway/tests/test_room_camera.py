@@ -252,6 +252,20 @@ def test_tile_boxes_cover_screen_with_overlap():
     assert tiles[0][2] > tiles[1][0]  # 왼쪽 조각 끝(1056)이 오른쪽 조각 시작(864)보다 뒤: 가운데가 겹침
 
 
+def test_tile_grid_3_makes_nine_overlapping_tiles():
+    """TILE_GRID=3: 9조각. 조각 하나 = 화면의 1/3 × 1.1, 옆 조각과 겹치고 화면 끝까지 덮는다 (책상 상자 없이 작은 물건 보기)."""
+    tiles = tile_boxes(1920, 1080, grid=3)
+    assert len(tiles) == 9 and tiles[0] == (0, 0, 704, 396) and tiles[-1] == (1216, 684, 704, 396)
+    assert tiles[0][0] + tiles[0][2] > tiles[1][0]  # 첫 조각 끝(704)이 둘째 조각 시작(608)보다 뒤: 겹침
+    assert tile_boxes(1920, 1080, grid=2) == tile_boxes(1920, 1080)  # 2는 지금까지와 똑같음
+
+
+def test_tile_grid_setting():
+    assert gateway.load_config({}).tile_grid == 2
+    assert gateway.load_config({"TILE_GRID": "3"}).tile_grid == 3
+    assert gateway.load_config({"TILE_GRID": "9"}).tile_grid == 2  # 범위(2~4) 밖이면 기본값
+
+
 def test_detect_tiled_moves_boxes_back_and_merges():
     frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
     sizes = []
@@ -791,7 +805,7 @@ def test_start_room_camera(monkeypatch):
     class Det:
         finds_objects = False
 
-    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None: Det())
+    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None, grid=2: Det())
     monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
 
     def fake_run(watcher, cam, detector, push, pir_now, on_frame=None, preview=None, send_check=None,
@@ -814,7 +828,7 @@ def test_start_room_camera_uses_checkout_mode_when_sending(monkeypatch):
     class Det:
         finds_objects = True
 
-    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None: Det())
+    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None, grid=2: Det())
     monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
     monkeypatch.setattr(gateway.SensorSender, "start", lambda self: self)
     monkeypatch.setattr(gateway.CheckoutPoller, "start", lambda self: polled.append(self.url) or self)
@@ -1155,7 +1169,7 @@ def test_baseline_survives_restart(tmp_path, capsys):
     w = RoomWatcher(1, baseline_path=path)
     w.update([thing("remote")], now=0, now_iso="2026-11-06T17:00:00+09:00")
     with open(path) as f:
-        assert json.load(f) == {"roomId": 1, "objects": {"remote": 1}, "savedAt": "2026-11-06T17:00:00+09:00"}
+        assert json.load(f) == {"roomId": 1, "objects": {"remote": 1}, "tileGrid": 2, "savedAt": "2026-11-06T17:00:00+09:00"}
 
     again = RoomWatcher(1, baseline_path=path)  # 껐다 켬
     assert again.baseline == {"remote": 1}
@@ -1183,6 +1197,20 @@ def test_bad_baseline_file_takes_new_one(tmp_path, capsys, content):
     assert w.baseline is None and "새로 찍어요" in capsys.readouterr().out
     w.update([thing("remote")], now=0)
     assert json.loads(path.read_text())["objects"] == {"remote": 1}
+
+
+def test_saved_files_from_another_tile_grid_are_not_used(tmp_path, capsys):
+    """TILE_GRID를 바꾸고 다시 켜면 다른 조각 수로 센 기준·예약 기준은 버린다 (CodeRabbit #78). 옛 파일은 기본(2)으로 센 것."""
+    base, entry = tmp_path / "base.json", tmp_path / "base_entry.json"
+    base.write_text('{"roomId": 1, "objects": {"cup": 1}}')
+    entry.write_text('{"roomId": 1, "objects": {"cup": 1}}')
+    w = RoomWatcher(1, baseline_path=str(base), on_checkout=True)
+    assert w.baseline == {"cup": 1} and w.entry["objects"] == {"cup": 1}  # 옛 파일 + 기본 2: 그대로 씀
+    w = RoomWatcher(1, baseline_path=str(base), on_checkout=True, tile_grid=3)
+    out = capsys.readouterr().out
+    assert w.baseline is None and w.entry is None and "다른 조각 수" in out
+    w.update([thing("remote")], now=0)
+    assert json.loads(base.read_text())["tileGrid"] == 3
 
 
 def test_baseline_write_failure_keeps_running(tmp_path, capsys):
@@ -1444,7 +1472,7 @@ def test_start_room_camera_turns_on_photo_sender(monkeypatch):
     class Det:
         finds_objects = True
 
-    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None: Det())
+    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None, grid=2: Det())
     monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
     monkeypatch.setattr(gateway.SensorSender, "start", lambda self: self)
     monkeypatch.setattr(gateway.CheckoutPoller, "start", lambda self: self)

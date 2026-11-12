@@ -34,7 +34,7 @@ def setup_key(config, vlm=None):
     base = lambda p: os.path.basename(p) if p else None
     return (base(config.yolo_model), base(config.label_model), config.desk_photo, config.desk_area, config.floor_area,
             config.desk_light, config.desk_thresh, config.desk_min_area, config.desk_move, config.desk_move_same,
-            tuple(sorted(config.room_items.items())), vlm,
+            tuple(sorted(config.room_items.items())), vlm, config.tile_grid,
             (config.vlm_rule, config.vlm_side, config.vlm_eq) if vlm else None)
 
 

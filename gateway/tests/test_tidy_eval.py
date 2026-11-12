@@ -541,3 +541,39 @@ def test_old_vlm_cache_without_yes_is_asked_again(tmp_path):
     v.cache[v.key(b"a", b"b")] = {"text": "YES", "seconds": 1.0}  # 확률을 적기 전 캐시
     assert v.ask_with_yes(b"a", b"b")[3] == 0.9 and calls == [1]
     assert v.ask_with_yes(b"a", b"b")[2:] == (True, 0.9) and calls == [1]
+
+
+def test_report_shows_when_desk_photo_compare_was_skipped():
+    """화면 전체 비교(DESK_AREA=0,0,1,1)에서 사진 비교가 조명 탓으로 건너뛴 쌍을 보여 준다 (11/12 035·036)."""
+    cases = [te.Case("001", "CLEAN"), te.Case("002", "LEFT_ITEMS"), te.Case("003", "LEFT_ITEMS")]
+    desk = {"001": 0, "002": None, "003": 2}
+    got = {"001": "CLEAN", "002": "CLEAN", "003": "CLEAN"}
+    result = te.score(cases, lambda c: ({"status": got[c.name], "trash": {}, "leftItems": {}, "deskChanges": desk[c.name]}, 0.1))
+    lines = []
+    te.report(result, "x", out=lines.append)
+    text = "\n".join(lines)
+    assert "틀림 [심각] 002: 정답 두고 간 물건 → 깨끗함 (찾은 것 없음) [사진 비교 건너뜀]" in text
+    assert "003: 정답 두고 간 물건 → 깨끗함 (찾은 것 없음) [사진 비교 2곳]" in text
+    assert "사진 비교 건너뜀 (화면이 크게 달라 조명이 바뀐 것으로 봄): 1쌍 (002)" in text
+
+
+def test_report_says_nothing_about_desk_compare_when_it_is_off():
+    result = te.score([te.Case("001", "LEFT_ITEMS")], lambda c: ({"status": "CLEAN", "trash": {}, "leftItems": {}}, 0.1))
+    lines = []
+    te.report(result, "x", out=lines.append)
+    assert "사진 비교" not in "\n".join(lines)
+
+
+def test_judge_records_how_many_places_the_desk_photo_changed():
+    before = np.full((240, 320, 3), 120, dtype=np.uint8)
+    after = before.copy()
+    after[100:140, 140:180] = 250  # 작은 물건 하나
+    desk = desk_diff.DeskCompare((0.0, 0.0, 1.0, 1.0))
+    check, _ = te.judge(before, after, lambda f: [], desk=desk, labeler=lambda f, b: None)
+    assert check["deskChanges"] == 1
+    lit = before.copy()
+    lit[:, :200] = 250  # 화면 절반 넘게 바뀜: 조명이 바뀐 것으로 보고 비교를 건너뜀
+    desk = desk_diff.DeskCompare((0.0, 0.0, 1.0, 1.0))
+    check, _ = te.judge(before, lit, lambda f: [], desk=desk, labeler=lambda f, b: None)
+    assert check["deskChanges"] is None and check["status"] == "CLEAN"
+    assert "deskChanges" not in te.judge(frame(0), frame(1), finder({0: [], 1: []}))[0]  # 사진 비교 꺼짐

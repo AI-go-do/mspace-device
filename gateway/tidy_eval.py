@@ -137,6 +137,9 @@ def judge(before, after, find, room_items=None, desk=None, labeler=None, clock=t
         raise RuntimeError("정리 확인 결과가 비어 있어요 (RoomWatcher.check)")
     # 3시간 뒤 다시 확인(RECHECK)처럼 YOLO 개수만 봤으면 남음이었나 (물건이 있을 확률 표의 "recheck" 칸)
     check["evidence"]["count"] = watcher.check(found, "", base=base)["status"] != "CLEAN"
+    if desk is not None:  # 채점 보기용: 사진 비교가 건너뛰었나(None) · 달라진 곳 몇 개였나. 판정에는 안 쓴다
+        changes = desk.changes(after)
+        check["deskChanges"] = None if changes is None else len(changes)
     if vlm is not None:  # VLM_URL (10판): 입실·퇴실 사진을 VLM에게 한 번 더 보여 준다
         new_item, vlm_seconds, _, yes = vlm.ask_with_yes(vlm.prepare(before), vlm.prepare(after))
         check["yoloStatus"] = check["status"]
@@ -166,7 +169,7 @@ def score(cases, run_case):
         rows.append({"case": case.name, "answer": case.answer, "got": got, "seconds": round(seconds, 3),
                      "ok": got == case.answer, "leftOk": left_ok(case.answer, got), "serious": is_serious(case.answer, got),
                      "trash": check.get("trash", {}), "leftItems": check.get("leftItems", {}),
-                     "people": check.get("people", 0), "memo": case.memo,
+                     "people": check.get("people", 0), "memo": case.memo, "desk": check.get("deskChanges", "off"),
                      "yolo": check.get("yoloStatus"), "vlm": check.get("vlm"), "vlmYes": check.get("vlmYesRaw"),
                      "evidence": evidence_row(case.answer, check)})
     n = len(rows)
@@ -211,8 +214,12 @@ def report(result, candidate, out=print):
         seen = ", ".join(f"{k} {v}" for k, v in sorted(found.items())) or "찾은 것 없음"
         mark = " [심각]" if r["serious"] else (" [종류만]" if r["leftOk"] else "")
         person = f" (사람 {r['people']}명 보임: 다시 찍어요)" if r["people"] else ""
-        out(f"  틀림{mark} {r['case']}: 정답 {KOREAN[r['answer']]} → {KOREAN[r['got']]} ({seen}){person}"
+        out(f"  틀림{mark} {r['case']}: 정답 {KOREAN[r['answer']]} → {KOREAN[r['got']]} ({seen}){person}{desk_note(r)}"
             f"{' - ' + r['memo'] if r['memo'] else ''}")
+    skipped = [r["case"] for r in result["rows"] if r.get("desk", "off") is None]
+    if any(r.get("desk", "off") != "off" for r in result["rows"]):
+        out(f"사진 비교 건너뜀 (화면이 크게 달라 조명이 바뀐 것으로 봄): {len(skipped)}쌍"
+            f"{' (' + ' '.join(skipped) + ')' if skipped else ''}")
     for line in vlm_yes_lines(result["rows"]):
         out(line)
     out("통과" if result["passed"] else "아직 기준 못 넘음")
@@ -221,6 +228,14 @@ def report(result, candidate, out=print):
     out(f"| {datetime.now(KST):%m/%d} | 정리 확인 | {candidate} | {result['leftAccuracy']:.1%} (세 가지 {result['accuracy']:.1%}) "
         f"| {result['serious']} "
         f"| {result['medianSeconds']:.2f}초 | (바꾼 것) | 문제 {result['cases']}개, 틀림 {names} |")
+
+
+def desk_note(row):
+    """틀린 문제 줄 끝에 사진 비교(DESK_PHOTO)가 어땠는지. 꺼져 있으면 빈 글자."""
+    desk = row.get("desk", "off")
+    if desk == "off":
+        return ""
+    return " [사진 비교 건너뜀]" if desk is None else f" [사진 비교 {desk}곳]"
 
 
 def vlm_yes_lines(rows, limit=0.8):

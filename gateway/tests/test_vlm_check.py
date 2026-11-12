@@ -228,3 +228,15 @@ def test_make_vlm_uses_the_same_photo_settings_as_scoring():
     assert (vlm.side, vlm.eq) == (512, True)
     plain = gateway.make_vlm(gateway.load_config({"PORT": "x", "VLM_URL": "http://127.0.0.1:1"}))
     assert (plain.side, plain.eq) == (vc.SIDE, False)
+    assert vlm.timeout == vc.GATEWAY_TIMEOUT < vc.TIMEOUT  # 게이트웨이는 짧게, 채점은 길게
+    assert vc.from_env({"VLM_URL": "http://127.0.0.1:1"}).timeout == vc.TIMEOUT
+
+
+def test_vlm_check_passes_its_timeout_to_the_server_call(monkeypatch):
+    seen = []
+    monkeypatch.setattr(vc, "model_name", lambda url: "m")
+    monkeypatch.setattr(vc.urllib.request, "urlopen", lambda req, timeout: seen.append(timeout) or (_ for _ in ()).throw(OSError("x")))
+    check = vc.VlmCheck("http://127.0.0.1:1", timeout=90)
+    with pytest.raises(OSError):
+        check.send(check.url, {})
+    assert seen == [90]

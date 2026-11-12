@@ -23,7 +23,8 @@ import urllib.request
 
 RULES = ("vlm", "and", "or")
 SIDE = 768
-TIMEOUT = 300  # 젯슨 CPU에서 한 번에 30초쯤. 이보다 오래 걸리면 YOLO 결과만 쓴다
+TIMEOUT = 300  # 채점(tidy_eval)용. 젯슨 CPU에서 한 번에 30초쯤이라 넉넉히 기다린다
+GATEWAY_TIMEOUT = 90  # 게이트웨이용. 오래 기다리는 사이 다음 예약이 퇴실하면 core가 앞 예약 결과를 안 받는다. 넘으면 YOLO 결과만 보낸다
 
 PROMPT = (
     "Image 1 is a study room right after the guest checked in. "
@@ -88,13 +89,17 @@ def image_part(jpg):
 
 
 class VlmCheck:
-    def __init__(self, url, rule="or", side=SIDE, eq=False, cache=None, send=post, clock=time.perf_counter):
+    def __init__(self, url, rule="or", side=SIDE, eq=False, cache=None, send=post, clock=time.perf_counter,
+                 timeout=TIMEOUT):
         if rule not in RULES:
             raise ValueError(f"VLM_RULE는 {', '.join(RULES)} 중 하나예요: {rule!r}")
         self.url, self.rule, self.side, self.eq = url, rule, side, eq
         self.cache_path = cache
         self.send, self.clock = send, clock
         self.model = model_name(url) if send is post else "test"
+        self.timeout = timeout
+        if send is post:
+            self.send = lambda u, body: post(u, body, timeout=timeout)
         self.cache = {}
         if cache and os.path.exists(cache):
             with open(cache, encoding="utf-8") as f:

@@ -835,8 +835,9 @@ def test_yolo_detector_uses_onnxruntime(monkeypatch):
     out[0, 4, 0] = 0.9
 
     class Session:
-        def __init__(self, path, providers):
+        def __init__(self, path, sess_options, providers):
             self.providers = providers
+            seen["threads"] = sess_options.intra_op_num_threads
 
         def get_inputs(self):
             return [types.SimpleNamespace(name="images")]
@@ -845,15 +846,19 @@ def test_yolo_detector_uses_onnxruntime(monkeypatch):
             assert "images" in feed
             return [out]
 
-    ort = types.SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"], InferenceSession=Session)
+    seen = {}
+    ort = types.SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"], InferenceSession=Session,
+                                SessionOptions=types.SimpleNamespace)
     cv2 = types.SimpleNamespace(dnn=types.SimpleNamespace(blobFromImage=lambda *a, **k: "blob"), __version__="4.6.0")
     monkeypatch.setitem(sys.modules, "onnxruntime", ort)
     monkeypatch.setitem(sys.modules, "cv2", cv2)
     from room_camera import YoloDetector
 
+    monkeypatch.delenv("YOLO_THREADS", raising=False)
     det = YoloDetector("m.onnx")
     found = det.detect(np.zeros((640, 640, 3)))
     assert [d.label for d in found] == ["person"]
+    assert seen["threads"] == 2  # VLM에 코어를 남긴다
 
 
 # ---- 이상 탐지 (쓰러짐 의심) ----
@@ -1566,3 +1571,11 @@ def test_three_hour_recheck_during_retrieve_wait_is_replaced():
     r.run([], 60 + SETTLE_SEC)
     rechecks = [c for c in r.out if c.get("phase") == "RECHECK"]
     assert len(rechecks) == 1 and rechecks[0].get("afterRetrieve") and rechecks[0]["status"] == "CLEAN"
+
+
+def test_yolo_threads_default_leaves_cores_for_vlm():
+    from room_camera import yolo_threads, YOLO_THREADS
+    assert yolo_threads({}) == YOLO_THREADS == 2
+    assert yolo_threads({"YOLO_THREADS": "4"}) == 4
+    assert yolo_threads({"YOLO_THREADS": "0"}) == 0  # onnxruntime 기본
+    assert yolo_threads({"YOLO_THREADS": "abc"}) == 2

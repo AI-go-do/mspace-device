@@ -48,7 +48,7 @@ def same_vlm(record, vlm_model):
     """
     if not vlm_model:
         return False
-    if record.get("vlmModel"):
+    if "vlmModel" in record:  # 새 줄: 칸이 있으면 그 이름만 본다 (null = VLM 없이 채점 → 다른 설정)
         return record["vlmModel"] == vlm_model
     name = candidate_env(record.get("candidate")).get("VLM_NAME", "").strip().lower()
     return OLD_VLM_FILES.get(name) == os.path.basename(vlm_model)

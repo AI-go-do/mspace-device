@@ -89,7 +89,8 @@ def test_judge_lets_vlm_fix_a_false_report():
 
 def test_candidate_name_keeps_vlm_settings():
     assert "VLM_RULE=or" in te.candidate_name({"VLM_NAME": "smol", "VLM_RULE": "or", "VLM_URL": "http://127.0.0.1:8080"})
-    assert "VLM_URL" not in te.candidate_name({"VLM_URL": "http://127.0.0.1:8080"})
+    only_url = te.candidate_name({"VLM_URL": "http://127.0.0.1:8080"})
+    assert "VLM_URL" not in only_url and only_url == "VLM_RULE=or"  # VLM을 켠 것은 남긴다 (model_score가 읽음)
 
 
 # ---------- 게이트웨이에서 쓰기 (VLM_URL, 10판 1등) ----------

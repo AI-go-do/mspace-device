@@ -206,6 +206,22 @@ def test_passer_by_does_not_cancel_recheck(monkeypatch):
     assert w.recheck_base is None
 
 
+def test_seated_person_blinking_still_counts_as_entered(monkeypatch):
+    """앉은 사람을 YOLO가 한 장 놓쳐도(깜빡임) 10초는 처음부터 다시 세지 않는다 (지영 #79). 0명이 3초 이어져야 지나간 사람."""
+    monkeypatch.setattr(room_camera, "ENTRY_PERSON_SEC", 10)
+    vlm = vc.VlmCheck("http://127.0.0.1:1", send=fake_send("YES", []))
+    w = RoomWatcher(1, on_checkout=True, vlm=vlm)
+    run_room(w, [], 0, 5)
+    run_room(w, [person()], 5, 15)
+    w.request_check(1, 20)
+    run_room(w, [], 20, SETTLE_SEC + 6)
+    assert w.recheck_base["vlm"]
+    run_room(w, [person()], 40, 6)
+    run_room(w, [], 46, 1)  # 한 장 놓침
+    run_room(w, [person()], 47, 6)  # 처음 보인 지 13초
+    assert w.recheck_base is None
+
+
 def test_ask_vlm_on_recheck_sends_vlm_confidence(tmp_path):
     sent = []
     w = RoomWatcher(1, on_checkout=True, vlm=vc.VlmCheck("http://127.0.0.1:1", send=lambda url, body: ("YES", 0.97)))

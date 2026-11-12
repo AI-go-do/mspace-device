@@ -607,7 +607,6 @@ class RoomWatcher:
                 if not self.confirm_entry(snap, now, now_iso, rebase=rebase):
                     self.held_snapshot = (snap, now)  # 안 썼으면 잠깐 들고 있는다 (바로 뒤 QR 입실이면 씀)
             return
-        self.person_since = None
         if pir:  # 카메라엔 안 보여도 누가 있을 수 있다. 후보를 새로 찍지 않는다
             self.raw_empty_since = None
             if self.pir_since is None and self.snapshot is not None:
@@ -616,7 +615,8 @@ class RoomWatcher:
         if self.raw_empty_since is None:
             self.raw_empty_since = now
         if now - self.raw_empty_since < ENTRY_EMPTY_SEC:
-            return
+            return  # 앉은 사람을 한두 장 놓쳐도(깜빡임) person_since는 그대로 둔다 (지영 #79)
+        self.person_since = None  # 0명이 ENTRY_EMPTY_SEC 이어졌다: 지나간 사람
         if self.snapshot is not None and self.pir_since is None and now - self.snapshot["at"] < SNAPSHOT_SEC:
             return  # (PIR이 켜졌던 후보는 다시 비면 바로 새로 찍는다)
         seen = detail() if detail else dets

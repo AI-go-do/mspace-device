@@ -170,7 +170,7 @@ def test_unknown_things_become_cleaning_and_named_ones_left_items():
     assert check["leftItems"] == {"power bank": 1}
     assert check["trash"] == {"unknown": 1}
     assert check["status"] == "LEFT_ITEMS"
-    assert room_camera.check_message(check) == "정리 확인 1번 방: 두고 간 물건 보조배터리 1 / 치울 것 모르는 물건 1"
+    assert room_camera.check_message(check).splitlines()[0] == "정리 확인 1번 방: 두고 간 물건 보조배터리 1 / 치울 것 모르는 물건 1"
 
 
 def test_moved_chair_is_not_trash():

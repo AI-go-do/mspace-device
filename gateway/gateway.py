@@ -849,8 +849,9 @@ def make_vlm(config):
     if rule not in vlm_check.RULES:
         print(f"VLM_RULE은 {', '.join(vlm_check.RULES)} 중 하나예요. or로 해요: {rule!r}")
         rule = "or"
-    vlm = vlm_check.VlmCheck(config.vlm_url, rule=rule, side=config.vlm_side, eq=config.vlm_eq)
-    print(f"정리 확인: VLM에게 한 번 더 물어요 ({vlm.model or '모델 이름 못 읽음'}, 규칙 {vlm.rule}, 퇴실 뒤 30초쯤 더 걸림)")
+    vlm = vlm_check.VlmCheck(config.vlm_url, rule=rule, side=config.vlm_side, eq=config.vlm_eq,
+                             timeout=vlm_check.GATEWAY_TIMEOUT)
+    print(f"정리 확인: VLM에게 한 번 더 물어요 ({vlm.model or '모델 이름 못 읽음'}, 규칙 {vlm.rule}, 퇴실 뒤 30초쯤 더 걸림, {vlm.timeout}초 넘으면 YOLO 결과만)")
     return vlm
 
 

@@ -23,7 +23,8 @@ import urllib.request
 
 RULES = ("vlm", "and", "or")
 SIDE = 768
-TIMEOUT = 300  # 젯슨 CPU에서 한 번에 30초쯤. 이보다 오래 걸리면 YOLO 결과만 쓴다
+TIMEOUT = 300  # 채점(tidy_eval)용. 젯슨 CPU에서 한 번에 30초쯤이라 넉넉히 기다린다
+GATEWAY_TIMEOUT = 90  # 게이트웨이용. 오래 기다리는 사이 다음 예약이 퇴실하면 core가 앞 예약 결과를 안 받는다. 넘으면 YOLO 결과만 보낸다
 
 PROMPT = (
     "Image 1 is a study room right after the guest checked in. "
@@ -65,10 +66,14 @@ def parse(text):
     return None
 
 
+# 환경변수 프록시(http_proxy 등)를 쓰지 않는 전송. 127.0.0.1로 보내도 프록시를 거치면 사진이 젯슨 밖으로 나간다
+DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def post(url, body, timeout=TIMEOUT):
     req = urllib.request.Request(url.rstrip("/") + "/v1/chat/completions", data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as res:
+    with DIRECT.open(req, timeout=timeout) as res:
         data = json.loads(res.read().decode())
     return data["choices"][0]["message"]["content"]
 
@@ -76,7 +81,7 @@ def post(url, body, timeout=TIMEOUT):
 def model_name(url, timeout=10):
     """서버가 띄운 모델 이름 (캐시 열쇠와 기록용). 못 읽으면 빈 문자열."""
     try:
-        with urllib.request.urlopen(url.rstrip("/") + "/v1/models", timeout=timeout) as res:
+        with DIRECT.open(url.rstrip("/") + "/v1/models", timeout=timeout) as res:
             data = json.loads(res.read().decode())
         return data["data"][0]["id"]
     except Exception:
@@ -88,13 +93,17 @@ def image_part(jpg):
 
 
 class VlmCheck:
-    def __init__(self, url, rule="or", side=SIDE, eq=False, cache=None, send=post, clock=time.perf_counter):
+    def __init__(self, url, rule="or", side=SIDE, eq=False, cache=None, send=post, clock=time.perf_counter,
+                 timeout=TIMEOUT):
         if rule not in RULES:
             raise ValueError(f"VLM_RULE는 {', '.join(RULES)} 중 하나예요: {rule!r}")
         self.url, self.rule, self.side, self.eq = url, rule, side, eq
         self.cache_path = cache
         self.send, self.clock = send, clock
         self.model = model_name(url) if send is post else "test"
+        self.timeout = timeout
+        if send is post:
+            self.send = lambda u, body: post(u, body, timeout=timeout)
         self.cache = {}
         if cache and os.path.exists(cache):
             with open(cache, encoding="utf-8") as f:

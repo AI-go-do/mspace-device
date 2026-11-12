@@ -847,9 +847,11 @@ class RoomWatcher:
             now_items = self.not_moved(dets, now_items, base, desk)
         trash, left, confidence = {}, {}, {}
         scores = self.scores(dets)
+        by_yolo = False
         for label, n in now_items.items():
             more = n - max(base.get(label, 0), self.room_items.get(label, 0))  # 방 비품은 그 개수까지 괜찮음
             if more > 0:
+                by_yolo = True
                 (trash if label in TRASH else left)[label] = more
                 # 어느 것이 새로 생긴 건지 모르니 점수가 낮은 쪽부터 쓴다 (확신도를 부풀려 잘못 경고하지 않게)
                 confidence[label] = scores[label][:more]
@@ -871,6 +873,7 @@ class RoomWatcher:
             "trash": trash,
             "leftItems": left,
             "confidence": confidence,  # {이름: [물건마다 확신도 0~1]}. 서버 items에 같이 실린다
+            "evidence": {"yolo": by_yolo, "desk": bool(extra)},  # 무엇이 찾았나 (물건이 있을 확률 표의 열쇠)
             "checkedAt": now_iso or datetime.now(KST).isoformat(timespec="seconds"),
         }
 
@@ -879,7 +882,26 @@ class RoomWatcher:
 MAX_SERVER_ITEMS = 20
 
 
-def tidy_body(check, device_id, event_id=None, model=None):
+def evidence_key(evidence, vlm="unused", phase="FIRST"):
+    """무엇이 물건을 찾았나 → 물건이 있을 확률 표(model_score.presence_table)의 열쇠.
+
+    FIRST: "yolo+desk+vlm"처럼 찾은 것만 잇는다. VLM을 안 물었으면 vlm 칸이 없고,
+    물었는데 "없음"이면 vlm-no, 못 알아들었거나 답이 없으면 vlm-?.
+    RECHECK(3시간 뒤): YOLO 개수만 보므로 늘 "recheck".
+    """
+    if phase == "RECHECK":
+        return "recheck"
+    parts = [name for name in ("yolo", "desk") if (evidence or {}).get(name)]
+    if vlm != "unused":
+        parts.append({True: "vlm", False: "vlm-no"}.get(vlm, "vlm-?"))
+    return "+".join(parts) or "none"
+
+
+def check_key(check):
+    return evidence_key(check.get("evidence"), check.get("vlm", "unused"), check.get("phase", "FIRST"))
+
+
+def tidy_body(check, device_id, event_id=None, model=None, presence=None):
     """정리 확인 결과를 서버 POST /api/rooms/{roomId}/tidy-checks 형식으로 바꾼다 (10차, 11/10 지영과 맞춤).
 
     10차: 쓰레기든 물건이든 종류 구분 없이 "두고 감". 장치 결과(치울 것·두고 간 물건) → 서버 2가지:
@@ -887,13 +909,20 @@ def tidy_body(check, device_id, event_id=None, model=None):
     items = 물건마다 {"name": 모델 이름(영어), "confidence": 0~1}. 한글 바꾸기·경고 기준(확신도)은 core가 한다.
     phase = FIRST(퇴실 직후, 알림만) | RECHECK(3시간 뒤, 그래도 남았으면 core가 경고).
     model = 지금 설정의 시험 점수 (model_score.find). 같은 설정으로 채점한 기록이 있을 때만 붙인다.
+    presence = 물건이 있을 확률 표 {열쇠: 0~1} (model_score.presence_table, 11/12 core와 맞춤).
+      있으면 confidence는 "이 이름일 확률"이 아니라 "여기 물건이 남아 있을 확률"이다:
+      무엇이 찾았나(check_key)가 같은 경우에 채점에서 실제로 물건이 남아 있던 비율. 이름이 틀려도 안 떨어진다.
+      표에 없는 경우는 DESK_DIFF_CONF(경고 기준보다 낮게: 알림만). 표가 없으면 예전처럼 이름별 점수.
     """
     found = {**check["leftItems"], **check["trash"]}
     conf = check.get("confidence", {})
+    room = presence.get(check_key(check), DESK_DIFF_CONF) if presence is not None else None
     items = []
     for label, n in sorted(found.items()):
         scores = list(conf.get(label, []))
         scores += [DESK_DIFF_CONF] * (n - len(scores))  # 점수가 없으면 경고 기준보다 낮은 값
+        if room is not None:
+            scores = [room] * n
         items += [{"name": label, "confidence": c} for c in scores[:n]]
     items.sort(key=lambda i: -i["confidence"])  # 20개가 넘으면 확신이 큰 것부터 남긴다
     body = {
@@ -1081,7 +1110,8 @@ def finish_check(watcher, check, log_path, send_check, send_photo):
     print(check_message(check))
     safe_log(log_path, check)
     if send_check is not None and "reservationId" in check:
-        send_check(tidy_body(check, f"camera-{watcher.room_id}", model=getattr(watcher, "model_score", None)))
+        send_check(tidy_body(check, f"camera-{watcher.room_id}", model=getattr(watcher, "model_score", None),
+                             presence=getattr(watcher, "presence", None)))
         if getattr(watcher, "photos", False):
             print(photo_message(check, photos))
         if send_photo is not None and photos:

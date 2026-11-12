@@ -51,6 +51,19 @@ def test_judge_with_desk_photo_finds_unknown_things():
     desk = desk_diff.DeskCompare((0.0, 0.0, 1.0, 1.0))
     check, _ = te.judge(before, after, lambda f: [], desk=desk, labeler=lambda f, b: None)
     assert check["status"] == "NEEDS_CLEANING" and check["trash"] == {"unknown": 1}
+    # 책상 비교만 찾았고, 3시간 뒤처럼 YOLO 개수만 보면 깨끗함
+    assert check["evidence"] == {"yolo": False, "desk": True, "count": False}
+
+
+def test_judge_records_what_found_it_for_the_presence_table():
+    find = finder({0: [det("remote")], 1: [det("remote"), det("cup", 60)]})
+    check, _ = te.judge(frame(0), frame(1), find)
+    assert check["evidence"] == {"yolo": True, "desk": False, "count": True}
+    row = te.evidence_row("NEEDS_CLEANING", {**check, "vlm": False})
+    assert row == {"left": True, "found": True, "key": "yolo+vlm-no", "count": True, "target": True}
+    # VLM이 "없음"이라 CLEAN으로 바뀌어도 VLM 전 결과가 남음이면 3시간 뒤 다시 확인 대상
+    assert te.evidence_row("CLEAN", {**check, "status": "CLEAN", "yoloStatus": "NEEDS_CLEANING"})["target"] is True
+    assert te.evidence_row("CLEAN", {**check, "status": "CLEAN", "yoloStatus": "CLEAN"})["target"] is False
 
 
 def test_score_counts_accuracy_serious_and_time():
@@ -139,6 +152,7 @@ def test_save_result_and_candidate(tmp_path):
     te.save_result(str(tmp_path), result, "후보")
     record = json.loads((tmp_path / "results.jsonl").read_text(encoding="utf-8"))
     assert record["candidate"] == "후보" and record["wrong"] == ["001"] and "rows" not in record
+    assert record["evidence"] == [{"left": False, "found": True, "key": "none", "count": False, "target": True}]  # 이름·사진은 안 남김
 
 
 def test_main_needs_a_command():

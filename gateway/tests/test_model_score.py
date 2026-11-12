@@ -56,7 +56,10 @@ def test_old_records_match_by_vlm_name(tmp_path):
     old = {k: v for k, v in record(WINNER, 0.8723, "2026-11-12T10:16:00+09:00").items() if k != "vlmModel"}
     path = write(tmp_path, old)
     assert find(GATEWAY_ENV, path)["accuracy"] == 0.8723  # VLM_NAME=qwen 이 Qwen3-VL-... 안에 있음: 다시 채점 안 해도 됨
+    assert find(GATEWAY_ENV, path, vlm_model="/home/suyeon/vlm/" + QWEN)["accuracy"] == 0.8723  # 서버가 경로로 알려 줘도
     assert find(GATEWAY_ENV, path, vlm_model="SmolVLM-500M.gguf") is None  # 다른 모델이면 안 씀
+    assert find(GATEWAY_ENV, path, vlm_model="Qwen2-VL-2B-Instruct-Q8_0.gguf") is None  # 이름에 qwen이 있어도 다른 모델
+    assert find(GATEWAY_ENV, path, vlm_model="Qwen3-VL-2B-Instruct-Q4_K_M.gguf") is None  # 양자화가 달라도 다른 모델
     no_name = {**old, "candidate": WINNER.replace(" VLM_NAME=qwen", "")}
     assert find(GATEWAY_ENV, write(tmp_path, no_name)) is None  # 이름도 없으면 어떤 모델인지 몰라서 안 씀
 

@@ -8,6 +8,8 @@ import json
 import os
 
 DEFAULT_FILE = "eval/tidy/results.jsonl"
+# vlmModel을 적기 전(11/12 전) 채점 줄의 VLM_NAME → 그때 쓴 모델 파일 (README 10판: Qwen3-VL-2B Q8_0)
+OLD_VLM_FILES = {"qwen": "Qwen3-VL-2B-Instruct-Q8_0.gguf"}
 
 
 def candidate_env(candidate):
@@ -39,7 +41,8 @@ def same_vlm(record, vlm_model):
     """채점 줄이 게이트웨이와 같은 VLM 모델로 채점한 것인가.
 
     새 줄: tidy_eval이 적은 vlmModel(서버가 알려 준 이름)이 같아야 한다.
-    vlmModel이 없는 옛 줄(11/12 전): 그때 붙인 VLM_NAME(예: qwen)이 모델 이름 안에 있으면 같은 모델로 본다.
+    vlmModel이 없는 옛 줄(11/12 전): 그때 붙인 VLM_NAME(예: qwen)으로 OLD_VLM_FILES의 모델 파일을 찾아
+    게이트웨이 모델 파일 이름과 똑같을 때만 같은 모델로 본다 (Qwen2·다른 양자화는 다른 모델).
     다시 채점하지 않아도 10판 점수를 쓸 수 있게 (11/12 수연 "채점 오래 걸림").
     """
     if not vlm_model:
@@ -47,7 +50,7 @@ def same_vlm(record, vlm_model):
     if record.get("vlmModel"):
         return record["vlmModel"] == vlm_model
     name = candidate_env(record.get("candidate")).get("VLM_NAME", "").strip().lower()
-    return bool(name) and name in vlm_model.lower()
+    return OLD_VLM_FILES.get(name) == os.path.basename(vlm_model)
 
 
 def find(config, load_config, path=DEFAULT_FILE, vlm_model=None):

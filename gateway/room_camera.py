@@ -1028,7 +1028,8 @@ class RoomWatcher:
             group[label] = group.get(label, 0) + n
             confidence[label] = confidence.get(label, []) + [None] * n  # 자기 점수 없음: 보낼 때 VLM 확률로 채운다
         status = "LEFT_ITEMS" if left else "NEEDS_CLEANING" if trash else "CLEAN"
-        if own and status == "CLEAN" and compared:  # 비교를 건너뛰었으면 물건이 있을 수 있어 사진을 바꾸지 않는다
+        if own and status == "CLEAN" and compared and not getattr(desk, "partial", False):
+            # 비교를 건너뛰었거나 큰 변화를 빼고 일부만 봤으면(DESK_KEEP_SMALL) 물건이 있을 수 있어 사진을 바꾸지 않는다
             self.desk.set_base(photo(), self.objects(dets))  # 깨끗하면 책상 사진도 새로 (햇빛·조명이 천천히 바뀌는 것 따라감)
         if own and status == "CLEAN":  # 깨끗하면 기준을 넓혀 둔다 (줄어든 건 기준에서 빼지 않음: 다시 나와도 괜찮게)
             widened = {k: max(base.get(k, 0), now_items.get(k, 0)) for k in set(base) | set(now_items)}

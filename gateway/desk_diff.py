@@ -128,7 +128,7 @@ def split_moved(base, now, boxes, same=MOVE_SAME, size=MOVE_SIZE, content=MOVE_C
 
 
 def find_changes(base, now, thresh=DIFF_THRESH, min_area=MIN_AREA, max_area=MAX_AREA, light="mean",
-                 move=False, moved=None, move_same=MOVE_SAME, keep_small=0.0):
+                 move=False, moved=None, move_same=MOVE_SAME, keep_small=0.0, partial=None):
     """두 책상 사진(prepare 결과)에서 달라진 곳 상자 (x, y, w, h) 목록. 조명이 통째로 바뀌었으면 None.
 
     light="mean": 사진 전체 밝기만 맞춘다 (원래 방식). "local": 자리마다 밝기를 고르게 한 뒤 비교한다.
@@ -136,6 +136,7 @@ def find_changes(base, now, thresh=DIFF_THRESH, min_area=MIN_AREA, max_area=MAX_
     move=True: 원래 있던 걸 옮기거나 뒤집은 자리는 빼고, 뺀 자리는 moved 목록에 넣는다 (DESK_MOVE=1).
     keep_small>0: 달라진 곳이 max_area를 넘어도 비교를 포기하지 않고, 사진 넓이의 keep_small보다 작은 곳만 남긴다
         (DESK_KEEP_SMALL. 화면 전체 비교에서 카메라 밝기가 조금 바뀌어도 물건 자리는 계속 본다).
+        이때 partial 목록에 True를 넣는다 (일부만 본 비교라 기준 사진을 바꾸면 안 됨).
     """
     import cv2
     import numpy as np
@@ -155,9 +156,14 @@ def find_changes(base, now, thresh=DIFF_THRESH, min_area=MIN_AREA, max_area=MAX_
     if too_much and not keep_small:
         return None
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    boxes = join_near([tuple(int(v) for v in cv2.boundingRect(c)) for c in contours])
+    raw = [tuple(int(v) for v in cv2.boundingRect(c)) for c in contours]
+    if too_much:  # 큰 덩어리(조명·그림자)를 잇기 전에 뺀다. 그래야 그림자 옆 물건이 그림자에 붙어 같이 빠지지 않는다
+        raw = [b for b in raw if b[2] * b[3] <= keep_small * total]
+        if partial is not None:
+            partial.append(True)
+    boxes = join_near(raw)
     boxes = [b for b in boxes if b[2] * b[3] >= min_area * total]
-    if too_much:  # 큰 변화(조명·그림자)는 빼고 물건 크기만 남긴다
+    if too_much:  # 작은 조각이 이어져 다시 커진 것도 빛 얼룩으로 본다
         boxes = [b for b in boxes if b[2] * b[3] <= keep_small * total]
     if move:
         boxes, out = split_moved(base, now, boxes, same=move_same)
@@ -214,6 +220,7 @@ class DeskCompare:
         self.known = []               # 기준 때 모델이 찾은 물건 자리 (리모컨을 옮기면 빈 자리도 "달라짐"이라 뺀다)
         self.known_labels = []        # known과 같은 순서의 이름 (DESK_MOVE용). 파일에도 같이 적는다
         self.moved = []               # 마지막 비교에서 "옮긴 것"으로 뺀 자리 (원래 화면 좌표, DESK_MOVE용)
+        self.partial = False          # 마지막 비교가 큰 변화를 빼고 일부만 본 것인가 (DESK_KEEP_SMALL). 그러면 기준 사진을 안 바꾼다
         self.load()
 
     @property
@@ -288,9 +295,10 @@ class DeskCompare:
         if self.base is None:
             return None
         now, offset = prepare(frame, self.area)
-        moved = []
-        found = find_changes(self.base, now, moved=moved, **self.tune)
+        moved, partial = [], []
+        found = find_changes(self.base, now, moved=moved, partial=partial, **self.tune)
         self.moved = [to_frame(b, offset) for b in moved]
+        self.partial = bool(partial)
         if found is None:
             return None
         return [to_frame(b, offset) for b in found]

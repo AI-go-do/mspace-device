@@ -35,12 +35,27 @@ def setup_key(config, vlm=None):
             (config.vlm_rule, config.vlm_side, config.vlm_eq) if vlm else None)
 
 
+def same_vlm(record, vlm_model):
+    """채점 줄이 게이트웨이와 같은 VLM 모델로 채점한 것인가.
+
+    새 줄: tidy_eval이 적은 vlmModel(서버가 알려 준 이름)이 같아야 한다.
+    vlmModel이 없는 옛 줄(11/12 전): 그때 붙인 VLM_NAME(예: qwen)이 모델 이름 안에 있으면 같은 모델로 본다.
+    다시 채점하지 않아도 10판 점수를 쓸 수 있게 (11/12 수연 "채점 오래 걸림").
+    """
+    if not vlm_model:
+        return False
+    if record.get("vlmModel"):
+        return record["vlmModel"] == vlm_model
+    name = candidate_env(record.get("candidate")).get("VLM_NAME", "").strip().lower()
+    return bool(name) and name in vlm_model.lower()
+
+
 def find(config, load_config, path=DEFAULT_FILE, vlm_model=None):
     """config와 같은 설정으로 채점한 가장 최근 점수. 없으면 None.
 
     load_config: gateway.load_config (채점 줄의 설정도 게이트웨이와 같은 기본값으로 읽으려고 받는다)
     vlm_model: 게이트웨이가 실제로 켠 VLM의 모델 이름 (VLM을 안 켰으면 None).
-               VLM을 켰으면 같은 모델로 채점한 줄만 쓴다. 모델 이름이 없는 옛 줄은 쓰지 않는다
+               VLM을 켰으면 같은 모델로 채점한 줄만 쓴다 (same_vlm)
     """
     if not path or not os.path.isfile(path):
         return None
@@ -54,7 +69,7 @@ def find(config, load_config, path=DEFAULT_FILE, vlm_model=None):
                     env = {"PORT": "none", **candidate_env(record.get("candidate"))}
                     if setup_key(load_config(env)) != want:
                         continue
-                    if vlm_on and (not vlm_model or record.get("vlmModel") != vlm_model):
+                    if vlm_on and not same_vlm(record, vlm_model):
                         continue
                     score = {"setup": record.get("candidate", ""), "accuracy": round(float(record["leftAccuracy"]), 4),
                              "cases": int(record["cases"]), "secondsPerPhoto": round(float(record["medianSeconds"]), 2),

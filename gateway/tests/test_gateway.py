@@ -57,8 +57,8 @@ def run(monkeypatch):
     """가짜 우노 줄을 넣고 main()을 돌린 뒤, (우노에 쓴 값, 서버로 보낸 요청 목록)을 돌려준다."""
     monkeypatch.setattr(gateway.time, "sleep", lambda s: None)  # 테스트에서는 기다리지 않는다
 
-    def _run(lines, responses=None, dry_run=False, token="test-token"):
-        config = gateway.Config(port="/dev/fake", dry_run=dry_run, device_token=token)
+    def _run(lines, responses=None, dry_run=False, token="test-token", use_pir=False):
+        config = gateway.Config(port="/dev/fake", dry_run=dry_run, device_token=token, use_pir=use_pir)
         ser = FakeSerial(lines)
         monkeypatch.setattr(gateway.serial, "Serial", lambda *a, **k: ser)
         sent = []
@@ -321,7 +321,7 @@ def test_occupancy_default_time_is_kst():
 
 
 def test_occupancy_dry_run_prints_body(run, capsys):
-    written, sent = run([occ_line(pir=1)], dry_run=True, token=None)
+    written, sent = run([occ_line(pir=1)], dry_run=True, token=None, use_pir=True)
     assert written == [] and sent == []  # 우노에 답하지 않고, 서버로도 아직 안 보낸다
     out = capsys.readouterr().out
     assert "재실 1번 방: 있음" in out
@@ -329,7 +329,7 @@ def test_occupancy_dry_run_prints_body(run, capsys):
 
 
 def test_occupancy_not_sent_to_server_yet(run, capsys):
-    written, sent = run([occ_line(pir=0)])
+    written, sent = run([occ_line(pir=0)], use_pir=True)
     assert written == [] and sent == []
     out = capsys.readouterr().out
     assert "재실 1번 방: 없음" in out and "[DRY_RUN]" not in out
@@ -391,6 +391,29 @@ def test_sensor_sender_keeps_event_on_config_or_server_error(sender, status):
     assert sent[0][1]["eventId"] == sent[1][1]["eventId"]  # 같은 eventId로 다시 보낸다
 
 
+def test_sensor_sender_quiet_on_success_but_says_recovery(sender, capsys):
+    s, _ = sender([FakeResponse({"result": "STORED"}), FakeResponse(status=503), FakeResponse({"result": "STORED"}),
+                   FakeResponse({"result": "STORED"})])
+    s.push(occ_body(1))
+    s.step()
+    assert "보냄" not in capsys.readouterr().out  # 10초마다 가는 센서는 성공해도 조용히
+    s.push(occ_body(2))
+    s.step()
+    s.step()
+    assert "[센서 전송] 다시 보내기 성공" in capsys.readouterr().out  # 실패 뒤 성공은 꼭 알림
+    s.push(occ_body(3))
+    s.step()
+    assert capsys.readouterr().out == ""
+
+
+def test_tidy_sender_says_ok_each_time(sender, capsys):
+    s, _ = sender([FakeResponse({"result": "STORED"})])
+    s.say_ok, s.name = True, "정리 확인 전송"
+    s.push({"reservationId": 36, "result": "CLEAN"})
+    s.step()
+    assert "[정리 확인 전송] 보냄 (200): 예약 36 CLEAN" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("status", [400, 409, 413, 422])
 def test_sensor_sender_drops_bad_event(sender, status, capsys):
     s, _ = sender([FakeResponse(status=status)])
@@ -424,6 +447,34 @@ def test_occupancy_pushed_to_sender_when_on():
 
     gateway.handle_line(occ_line(pir=1), gateway.HttpVerifier("https://core.example", "t"), FakeSender())
     assert len(pushed) == 1 and pushed[0]["occupied"] is True
+
+
+def test_pir_off_by_default_keeps_only_light(run, capsys, monkeypatch):
+    """11/12 PIR을 뺌: 기본은 PIR 값을 버리고 조도만 기억한다 (뺀 핀이 아무렇게나 1로 읽혀도 "있음"이 안 되게)."""
+    monkeypatch.setattr(gateway, "LAST_PIR", {})
+    monkeypatch.setattr(gateway, "LAST_LIGHT", {})
+    written, sent = run([occ_line(pir=1, light=700)], dry_run=True, token=None)
+    out = capsys.readouterr().out
+    assert written == [] and sent == []
+    assert "재실 1번 방 조도: 700 (PIR 안 씀" in out and "[DRY_RUN]" not in out and "PIR: 안 씀" in out
+    assert gateway.fresh_pir(1) is None and gateway.fresh_light(1) == 700
+
+
+def test_pir_off_does_not_push_occupancy():
+    pushed = []
+
+    class FakeSender:
+        def push(self, body):
+            pushed.append(body)
+
+    gateway.handle_line(occ_line(pir=1), gateway.HttpVerifier("https://core.example", "t"), FakeSender(), use_pir=False)
+    assert pushed == []
+
+
+def test_load_config_use_pir(monkeypatch):
+    monkeypatch.setattr(gateway, "find_port", lambda: None)
+    assert gateway.load_config({}).use_pir is False
+    assert gateway.load_config({"USE_PIR": "1"}).use_pir is True
 
 
 def test_load_config_send_sensors(monkeypatch):
@@ -462,5 +513,8 @@ def test_photo_sender_posts_multipart_and_drops_rejected(monkeypatch, capsys):
     assert s.step() == 0 and not s.queue
     s.push({"reservationId": 7, "phase": "ENTRY", "deviceId": "camera-2", "jpg": b"c"})
     assert s.step() == 0 and not s.queue  # core가 ENTRY를 아직 안 받으면(400) 그 장만 버림
-    assert "이것만 버려요" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "[정리 확인 사진 전송] 보냄 (201): 예약 7 FIRST" in out  # 사진은 성공할 때마다 한 줄
+    assert "다시 보내기 성공 (201): 예약 7 RECHECK" in out
+    assert "거부함(400): 예약 7 ENTRY. 다시 보내도 같아서 이것만 버려요" in out
     assert s.queue.maxlen == gateway.PHOTO_QUEUE_MAX

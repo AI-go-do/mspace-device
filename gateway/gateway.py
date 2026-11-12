@@ -94,6 +94,8 @@ class Config:
     desk_move_same: float = 1.0            # DESK_MOVE에서 "원래 있던 자리"로 볼 기준 (DESK_MOVE_SAME, 높을수록 덜 뺌. 9판 1등 1.0)
     vlm_url: str | None = None             # 정리 확인을 VLM(llama-server, 127.0.0.1)에게 한 번 더 물음 (VLM_URL, 10판). 비우면 끔
     vlm_rule: str = "or"                   # YOLO와 합치는 법: or(하나라도 남음이면 남음, 10판 1등) / and / vlm (VLM_RULE)
+    vlm_side: int = 768                    # VLM에 보내기 전 사진 긴 변 크기 (VLM_SIDE, 채점과 같은 값)
+    vlm_eq: bool = False                   # 어두운 사진을 밝게 펴서 보냄 (VLM_EQ=1)
     tidy_photos: bool = False              # True면 정리 확인 때 빈 방 사진(입실 전·퇴실 뒤·3시간 뒤)을 core로 올린다 (Q-27)
     label_model: str | None = None         # 달라진 곳에 이름 붙일 모델 (YOLO-World ONNX). 없으면 YOLO_MODEL로
     baseline_file: str | None = "room_baseline.json"  # 깨끗한 방 기준을 적어 두는 파일. BASELINE_FILE=off면 메모리에만
@@ -151,6 +153,8 @@ def load_config(env=None):
         desk_move_same=parse_number(env, "DESK_MOVE_SAME", Config.desk_move_same, 0.1, 10.0, float),
         vlm_url=(env.get("VLM_URL") or "").strip() or None,
         vlm_rule=(env.get("VLM_RULE") or Config.vlm_rule).strip().lower(),
+        vlm_side=parse_number(env, "VLM_SIDE", Config.vlm_side, 64, 4096, int),
+        vlm_eq=env.get("VLM_EQ") == "1",
         tidy_photos=env.get("TIDY_PHOTOS") == "1",
         label_model=env.get("LABEL_MODEL") or None,
         baseline_file=(None if env.get("BASELINE_FILE") == "off"
@@ -837,16 +841,15 @@ def make_vlm(config):
     """VLM_URL이 있으면 VLM 확인을 만든다 (10판). llama-server는 젯슨 안(127.0.0.1)에서만 받는다."""
     if not config.vlm_url:
         return None
-    from urllib.parse import urlparse
     import vlm_check
-    if urlparse(config.vlm_url).hostname not in ("127.0.0.1", "localhost", "::1"):
+    if not vlm_check.is_local(config.vlm_url):
         print(f"VLM_URL은 젯슨 안(127.0.0.1)만 돼요. 사진이 밖으로 나가지 않게 VLM은 꺼요: {config.vlm_url}")
         return None
     rule = config.vlm_rule
     if rule not in vlm_check.RULES:
         print(f"VLM_RULE은 {', '.join(vlm_check.RULES)} 중 하나예요. or로 해요: {rule!r}")
         rule = "or"
-    vlm = vlm_check.VlmCheck(config.vlm_url, rule=rule)
+    vlm = vlm_check.VlmCheck(config.vlm_url, rule=rule, side=config.vlm_side, eq=config.vlm_eq)
     print(f"정리 확인: VLM에게 한 번 더 물어요 ({vlm.model or '모델 이름 못 읽음'}, 규칙 {vlm.rule}, 퇴실 뒤 30초쯤 더 걸림)")
     return vlm
 

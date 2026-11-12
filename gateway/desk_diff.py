@@ -205,7 +205,7 @@ class DeskCompare:
         self.path = path              # 껐다 켜도 남게 저장할 파일 (.png). None이면 메모리에만
         self.base = None              # 깨끗한 책상 (prepare 결과)
         self.known = []               # 기준 때 모델이 찾은 물건 자리 (리모컨을 옮기면 빈 자리도 "달라짐"이라 뺀다)
-        self.known_labels = []        # known과 같은 순서의 이름 (메모리에만, DESK_MOVE용). 파일에서 불러오면 비어 있음
+        self.known_labels = []        # known과 같은 순서의 이름 (DESK_MOVE용). 파일에도 같이 적는다
         self.moved = []               # 마지막 비교에서 "옮긴 것"으로 뺀 자리 (원래 화면 좌표, DESK_MOVE용)
         self.load()
 
@@ -229,6 +229,8 @@ class DeskCompare:
                 print("깨끗한 책상 사진의 DESK_AREA가 달라서 새로 찍어요")
                 return
             self.base, self.known = img, [tuple(b) for b in meta["known"]]
+            labels = meta.get("labels") or []  # 이름을 안 적던 옛 파일이면 이름 없이
+            self.known_labels = list(labels) if len(labels) == len(self.known) else []
             print("저장된 깨끗한 책상 사진 불러옴")
         except (OSError, ValueError, KeyError, TypeError) as e:
             print(f"깨끗한 책상 사진을 못 읽어서 새로 찍어요 ({self.path}: {e})")
@@ -258,7 +260,8 @@ class DeskCompare:
             # 사진 지문을 같이 적어 둔다. 둘 중 하나만 바뀐 채로 꺼지면 load가 짝이 안 맞는 걸 알고 버린다
             meta_tmp = self.path + ".json.tmp"
             with open(meta_tmp, "w", encoding="utf-8") as f:
-                json.dump({"area": list(self.area), "known": self.known, "sum": fingerprint(self.base)}, f)
+                json.dump({"area": list(self.area), "known": self.known, "labels": self.known_labels,
+                           "sum": fingerprint(self.base)}, f)
             os.replace(meta_tmp, self.path + ".json")
         except OSError as e:
             print(f"깨끗한 책상 사진을 못 썼어요 ({self.path}: {e}). 다시 켜면 새로 찍어요")

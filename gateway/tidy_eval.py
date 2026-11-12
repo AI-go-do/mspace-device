@@ -133,8 +133,8 @@ def judge(before, after, find, room_items=None, desk=None, labeler=None, clock=t
         raise RuntimeError("정리 확인 결과가 비어 있어요 (RoomWatcher.check)")
     if vlm is not None:  # VLM_URL (10판): 입실·퇴실 사진을 VLM에게 한 번 더 보여 준다
         new_item, vlm_seconds, _ = vlm.ask(before, after)
-        check["yoloStatus"], check["vlm"] = check["status"], new_item
-        check["status"] = vlm.combine(check["status"], new_item)
+        check["yoloStatus"] = check["status"]
+        room_camera.apply_vlm(check, new_item, vlm.rule)  # 게이트웨이와 같은 방법으로 합친다
         seconds += vlm_seconds  # 캐시에서 꺼냈어도 처음 물었을 때 걸린 시간을 더한다
     check["people"] = watcher.people(found)
     return check, seconds

@@ -154,10 +154,21 @@ class VlmCheck:
         return status if status != "CLEAN" else vlm  # or
 
 
+def is_local(url):
+    """젯슨 안(127.0.0.1·localhost·::1) 주소인가. 사진이 밖으로 나가지 않게 이 주소에만 보낸다."""
+    from urllib.parse import urlparse
+    try:
+        return urlparse(url).hostname in ("127.0.0.1", "localhost", "::1")
+    except ValueError:
+        return False
+
+
 def from_env(env):
     url = (env.get("VLM_URL") or "").strip()
     if not url:
         return None
+    if not is_local(url):
+        raise ValueError(f"VLM_URL은 젯슨 안(127.0.0.1)만 돼요. 사진이 밖으로 나가지 않게 멈춰요: {url}")
     return VlmCheck(url, rule=(env.get("VLM_RULE") or "or").strip().lower(),
                     side=int(env.get("VLM_SIDE") or SIDE), eq=env.get("VLM_EQ") == "1",
                     cache=(env.get("VLM_CACHE") or None))

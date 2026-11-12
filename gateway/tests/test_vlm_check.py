@@ -67,6 +67,18 @@ def test_from_env_is_off_without_url():
     assert (check.rule, check.eq, check.side) == ("or", True, 512)
 
 
+def test_from_env_refuses_a_vlm_outside_this_jetson():
+    with pytest.raises(ValueError, match="젯슨 안"):
+        vc.from_env({"VLM_URL": "http://10.0.0.5:8091"})  # 채점에서도 사진이 밖으로 나가지 않게
+
+
+def test_judge_combines_like_the_gateway():
+    vlm = vc.VlmCheck("http://x", rule="or", send=fake_send("YES", []), clock=iter([0.0, 3.0]).__next__)
+    check, _ = te.judge(frame(0), frame(1), lambda f: [], vlm=vlm)
+    assert (check["yoloStatus"], check["status"]) == ("CLEAN", "NEEDS_CLEANING")
+    assert check["trash"] == {"unknown": 1}
+
+
 def test_judge_lets_vlm_fix_a_false_report():
     find = lambda f: [Detection("cell phone", 0.9, (10, 10, 20, 20))] if f[0, 0, 0] == 1 else []
     vlm = vc.VlmCheck("http://x", rule="and", send=fake_send("NO", []), clock=iter([0.0, 3.0]).__next__)
@@ -208,3 +220,11 @@ def test_make_vlm_only_talks_to_this_jetson(capsys):
     vlm = gateway.make_vlm(config)
     assert vlm.rule == "or" and "or로 해요" in capsys.readouterr().out
     assert gateway.load_config({"PORT": "x"}).vlm_rule == "or"
+
+
+def test_make_vlm_uses_the_same_photo_settings_as_scoring():
+    vlm = gateway.make_vlm(gateway.load_config({"PORT": "x", "VLM_URL": "http://127.0.0.1:1",
+                                                "VLM_SIDE": "512", "VLM_EQ": "1"}))
+    assert (vlm.side, vlm.eq) == (512, True)
+    plain = gateway.make_vlm(gateway.load_config({"PORT": "x", "VLM_URL": "http://127.0.0.1:1"}))
+    assert (plain.side, plain.eq) == (vc.SIDE, False)

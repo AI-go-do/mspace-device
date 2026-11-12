@@ -102,6 +102,7 @@ def test_base_photo_survives_restart(tmp_path, capsys):
     DeskCompare(AREA, path=path).set_base(desk(), [Detection("remote", 0.8, (800, 800, 30, 90))])
     again = DeskCompare(AREA, path=path)
     assert again.ready and again.known == [(800.0, 800.0, 30.0, 90.0)]
+    assert again.known_labels == ["remote"]  # 껐다 켜도 이름이 남아 DESK_MOVE가 같은 물건을 알아본다
     assert "불러옴" in capsys.readouterr().out
     assert len(again.changes(desk(PHONE))) == 1
 
@@ -109,6 +110,16 @@ def test_base_photo_survives_restart(tmp_path, capsys):
     (tmp_path / "desk.png.json").write_text("{broken")
     assert not DeskCompare(AREA, path=path).ready
     assert "새로 찍어요" in capsys.readouterr().out
+
+
+def test_old_meta_without_labels_still_loads(tmp_path):
+    path = str(tmp_path / "desk.png")
+    DeskCompare(AREA, path=path).set_base(desk(), [Detection("remote", 0.8, (800, 800, 30, 90))])
+    meta = json.loads((tmp_path / "desk.png.json").read_text())
+    del meta["labels"]  # 이름을 안 적던 옛 파일
+    (tmp_path / "desk.png.json").write_text(json.dumps(meta))
+    again = DeskCompare(AREA, path=path)
+    assert again.ready and again.known_labels == []
 
 
 def test_photo_and_meta_from_different_saves_are_not_used(tmp_path, capsys):

@@ -509,16 +509,14 @@ def test_push_last_skips_compare_rows_and_old_accuracy(tmp_path):
     assert te.score_body(old)["accuracy"] == 0.5  # leftAccuracy가 없던 옛 줄
 
 
-def test_push_score_loopback_skips_proxy(tmp_path):
-    record = scored_record(tmp_path)
-    seen = {}
-
-    def post(url, **kw):
-        seen.update(kw)
-        return FakeResponse(200)
-
-    te.push_score(record, {"SERVER": "http://127.0.0.1:8080", "DEVICE_TOKEN": "t"}, lambda s: None, post=post)
-    assert seen["proxies"] == {"http": None, "https": None}
-    seen.clear()
-    te.push_score(record, {"SERVER": "https://dev.example", "DEVICE_TOKEN": "t"}, lambda s: None, post=post)
-    assert "proxies" not in seen
+def test_http_post_loopback_ignores_all_proxy(monkeypatch):
+    from requests.utils import select_proxy
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("ALL_PROXY", "http://proxy.invalid:8080")
+    url = "http://127.0.0.1:8080/api/rooms/1/model-scores"
+    session = te.http_post(True).__self__
+    settings = session.merge_environment_settings(url, {}, False, True, None)
+    assert select_proxy(url, settings["proxies"]) is None  # 내 컴퓨터로 보낼 때는 ALL_PROXY도 안 거친다
+    import requests
+    assert te.http_post(False) is requests.post  # 원격은 원래 설정 그대로

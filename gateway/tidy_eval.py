@@ -253,6 +253,19 @@ def score_body(record):
             "measuredAt": record["at"]}
 
 
+def http_post(loopback):
+    """보낼 함수. 내 컴퓨터(loopback)로 보낼 때는 환경 프록시(HTTP_PROXY·ALL_PROXY 등)를 아예 안 읽는 세션을 쓴다.
+
+    proxies={"http": None, "https": None}만 주면 ALL_PROXY는 그대로 골라져서 토큰이 프록시로 샐 수 있다.
+    """
+    import requests
+    if not loopback:
+        return requests.post
+    session = requests.Session()
+    session.trust_env = False
+    return session.post
+
+
 def push_score(record, env, out=print, post=None):
     """점수를 core로 보낸다. 실패해도 채점은 실패로 치지 않고 한 줄만 찍는다. 반환: HTTP 상태 (안 보냈으면 None)."""
     import gateway
@@ -269,12 +282,10 @@ def push_score(record, env, out=print, post=None):
         return None
     url = f"{config.server}/api/rooms/{config.room_camera_room}/model-scores"
     if post is None:
-        import requests
-        post = requests.post
+        post = http_post(gateway.is_loopback(config.server))
     try:
-        extra = {"proxies": {"http": None, "https": None}} if gateway.is_loopback(config.server) else {}
-        r = post(url, json=body, headers={"Authorization": f"Bearer {config.device_token}"},  # 내 컴퓨터(http)면 프록시를 안 거침
-                 timeout=(gateway.CONNECT_TIMEOUT, gateway.TIMEOUT), allow_redirects=False, **extra)
+        r = post(url, json=body, headers={"Authorization": f"Bearer {config.device_token}"},
+                 timeout=(gateway.CONNECT_TIMEOUT, gateway.TIMEOUT), allow_redirects=False)
     except Exception as e:  # noqa: BLE001 - 채점 결과는 이미 저장됨. 오류 이름만 한 줄
         out(f"점수 보내기 실패: {e.__class__.__name__} (채점 기록은 그대로, push-last로 다시 보내요)")
         return None

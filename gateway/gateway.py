@@ -75,6 +75,7 @@ class Config:
     device_token: str | None = None        # 장치 토큰. 서버가 "등록된 장치"인지 확인하는 값. 저장소에 넣지 않고 .env에만 둔다
     port: str | None = None                # 우노가 꽂힌 USB 포트. 못 찾으면 None
     send_sensors: bool = False             # True면 재실 이벤트도 core로 보낸다 (core에 센서 API가 올라간 뒤 켠다)
+    use_pir: bool = False                  # 우노 PIR을 재실에 쓸지 (USE_PIR=1). 11/12 PIR을 뺌: 조도만 쓰고 재실은 카메라로
     qr_camera: str | None = None           # QR 입실용 웹캠 (0, 1 또는 /dev/video0). 비우면 QR 끔
     qr_room_id: int = 1                    # QR 입실을 받는 방 번호
     room_camera: str | None = None         # 방 안 웹캠 (인원 세기·정리 확인). 비우면 끔
@@ -126,6 +127,7 @@ def load_config(env=None):
         device_token=env.get("DEVICE_TOKEN"),
         port=env.get("PORT") or find_port(),
         send_sensors=env.get("SEND_SENSORS") == "1",
+        use_pir=env.get("USE_PIR") == "1",
         qr_camera=env.get("QR_CAMERA") or None,
         qr_room_id=int(env["QR_ROOM_ID"]) if _is_number(env.get("QR_ROOM_ID", "")) else Config.qr_room_id,
         room_camera=env.get("ROOM_CAMERA") or None,
@@ -569,10 +571,19 @@ def occupancy_body(event, now=None):
     }
 
 
-def handle_occupancy(event, verifier, sensors=None):
-    """재실 센서 줄: core 형식으로 바꿔 화면에 찍고, sensors가 있으면 core로 보낼 줄에 넣는다. 우노에 돌려줄 답은 없다."""
+def handle_occupancy(event, verifier, sensors=None, use_pir=True):
+    """재실 센서 줄: core 형식으로 바꿔 화면에 찍고, sensors가 있으면 core로 보낼 줄에 넣는다. 우노에 돌려줄 답은 없다.
+
+    use_pir=False(기본 설정, USE_PIR=1이 아닐 때): PIR 값은 버리고 조도만 기억해 카메라 이벤트에 싣는다.
+    PIR 선을 뺀 핀은 공중에 떠서 아무렇게나 1로 읽힐 수 있어, 빈 방을 "있음"으로 보지 않게 아예 안 쓴다.
+    """
     if not valid_occupancy(event):
         print("형식이 맞지 않는 센서 줄, 건너뜀")
+        return None
+    if not use_pir:
+        LAST_LIGHT[event["roomId"]] = (event["light"], time.monotonic())
+        how = "카메라 이벤트에 합쳐 보냄" if camera_alive(event["roomId"]) else "카메라가 없어 재실은 안 보냄"
+        print(f"재실 {event['roomId']}번 방 조도: {event['light']} (PIR 안 씀, {how})")
         return None
     body = occupancy_body(event)
     state = "있음" if body["occupied"] else "없음"
@@ -634,7 +645,7 @@ HANDLERS = {
 }
 
 
-def handle_line(line, verifier, sensors=None):
+def handle_line(line, verifier, sensors=None, use_pir=True):
     """우노가 보낸 한 줄을 처리하고, 우노에 돌려줄 값(b"OK\\n" 등)을 반환한다. 돌려줄 게 없으면 None."""
     line = line.strip()
     if not line.startswith("{"):  # JSON이 아닌 줄(빈 줄 등)은 건너뛴다
@@ -649,7 +660,7 @@ def handle_line(line, verifier, sensors=None):
     handler = HANDLERS.get(sensor_type) if isinstance(sensor_type, str) else None
     if handler is None:
         return None
-    return handler(event, verifier, sensors)
+    return handler(event, verifier, sensors, use_pir=use_pir)
 
 
 # ---------- 실행 ----------
@@ -665,6 +676,7 @@ def main(config=None):
         raise SystemExit("원격 서버는 https://로만 연결해요 (장치 토큰이 실리므로). http://는 localhost 테스트에서만 써요.")
     print("연결:", config.port or "우노 없음 (카메라만)", "| 서버:", "DRY_RUN" if config.dry_run else config.server,
           "| 재실 전송:", "켬" if config.send_sensors and not config.dry_run else "끔",
+          "| PIR:", "씀" if config.use_pir else "안 씀 (조도만, USE_PIR=1로 켬)",
           "| QR 입실:", f"켬 (카메라 {config.qr_camera}, {config.qr_room_id}번 방)" if config.qr_camera else "끔",
           "| 인원 세기:", f"켬 (카메라 {config.room_camera}, {config.room_camera_room}번 방)" if config.room_camera else "끔",
           "| 환경 MQTT:", ("켬 (" + ", ".join(f"{loc} → {room}번 방" for loc, room in env_rooms(config)) + ")"
@@ -697,7 +709,7 @@ def main(config=None):
         time.sleep(1)
     while True:
         line = ser.readline().decode(errors="ignore")  # line = 우노가 보낸 한 줄 (글자로 변환, 깨진 글자는 무시)
-        reply = handle_line(line, verifier, sensors)
+        reply = handle_line(line, verifier, sensors, use_pir=config.use_pir)
         if reply:
             reply_to_uno(reply)
 

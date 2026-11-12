@@ -125,7 +125,8 @@ def test_confidence_is_about_this_photo():
              "checkedAt": "2026-11-12T13:00:00+09:00"}
     by = lambda body: {i["name"]: i["confidence"] for i in body["items"]}
     assert by(tidy_body({**check, "vlmYes": 0.98}, "camera-1", "e1")) == {"handbag": 0.98, "unknown": 0.98, "cup": 0.98}
-    assert by(tidy_body({**check, "vlmYes": 0.2}, "camera-1", "e1")) == {"handbag": 0.2, "unknown": 0.2, "cup": 0.2}
+    # VLM은 없다(20%)인데 YOLO가 컵 57%: 높은 값 (11/12 수연, 예약 #51 마우스 71%인데 24%로 보이던 것)
+    assert by(tidy_body({**check, "vlmYes": 0.2}, "camera-1", "e1")) == {"handbag": 0.2, "unknown": 0.2, "cup": 0.57}
     assert by(tidy_body(check, "camera-1", "e1")) == {"handbag": 0.5, "unknown": 0.5, "cup": 0.57}  # VLM 답 없음: YOLO 점수
 
 

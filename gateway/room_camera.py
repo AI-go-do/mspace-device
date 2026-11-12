@@ -1036,10 +1036,11 @@ def tidy_body(check, device_id, event_id=None, model=None):
     phase = FIRST(퇴실 직후, 알림만) | RECHECK(3시간 뒤, 그래도 남았으면 core가 경고).
     model = 지금 설정의 시험 점수 (model_score.find). 같은 설정으로 채점한 기록이 있을 때만 붙인다.
 
-    confidence = 이 사진 두 장에서 새 물건이 정말 있을 확률 (11/12 수연: 이름이 맞을 확률이 아니라 "물건이다"의 확률).
-      VLM이 답했으면 모든 물건에 VLM이 "새 물건 있음"이라 할 확률 (YOLO 점수는 이름이 맞을 확률이라 쓰지 않는다).
+    confidence = 이 물건이 정말 남아 있을 확률 (11/12 수연: 이름이 맞을 확률이 아니라 "물건이다"의 확률).
+      VLM이 답했으면 그 물건의 YOLO 점수와 VLM "새 물건 있음" 확률 중 높은 값 (11/12 수연: VLM은 없다 24%,
+      YOLO는 마우스 71%로 "남음"인데 24%로 보이던 것 고침). YOLO 점수가 없는 물건(책상 비교로만 찾음)은 VLM 확률.
       VLM 답이 없으면(VLM 꺼짐·시간 초과·젯슨 재시작으로 입실 전 사진 없음) YOLO 점수, 그것도 없으면 DESK_DIFF_CONF.
-      RECHECK도 VLM에게 다시 물어서, 경고(core, RECHECK + 0.8 이상)는 3시간 뒤 사진의 VLM 확률로 정해진다.
+      RECHECK도 VLM에게 다시 물어서, 경고(core, RECHECK + 0.8 이상)는 3시간 뒤의 YOLO·VLM 중 높은 값으로 정해진다.
     """
     found = {**check["leftItems"], **check["trash"]}
     conf = check.get("confidence", {})
@@ -1050,9 +1051,9 @@ def tidy_body(check, device_id, event_id=None, model=None):
         scores += [None] * (n - len(scores))
         for c in scores:
             rank = c if c is not None else yes if yes is not None else DESK_DIFF_CONF
-            c = yes if yes is not None else rank
+            c = rank if yes is None else yes if c is None else max(c, yes)
             items.append(({"name": label, "confidence": round(float(c), 3)}, float(rank)))
-    # 20개가 넘으면 확신이 큰 것부터 남긴다. VLM 확률은 모두 같아서 순서는 YOLO 점수로 정한다
+    # 20개가 넘으면 확신이 큰 것부터 남긴다. 같으면 YOLO 점수가 큰 것부터
     items = [item for item, _ in sorted(items, key=lambda pair: (-pair[0]["confidence"], -pair[1]))]
     body = {
         "eventId": event_id or str(uuid.uuid4()),

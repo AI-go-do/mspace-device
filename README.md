@@ -221,6 +221,7 @@ YOLO_MODEL=gateway/yolov8s.onnx DESK_PHOTO=1 DESK_AREA=0.25,0.22,0.64,0.83 ~/msp
 - 판정은 퇴실 모드와 같아요: `before`를 그 예약의 기준으로 보고 `after`에서 늘어난 것만 봐요
 - **심각한 오류**: 깨끗한데 치울 것·두고 감으로 봄(죄 없는 예약자 신고), 치울 것·두고 감이 있는데 깨끗함으로 봄(다음 팀이 더러운 방을 받음). 치울 것 ↔ 두고 감끼리 바뀐 건 틀림이지만 심각하진 않아요(어느 쪽이든 관리자가 봐요)
 - 채점하면 정확도·심각한 오류·시간, 틀린 문제와 그때 찾은 것을 보여 주고, 아래 **실험 기록** 표에 붙일 한 줄을 만들어 줘요. 매번 `eval/tidy/results.jsonl`에도 남아요
+- 결과는 core로도 올라가 관리자 화면(기록 > 정리 확인 > 오디 AI 상자 "모델 시험 정확도")에 보여요. `score`가 끝나면 숫자만(깨끗함/남음 정확도·세 가지 정확도·문제 수·심각 오류·사진당 시간 중간값·채점 시각) `POST /api/rooms/{ROOM_CAMERA_ROOM}/model-scores`로 보내고, 사진·문제 이름·설정은 안 보내요. 게이트웨이처럼 `.env`를 읽고(`(set -a; . ./.env; set +a; SERVER=https://… … tidy_eval.py score ~/AI-go-do)`, `push-last`도 같게) `SERVER`를 붙여 돌릴 때만 보내고, `SERVER`가 없거나 `DRY_RUN=1`이면 보낼 내용만 찍어요. 실패해도 채점 기록은 그대로고, `tidy_eval.py push-last ~/AI-go-do`로 마지막 결과를 다시 보낼 수 있어요(같은 eventId라 core는 한 번만 저장). `compare`는 후보마다 보내지 않고, `push-last`도 compare 후보 줄은 건너뛰어요
 - 설정을 맞추는 데 쓴 사진과 채점 사진은 나눠요. 같은 사진으로 맞추고 채점하면 점수가 실제보다 높게 나와요
 
 **여러 후보를 한 번에 비교 (`compare`)**: `eval/tidy/candidates.txt`에 후보를 한 줄에 하나씩 적고 돌리면, 후보마다 따로 띄워 채점해서 한 표로 보여 줘요.

@@ -376,3 +376,147 @@ def test_default_timeout_grows_with_the_number_of_pairs(tmp_path):
     (tmp_path / "answers.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
     assert te.default_timeout(str(tmp_path)) == 47 * 2 * te.GOAL_SECONDS + 600
     assert te.default_timeout(str(tmp_path / "없음")) == te.TIMEOUT_MIN_SEC
+
+
+# ---------- 점수를 core로 (모델 시험 정확도) ----------
+
+def scored_record(tmp_path):
+    result = te.score([te.Case("001", "CLEAN"), te.Case("002", "LEFT_ITEMS")],
+                      lambda c: ({"status": "LEFT_ITEMS"}, 1.5))
+    return te.save_result(str(tmp_path), result, "YOLO_MODEL=gateway/yolov8s.onnx DESK_PHOTO=1 VLM_RULE=or")
+
+
+def test_score_body_sends_numbers_only(tmp_path):
+    record = scored_record(tmp_path)
+    body = te.score_body(record)
+    assert set(body) == {"eventId", "kind", "model", "accuracy", "accuracy3", "cases", "serious", "medianSeconds",
+                         "measuredAt"}
+    assert body["kind"] == "TIDY" and body["model"] == "yolov8s"
+    assert body["accuracy"] == 0.5 and body["accuracy3"] == 0.5 and body["cases"] == 2 and body["serious"] == 1
+    assert body["medianSeconds"] == 1.5 and body["measuredAt"].endswith("+09:00")
+    saved = json.loads((tmp_path / "results.jsonl").read_text(encoding="utf-8"))
+    assert saved["eventId"] == body["eventId"]  # 다시 보내도 같은 eventId
+
+
+def test_model_name():
+    assert te.model_name("YOLO_MODEL=gateway/yolov8s.onnx DESK_PHOTO=1") == "yolov8s"
+    assert te.model_name("(설정 없음)") is None
+
+
+class FakeResponse:
+    def __init__(self, status):
+        self.status_code = status
+
+
+def test_push_score_dry_run_without_server(tmp_path):
+    record = scored_record(tmp_path)
+    lines, calls = [], []
+    assert te.push_score(record, {"DEVICE_TOKEN": "t"}, lines.append, post=lambda *a, **k: calls.append(1)) is None
+    assert te.push_score(record, {"SERVER": "https://x", "DRY_RUN": "1"}, lines.append,
+                         post=lambda *a, **k: calls.append(1)) is None
+    assert calls == [] and all(line.startswith("[DRY_RUN] POST /api/rooms/1/model-scores") for line in lines)
+    assert '"eventId"' in lines[0] and "Bearer" not in lines[0]
+
+
+def test_push_score_posts_with_device_token(tmp_path):
+    record = scored_record(tmp_path)
+    seen = {}
+
+    def post(url, json, headers, timeout, allow_redirects):
+        seen.update(url=url, body=json, headers=headers, redirects=allow_redirects)
+        return FakeResponse(200)
+
+    lines = []
+    env = {"SERVER": "https://dev.example", "DEVICE_TOKEN": "tok", "ROOM_CAMERA_ROOM": "3"}
+    assert te.push_score(record, env, lines.append, post=post) == 200
+    assert seen["url"] == "https://dev.example/api/rooms/3/model-scores"
+    assert seen["headers"] == {"Authorization": "Bearer tok"} and seen["redirects"] is False
+    assert seen["body"]["eventId"] == record["eventId"] and "tok" not in " ".join(lines)
+
+
+def test_push_score_failure_is_one_line_and_not_fatal(tmp_path):
+    record = scored_record(tmp_path)
+    env = {"SERVER": "https://dev.example", "DEVICE_TOKEN": "tok"}
+    lines = []
+    assert te.push_score(record, env, lines.append, post=lambda *a, **k: FakeResponse(404)) == 404
+    assert len(lines) == 1 and "core에 아직 API가 없음" in lines[0]
+
+    def boom(*a, **k):
+        raise OSError("down")
+
+    lines.clear()
+    assert te.push_score(record, env, lines.append, post=boom) is None
+    assert len(lines) == 1 and "OSError" in lines[0]
+
+
+def test_push_score_refuses_unsafe_server_or_missing_token(tmp_path):
+    record = scored_record(tmp_path)
+    lines, calls = [], []
+    post = lambda *a, **k: calls.append(1)  # noqa: E731
+    te.push_score(record, {"SERVER": "http://dev.example", "DEVICE_TOKEN": "tok"}, lines.append, post=post)
+    te.push_score(record, {"SERVER": "https://dev.example"}, lines.append, post=post)
+    assert calls == [] and "https" in lines[0] and "DEVICE_TOKEN" in lines[1]
+
+
+def test_last_record_and_push_last(tmp_path, monkeypatch):
+    with pytest.raises(SystemExit):
+        te.last_record(str(tmp_path))
+    first = scored_record(tmp_path)
+    second = scored_record(tmp_path)
+    assert te.last_record(str(tmp_path))["eventId"] == second["eventId"] != first["eventId"]
+    sent = []
+    monkeypatch.setattr(te, "push_score", lambda record, env: sent.append(record["eventId"]))
+    te.main(["push-last", str(tmp_path)], {})
+    assert sent == [second["eventId"]]
+
+
+def test_last_record_gives_old_line_a_stable_event_id(tmp_path):
+    old = {"at": "2026-11-11T21:00:00+09:00", "candidate": "YOLO_MODEL=a.onnx", "leftAccuracy": 0.766,
+           "accuracy": 0.574, "cases": 47, "serious": 2, "medianSeconds": 3.0}
+    (tmp_path / "results.jsonl").write_text(json.dumps(old) + "\n", encoding="utf-8")
+    a, b = te.last_record(str(tmp_path)), te.last_record(str(tmp_path))
+    assert a["eventId"] == b["eventId"] and te.score_body(a)["accuracy"] == 0.766
+
+
+def test_run_score_pushes_only_when_not_compare(tmp_path, monkeypatch):
+    import cv2
+    import room_camera
+    (tmp_path / "001").mkdir()
+    cv2.imwrite(str(tmp_path / "001" / "before.jpg"), frame(0))
+    cv2.imwrite(str(tmp_path / "001" / "after.jpg"), frame(0))
+    te.append_answer(str(tmp_path), te.Case("001", "CLEAN"))
+
+    class Fake:
+        finds_objects = True
+
+        def detect(self, f):
+            return []
+
+    monkeypatch.setattr(room_camera, "make_detector", lambda model, area, floor=None: Fake())
+    pushed = []
+    monkeypatch.setattr(te, "push_score", lambda record, env, out: pushed.append(record["eventId"]))
+    te.run_score(str(tmp_path), {"YOLO_MODEL": "m.onnx"}, out=lambda s: None)
+    te.run_score(str(tmp_path), {"YOLO_MODEL": "m.onnx"}, out=lambda s: None, as_json=True)
+    assert len(pushed) == 1
+
+
+def test_push_last_skips_compare_rows_and_old_accuracy(tmp_path):
+    scored = scored_record(tmp_path)
+    result = te.score([te.Case("001", "CLEAN")], lambda c: ({"status": "CLEAN"}, 1.0))
+    te.save_result(str(tmp_path), result, "후보", compare=True)
+    assert te.last_record(str(tmp_path))["eventId"] == scored["eventId"]
+    old = {"eventId": "x", "at": "t", "candidate": "", "accuracy": 0.5, "cases": 2, "serious": 0, "medianSeconds": 1}
+    assert te.score_body(old)["accuracy"] == 0.5  # leftAccuracy가 없던 옛 줄
+
+
+def test_http_post_loopback_ignores_all_proxy(monkeypatch):
+    from requests.utils import select_proxy
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("ALL_PROXY", "http://proxy.invalid:8080")
+    url = "http://127.0.0.1:8080/api/rooms/1/model-scores"
+    session = te.http_post(True).__self__
+    settings = session.merge_environment_settings(url, {}, False, True, None)
+    assert select_proxy(url, settings["proxies"]) is None  # 내 컴퓨터로 보낼 때는 ALL_PROXY도 안 거친다
+    import requests
+    assert te.http_post(False) is requests.post  # 원격은 원래 설정 그대로

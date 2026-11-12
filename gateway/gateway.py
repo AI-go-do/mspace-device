@@ -909,10 +909,11 @@ def start_room_camera(config, sensors):
         import model_score
         score = model_score.find(config, load_config, config.tidy_results,
                                  vlm_model=vlm.model if vlm is not None else None)
-        watcher.presence = score.pop("presence", None) if score else None  # 표는 core에 안 보내고 확신도에만 쓴다
+        if score:
+            score.pop("presence", None)  # 채점 표는 core에 안 보낸다. 확신도는 사진마다 (tidy_body)
         watcher.model_score = score
         print(model_score.describe(score))
-        print(model_score.describe_presence(watcher.presence))
+        print("물건마다 확신도: 이 사진에서 YOLO 점수, 책상 비교로만 찾은 건 VLM이 \"있음\"이라 할 확률 (둘 다 없으면 50%)")
         tidy = SensorSender(config.server, config.device_token, path=f"/api/rooms/{room}/tidy-checks",
                             drop=TIDY_DROP, name="정리 확인 전송", say_ok=True).start()
         send_check = tidy.push

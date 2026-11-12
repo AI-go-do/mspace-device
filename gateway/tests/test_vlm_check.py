@@ -1,3 +1,4 @@
+import math
 import json
 
 import numpy as np
@@ -54,7 +55,8 @@ def test_ask_sends_two_photos_and_caches_answer(tmp_path):
     images = [p for p in calls[0]["messages"][0]["content"] if p["type"] == "image_url"]
     assert len(images) == 2 and calls[0]["temperature"] == 0
     saved = json.loads(cache.read_text())
-    assert list(saved.values()) == [{"text": "YES", "seconds": 7.5}]  # 사진은 적지 않는다
+    assert list(saved.values()) == [{"text": "YES", "seconds": 7.5, "yes": None}]  # 사진은 적지 않는다
+    assert calls[0]["logprobs"] is True  # 첫 단어 후보 확률도 받는다 (이 사진의 "있음" 확률)
 
     again = vc.VlmCheck("http://x", cache=str(cache), send=fake_send("NO", calls))
     assert again.ask(frame(0), frame(9)) == (True, 7.5, True)  # 같은 사진이면 다시 묻지 않음
@@ -266,6 +268,21 @@ def test_vlm_requests_ignore_proxy_settings(monkeypatch):
     monkeypatch.setenv("no_proxy", "")
     import importlib
     importlib.reload(vc)  # 프록시 설정이 있는 젯슨에서 게이트웨이를 켠 것처럼
-    assert vc.post(f"http://127.0.0.1:{server.server_port}", {}, timeout=5) == "NO"  # 사진은 젯슨 안에서 바로 간다
+    assert vc.post(f"http://127.0.0.1:{server.server_port}", {}, timeout=5) == ("NO", None)  # 사진은 젯슨 안에서 바로 간다
     assert seen == ["/v1/chat/completions"]
     server.server_close()
+
+
+def test_yes_probability_from_first_token():
+    choice = {"logprobs": {"content": [{"token": "YES", "logprob": -0.05, "top_logprobs": [
+        {"token": "YES", "logprob": math.log(0.9)}, {"token": "NO", "logprob": math.log(0.1)},
+        {"token": "Maybe", "logprob": -9}]}]}}
+    assert vc.yes_probability(choice) == 0.9
+    assert vc.yes_probability({"message": {"content": "YES"}}) is None  # 옛 서버: 후보 없음
+    only = {"logprobs": {"content": [{"token": "YES", "logprob": math.log(0.6)}]}}  # top_logprobs 없이 고른 토큰만
+    assert vc.yes_probability(only) is None  # 반대쪽 몫을 모르면 0.6을 1.0으로 부풀리지 않는다
+
+
+def test_ask_jpeg_returns_yes_probability(tmp_path):
+    vlm = vc.VlmCheck("http://x", send=lambda url, body: ("YES", 0.97), clock=iter([0.0, 2.0]).__next__)
+    assert vlm.ask_jpeg(b"a", b"b") == (True, 2.0, 0.97)

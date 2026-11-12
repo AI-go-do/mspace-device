@@ -473,6 +473,14 @@ def test_pir_just_before_the_camera_is_a_normal_entry():
     assert r.w.entry is not None
 
 
+def test_pir_just_before_the_camera_is_a_normal_entry_with_person_wait(monkeypatch):
+    """ENTRY_PERSON_SEC(10초)를 기다려도 PIR이 먼저 켜진 시간은 처음 사람이 보인 때까지로 잰다 (CodeRabbit #79)."""
+    monkeypatch.setattr(room_camera, "ENTRY_PERSON_SEC", 10)
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([], 5).run([], 2, pir=True).run([person()], 12, pir=True)
+    assert r.w.entry is not None
+
+
 def test_candidate_is_retaken_when_room_is_empty_again_after_pir():
     """PIR만 켜졌다 꺼지고 다시 3초 비면 후보를 바로 새로 찍는다 (그 사이 둔 컵이 기준에 들어감)."""
     r = Room(RoomWatcher(1, on_checkout=True))

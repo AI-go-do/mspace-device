@@ -54,6 +54,46 @@ def same_vlm(record, vlm_model):
     return OLD_VLM_FILES.get(name) == os.path.basename(vlm_model)
 
 
+MIN_CASES = 5      # 이보다 적은 경우는 믿기 어려워서
+LOW = 0.5          # 이 값보다 높게 주지 않는다 (core 경고 기준 0.8보다 낮게: 알림만, 잘못 경고하지 않게)
+
+
+def presence_table(rows):
+    """채점 줄의 evidence(문제마다 무엇이 찾았나·정답) → {열쇠: 물건이 있을 확률}. 없으면 None.
+
+    열쇠는 room_camera.check_key와 같다 ("yolo+desk+vlm", 3시간 뒤는 "recheck").
+    값 = 그 경우에 기기가 "남음"이라 했을 때 실제로 물건이 남아 있던 비율 (이름은 안 본다).
+    문제가 MIN_CASES개보다 적은 경우는 LOW를 넘지 않게 낮춘다.
+    """
+    if not isinstance(rows, list) or not rows:
+        return None
+    counts = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        left = bool(row.get("left"))
+        keys = []
+        if row.get("found") and isinstance(row.get("key"), str):
+            keys.append(row["key"])
+        if row.get("count"):
+            keys.append("recheck")
+        for key in keys:
+            hit, n = counts.get(key, (0, 0))
+            counts[key] = (hit + left, n + 1)
+    table = {}
+    for key, (hit, n) in counts.items():
+        rate = hit / n
+        table[key] = round(rate if n >= MIN_CASES else min(rate, LOW), 3)
+    return table or None
+
+
+def describe_presence(table):
+    if not table:
+        return "물건이 있을 확률: 채점 기록에 경우별 결과가 없어서 예전처럼 이름별 점수를 보내요 (tidy_eval score를 한 번 더 돌리면 생겨요)"
+    parts = ", ".join(f"{k} {v:.0%}" for k, v in sorted(table.items(), key=lambda kv: -kv[1]))
+    return f"물건이 있을 확률 (채점에서 실제로 남아 있던 비율): {parts} · 표에 없는 경우는 {LOW:.0%}"
+
+
 def find(config, load_config, path=DEFAULT_FILE, vlm_model=None):
     """config와 같은 설정으로 채점한 가장 최근 점수. 없으면 None.
 
@@ -80,6 +120,7 @@ def find(config, load_config, path=DEFAULT_FILE, vlm_model=None):
                              "measuredAt": record.get("at")}
                     secs = score["secondsPerPhoto"]
                     if 0 <= score["accuracy"] <= 1 and score["cases"] > 0 and math.isfinite(secs) and secs >= 0:
+                        score["presence"] = presence_table(record.get("evidence"))  # core에는 안 보냄 (gateway가 뺌)
                         found = score  # 아래 줄일수록 최근. 숫자가 이상한 줄(NaN·음수 포함)은 건너뛴다
                 except (ValueError, TypeError, AttributeError, KeyError, OverflowError):
                     continue

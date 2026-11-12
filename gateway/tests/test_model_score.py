@@ -37,7 +37,7 @@ def test_finds_latest_score_of_the_same_setup(tmp_path):
                  record(WINNER, 0.99, "2026-11-12T11:30:00+09:00", vlm_model="other-vlm.gguf"))  # 다른 VLM 모델
     score = find(GATEWAY_ENV, path)
     assert score == {"setup": WINNER, "accuracy": 0.8723, "cases": 47, "secondsPerPhoto": 33.46,
-                     "measuredAt": "2026-11-12T10:16:00+09:00"}
+                     "measuredAt": "2026-11-12T10:16:00+09:00", "presence": None}  # 옛 줄엔 경우별 결과가 없음
     assert "87.2%" in model_score.describe(score)
 
 
@@ -94,3 +94,49 @@ def test_score_rides_with_the_tidy_check_only_when_known():
     assert "model" not in tidy_body(check, "camera-1", "e1")
     score = {"setup": WINNER, "accuracy": 0.8723, "cases": 47, "secondsPerPhoto": 33.46, "measuredAt": "x"}
     assert tidy_body(check, "camera-1", "e1", model=score)["model"] == score
+
+
+def rows(key, left, wrong, count=False):
+    return ([{"left": True, "found": True, "key": key, "count": count}] * left
+            + [{"left": False, "found": True, "key": key, "count": count}] * wrong)
+
+
+def test_presence_table_is_the_rate_things_were_really_left():
+    table = model_score.presence_table(
+        rows("yolo+desk+vlm", 9, 1, count=True) + rows("vlm", 3, 0)  # VLM만: 3번 다 맞았지만 문제가 적다
+        + rows("yolo+vlm-no", 4, 2, count=True) + [{"left": False, "found": False, "key": "none", "count": False}])
+    assert table == {"yolo+desk+vlm": 0.9, "vlm": model_score.LOW, "yolo+vlm-no": 0.667, "recheck": 0.812}
+    assert model_score.presence_table(None) is None and model_score.presence_table([]) is None
+    assert model_score.presence_table(["bad", {"found": True}]) is None
+    assert "yolo+desk+vlm 90%" in model_score.describe_presence(table)
+    assert "예전처럼" in model_score.describe_presence(None)
+
+
+def test_find_keeps_the_presence_table_of_that_record(tmp_path):
+    path = write(tmp_path, {**record(WINNER, 0.8723, "2026-11-12T15:00:00+09:00"),
+                            "evidence": rows("yolo+desk+vlm", 9, 1, count=True)})
+    assert find(GATEWAY_ENV, path)["presence"] == {"yolo+desk+vlm": 0.9, "recheck": 0.9}
+
+
+def test_presence_replaces_name_scores_with_the_chance_something_is_there():
+    check = {"reservationId": 37, "phase": "FIRST", "leftItems": {}, "trash": {"cup": 1, "bottle": 1},
+             "confidence": {"cup": [0.57], "bottle": [0.39]}, "evidence": {"yolo": True, "desk": True}, "vlm": True,
+             "checkedAt": "2026-11-12T13:00:00+09:00"}
+    table = {"yolo+desk+vlm": 0.9, "recheck": 0.85}
+    body = tidy_body(check, "camera-1", "e1", presence=table)
+    assert [i["confidence"] for i in body["items"]] == [0.9, 0.9] and {i["name"] for i in body["items"]} == {"cup", "bottle"}
+    assert [i["confidence"] for i in tidy_body(check, "camera-1", "e1")["items"]] == [0.57, 0.39]  # 표가 없으면 예전대로
+    unseen = {**check, "vlm": None}  # VLM이 못 알아들은 경우는 표에 없음 → 알림만
+    assert {i["confidence"] for i in tidy_body(unseen, "camera-1", "e1", presence=table)["items"]} == {0.5}
+    recheck = {**check, "phase": "RECHECK", "evidence": {"yolo": True, "desk": False}}
+    recheck.pop("vlm")
+    assert {i["confidence"] for i in tidy_body(recheck, "camera-1", "e1", presence=table)["items"]} == {0.85}
+
+
+def test_evidence_keys():
+    from room_camera import evidence_key
+    assert evidence_key({"yolo": True, "desk": False}) == "yolo"
+    assert evidence_key({"yolo": False, "desk": True}, vlm=False) == "desk+vlm-no"
+    assert evidence_key({}, vlm=True) == "vlm"
+    assert evidence_key({"yolo": True}, vlm=None) == "yolo+vlm-?"
+    assert evidence_key({"yolo": True}, phase="RECHECK") == "recheck"

@@ -879,9 +879,12 @@ def start_room_camera(config, sensors):
     send_check = send_photo = None
     if on_checkout:
         import model_score
-        watcher.model_score = model_score.find(config, load_config, config.tidy_results,
-                                               vlm_model=vlm.model if vlm is not None else None)
-        print(model_score.describe(watcher.model_score))
+        score = model_score.find(config, load_config, config.tidy_results,
+                                 vlm_model=vlm.model if vlm is not None else None)
+        watcher.presence = score.pop("presence", None) if score else None  # 표는 core에 안 보내고 확신도에만 쓴다
+        watcher.model_score = score
+        print(model_score.describe(score))
+        print(model_score.describe_presence(watcher.presence))
         tidy = SensorSender(config.server, config.device_token, path=f"/api/rooms/{room}/tidy-checks",
                             drop=TIDY_DROP, name="정리 확인 전송", say_ok=True).start()
         send_check = tidy.push

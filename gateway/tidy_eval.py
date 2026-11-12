@@ -131,6 +131,8 @@ def judge(before, after, find, room_items=None, desk=None, labeler=None, clock=t
     seconds = clock() - started
     if check is None:
         raise RuntimeError("정리 확인 결과가 비어 있어요 (RoomWatcher.check)")
+    # 3시간 뒤 다시 확인(RECHECK)처럼 YOLO 개수만 봤으면 남음이었나 (물건이 있을 확률 표의 "recheck" 칸)
+    check["evidence"]["count"] = watcher.check(found, "", base=base)["status"] != "CLEAN"
     if vlm is not None:  # VLM_URL (10판): 입실·퇴실 사진을 VLM에게 한 번 더 보여 준다
         new_item, vlm_seconds, _ = vlm.ask(before, after)
         check["yoloStatus"] = check["status"]
@@ -138,6 +140,14 @@ def judge(before, after, find, room_items=None, desk=None, labeler=None, clock=t
         seconds += vlm_seconds  # 캐시에서 꺼냈어도 처음 물었을 때 걸린 시간을 더한다
     check["people"] = watcher.people(found)
     return check, seconds
+
+
+def evidence_row(answer, check):
+    """문제 하나에서 무엇이 찾았나와 정답 (물건이 있을 확률 표를 만드는 재료). 이름·사진은 안 남긴다."""
+    import room_camera
+    evidence = check.get("evidence") or {}
+    return {"left": answer != "CLEAN", "found": check["status"] != "CLEAN",
+            "key": room_camera.check_key({**check, "phase": "FIRST"}), "count": bool(evidence.get("count"))}
 
 
 def score(cases, run_case):
@@ -150,7 +160,8 @@ def score(cases, run_case):
                      "ok": got == case.answer, "leftOk": left_ok(case.answer, got), "serious": is_serious(case.answer, got),
                      "trash": check.get("trash", {}), "leftItems": check.get("leftItems", {}),
                      "people": check.get("people", 0), "memo": case.memo,
-                     "yolo": check.get("yoloStatus"), "vlm": check.get("vlm")})
+                     "yolo": check.get("yoloStatus"), "vlm": check.get("vlm"),
+                     "evidence": evidence_row(case.answer, check)})
     n = len(rows)
     right = sum(r["ok"] for r in rows)
     left_right = sum(r["leftOk"] for r in rows)
@@ -204,7 +215,8 @@ def report(result, candidate, out=print):
 def save_result(folder, result, candidate):
     record = {"at": datetime.now(KST).isoformat(timespec="seconds"), "candidate": candidate,
               **{k: v for k, v in result.items() if k != "rows"},
-              "wrong": [r["case"] for r in result["rows"] if not r["ok"]]}
+              "wrong": [r["case"] for r in result["rows"] if not r["ok"]],
+              "evidence": [r["evidence"] for r in result["rows"] if r.get("evidence")]}
     os.makedirs(folder, exist_ok=True)
     with open(os.path.join(folder, "results.jsonl"), "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")

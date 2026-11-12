@@ -34,8 +34,9 @@ ANSWERS = ("CLEAN", "NEEDS_CLEANING", "LEFT_ITEMS")
 KOREAN = {"CLEAN": "깨끗함", "NEEDS_CLEANING": "치울 것", "LEFT_ITEMS": "두고 간 물건"}
 CHOICES = {"1": "CLEAN", "2": "NEEDS_CLEANING", "3": "LEFT_ITEMS"}
 GOAL_ACCURACY = 0.95
-GOAL_SECONDS = 10.0  # 정리 확인은 퇴실 뒤 한 번만 봐서 10초면 충분 (11/11 수연). 시연 땐 정확도가 비슷하면 빠른 쪽
+GOAL_SECONDS = 120.0  # 정리 확인은 퇴실 뒤 한 번만 봐서 2분까지 괜찮음. 시간보다 정확도 우선 (11/11 수연, 10초 → 2분)
 DEFAULT_DIR = "eval/tidy"
+TIMEOUT_MIN_SEC = 1800.0  # 후보 하나 채점 제한의 최소 (30분). 기본은 문제 수에 맞춰 늘린다 (default_timeout)
 RESULT_MARK = "TIDY_RESULT "
 # 모델 파일 이름 → 라이선스 (포트폴리오·배포 때 확인용). 모르는 모델은 "확인 필요"
 LICENSES = (("world", "AGPL-3.0 (Ultralytics)"), ("yolov8", "AGPL-3.0 (Ultralytics)"),
@@ -301,20 +302,27 @@ def license_of(env):
     return ", ".join(names) or "확인 필요"
 
 
+def default_timeout(folder):
+    """후보 하나 채점 제한 기본값 (초). 문제마다 입실 전·퇴실 뒤 두 장을 사진당 목표 시간까지 봐도 끝나게 + 10분 여유."""
+    cases, _ = read_answers(folder)
+    return max(TIMEOUT_MIN_SEC, len(cases) * 2 * GOAL_SECONDS + 600)
+
+
 def run_one(folder, candidate, base_env, run=None):
     """후보 하나를 따로 띄운 프로그램에서 채점한다 (모델 올리기 시간·메모리를 후보마다 깨끗하게 재려고).
 
-    TIDY_TIMEOUT(초, 기본 1800)이 지나도 안 끝나면 그 후보는 실패로 두고 다음 후보로 넘어간다.
+    TIDY_TIMEOUT(초, 기본은 default_timeout: 47쌍이면 약 3시간 18분)이 지나도 안 끝나면 그 후보는 실패로 두고 다음으로.
     """
     import subprocess
     run = run or subprocess.run
     env = {**base_env, **candidate.env}
+    fallback = default_timeout(folder)
     try:
-        timeout = float(env.get("TIDY_TIMEOUT") or 1800)
+        timeout = float(env.get("TIDY_TIMEOUT") or fallback)
     except ValueError:
-        timeout = 1800.0
+        timeout = fallback
     if not math.isfinite(timeout) or timeout <= 0:  # 0 이하·NaN·inf면 기본값
-        timeout = 1800.0
+        timeout = fallback
     try:
         done = run([sys.executable, os.path.abspath(__file__), "score", folder, "--json"],
                    env=env, capture_output=True, text=True, check=False, timeout=timeout)

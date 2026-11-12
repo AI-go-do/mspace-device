@@ -140,3 +140,18 @@ def test_evidence_keys():
     assert evidence_key({}, vlm=True) == "vlm"
     assert evidence_key({"yolo": True}, vlm=None) == "yolo+vlm-?"
     assert evidence_key({"yolo": True}, phase="RECHECK") == "recheck"
+def test_null_vlm_model_is_not_an_old_record(tmp_path):
+    """vlmModel 칸이 null이면 VLM 없이 채점한 줄이라, VLM_NAME=qwen이 붙어 있어도 VLM 켠 게이트웨이에 안 붙인다."""
+    path = write(tmp_path, record(WINNER, 0.9, "2026-11-12T12:00:00+09:00", vlm_model=None))
+    assert find(GATEWAY_ENV, path) is None
+
+
+def test_vlm_url_only_records_count_as_vlm_on(tmp_path):
+    """VLM_URL만 주고 채점해도 VLM 켠 설정으로 저장·조회된다."""
+    import tidy_eval
+    env = {k: v for k, v in (p.split("=", 1) for p in WINNER.split()) if k not in ("VLM_NAME", "VLM_RULE")}
+    candidate = tidy_eval.candidate_name({**env, "VLM_URL": "http://127.0.0.1:8091"})
+    assert "VLM_RULE=or" in candidate and "VLM_URL" not in candidate
+    path = write(tmp_path, record(candidate, 0.9, "2026-11-12T12:00:00+09:00"))
+    assert find(GATEWAY_ENV, path)["accuracy"] == 0.9
+    assert find({k: v for k, v in GATEWAY_ENV.items() if k != "VLM_URL"}, path, vlm_model=None) is None

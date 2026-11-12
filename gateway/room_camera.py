@@ -507,7 +507,7 @@ class RoomWatcher:
         n = sum(snap["objects"].values())
         shot = ""
         if self.photos:  # 입실 전 사진을 찍었는지 같이 알린다 (11/12 수연)
-            shot = f" · 입실 전 사진 찍음 ({kb(jpg)})" if jpg else " · 입실 전 사진 못 찍음 (사람이 보였음)"
+            shot = f" · 입실 전 사진 찍음 ({kb(jpg)})" if jpg else " · 입실 전 사진 없음 (사람이 보였거나 사진을 못 만듦)"
         print(f"예약 기준 저장 {self.room_id}번 방: 입실 직전 빈 방 물건 {n}개"
               f"{' (' + describe(snap['objects']) + ')' if n else ''}{shot}")
 
@@ -876,10 +876,8 @@ def kb(jpg):
 def photo_message(check, photos):
     """정리 확인 때 어떤 사진을 찍었고 무엇이 없는지 한 줄로 (11/12 수연 "사진 찍은 것도 로그로")."""
     want = ("ENTRY", "FIRST") if check.get("phase") == "FIRST" else (check.get("phase"),)
-    why = {"ENTRY": "입실 직전에 사람이 보였음", "FIRST": "사람이 보여서 안 찍음",
-           "RECHECK": "사람이 보여서 안 찍음"}
     parts = [f"{PHOTO_NAMES.get(k, k)} 찍음 ({kb(photos[k])})" if photos.get(k)
-             else f"{PHOTO_NAMES.get(k, k)} 없음 ({why.get(k, '')})" for k in want]
+             else f"{PHOTO_NAMES.get(k, k)} 없음 (사람이 보였거나 사진을 못 만듦)" for k in want]
     return f"정리 확인 사진 {check['roomId']}번 방 예약 {check['reservationId']}: " + ", ".join(parts)
 
 

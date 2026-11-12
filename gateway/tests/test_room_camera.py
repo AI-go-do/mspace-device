@@ -1307,7 +1307,7 @@ def test_photo_logs_say_what_was_taken(capsys):
     msg = room_camera.photo_message(r.out[0], r.out[0]["photos"])
     assert msg.startswith("정리 확인 사진 1번 방 예약 1: 입실 전 찍음 (") and "퇴실 뒤 찍음 (" in msg
     assert room_camera.photo_message({"roomId": 1, "reservationId": 2, "phase": "FIRST"}, {"ENTRY": b"x"}) == \
-        "정리 확인 사진 1번 방 예약 2: 입실 전 찍음 (1KB), 퇴실 뒤 없음 (사람이 보여서 안 찍음)"
+        "정리 확인 사진 1번 방 예약 2: 입실 전 찍음 (1KB), 퇴실 뒤 없음 (사람이 보였거나 사진을 못 만듦)"
     assert "3시간 뒤 없음" in room_camera.photo_message({"roomId": 1, "reservationId": 2, "phase": "RECHECK"}, {})
 
 

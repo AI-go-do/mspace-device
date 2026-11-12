@@ -128,12 +128,15 @@ def split_moved(base, now, boxes, same=MOVE_SAME, size=MOVE_SIZE, content=MOVE_C
 
 
 def find_changes(base, now, thresh=DIFF_THRESH, min_area=MIN_AREA, max_area=MAX_AREA, light="mean",
-                 move=False, moved=None, move_same=MOVE_SAME):
+                 move=False, moved=None, move_same=MOVE_SAME, keep_small=0.0, partial=None):
     """두 책상 사진(prepare 결과)에서 달라진 곳 상자 (x, y, w, h) 목록. 조명이 통째로 바뀌었으면 None.
 
     light="mean": 사진 전체 밝기만 맞춘다 (원래 방식). "local": 자리마다 밝기를 고르게 한 뒤 비교한다.
     "ssim": 밝기 차이 대신 자리마다 모양(무늬)이 달라졌는지 본다 (빛·그림자에 가장 덜 예민, 조금 느림).
     move=True: 원래 있던 걸 옮기거나 뒤집은 자리는 빼고, 뺀 자리는 moved 목록에 넣는다 (DESK_MOVE=1).
+    keep_small>0: 달라진 곳이 max_area를 넘어도 비교를 포기하지 않고, 사진 넓이의 keep_small보다 작은 곳만 남긴다
+        (DESK_KEEP_SMALL. 화면 전체 비교에서 카메라 밝기가 조금 바뀌어도 물건 자리는 계속 본다).
+        이때 partial 목록에 True를 넣는다 (일부만 본 비교라 기준 사진을 바꾸면 안 됨).
     """
     import cv2
     import numpy as np
@@ -149,11 +152,18 @@ def find_changes(base, now, thresh=DIFF_THRESH, min_area=MIN_AREA, max_area=MAX_
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))       # 점 잡음 지우기
     mask = cv2.dilate(mask, np.ones((9, 9), np.uint8), iterations=2)                # 한 물건 조각 잇기
     total = base.shape[0] * base.shape[1]
-    if cv2.countNonZero(mask) > max_area * total:
+    too_much = cv2.countNonZero(mask) > max_area * total
+    if too_much and not keep_small:
         return None
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     boxes = join_near([tuple(int(v) for v in cv2.boundingRect(c)) for c in contours])
     boxes = [b for b in boxes if b[2] * b[3] >= min_area * total]
+    if too_much:  # 큰 변화(조명·그림자)는 빼고 물건 크기만 남긴다.
+        # 잇기 전에 큰 덩어리를 빼면 그림자 가장자리 조각이 따로 남아 물건으로 잘못 잡힌다.
+        # 그래서 그림자에 붙은 물건은 같이 빠질 수 있다 (오알람보다 놓침을 택함)
+        boxes = [b for b in boxes if b[2] * b[3] <= keep_small * total]
+        if partial is not None:
+            partial.append(True)
     if move:
         boxes, out = split_moved(base, now, boxes, same=move_same)
         if moved is not None:
@@ -198,15 +208,18 @@ class DeskCompare:
     """깨끗한 책상 사진 한 장을 들고 있다가 퇴실 뒤 책상과 비교한다."""
 
     def __init__(self, area, path=None, thresh=DIFF_THRESH, min_area=MIN_AREA, light="mean", move=False,
-                 move_same=MOVE_SAME):
+                 move_same=MOVE_SAME, keep_small=0.0, furniture_small=0.0):
         self.area = area
-        # DESK_THRESH·DESK_MIN_AREA·DESK_LIGHT·DESK_MOVE·DESK_MOVE_SAME
-        self.tune = {"thresh": thresh, "min_area": min_area, "light": light, "move": move, "move_same": move_same}
+        # DESK_THRESH·DESK_MIN_AREA·DESK_LIGHT·DESK_MOVE·DESK_MOVE_SAME·DESK_KEEP_SMALL
+        self.tune = {"thresh": thresh, "min_area": min_area, "light": light, "move": move, "move_same": move_same,
+                     "keep_small": keep_small}
+        self.furniture_small = furniture_small  # DESK_FURNITURE_SMALL: room_camera.desk_items가 쓴다
         self.path = path              # 껐다 켜도 남게 저장할 파일 (.png). None이면 메모리에만
         self.base = None              # 깨끗한 책상 (prepare 결과)
         self.known = []               # 기준 때 모델이 찾은 물건 자리 (리모컨을 옮기면 빈 자리도 "달라짐"이라 뺀다)
         self.known_labels = []        # known과 같은 순서의 이름 (DESK_MOVE용). 파일에도 같이 적는다
         self.moved = []               # 마지막 비교에서 "옮긴 것"으로 뺀 자리 (원래 화면 좌표, DESK_MOVE용)
+        self.partial = False          # 마지막 비교가 큰 변화를 빼고 일부만 본 것인가 (DESK_KEEP_SMALL). 그러면 기준 사진을 안 바꾼다
         self.load()
 
     @property
@@ -281,15 +294,19 @@ class DeskCompare:
         if self.base is None:
             return None
         now, offset = prepare(frame, self.area)
-        moved = []
-        found = find_changes(self.base, now, moved=moved, **self.tune)
+        moved, partial = [], []
+        found = find_changes(self.base, now, moved=moved, partial=partial, **self.tune)
         self.moved = [to_frame(b, offset) for b in moved]
+        self.partial = bool(partial)
         if found is None:
             return None
         return [to_frame(b, offset) for b in found]
 
 
 def settings(config):
-    """게이트웨이 설정(DESK_THRESH, DESK_MIN_AREA, DESK_LIGHT, DESK_MOVE, DESK_MOVE_SAME) → DeskCompare에 넘길 값."""
+    """게이트웨이 설정(DESK_THRESH, DESK_MIN_AREA, DESK_LIGHT, DESK_MOVE, DESK_MOVE_SAME, DESK_KEEP_SMALL,
+    DESK_FURNITURE_SMALL) → DeskCompare에 넘길 값."""
     return {"thresh": config.desk_thresh, "min_area": config.desk_min_area, "light": config.desk_light,
-            "move": config.desk_move, "move_same": config.desk_move_same}
+            "move": config.desk_move, "move_same": config.desk_move_same,
+            "keep_small": getattr(config, "desk_keep_small", 0.0),
+            "furniture_small": getattr(config, "desk_furniture_small", 0.0)}

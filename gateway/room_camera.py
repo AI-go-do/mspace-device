@@ -255,6 +255,19 @@ def similar_size(a, b, ratio=2.5):
     return small > 0 and big <= ratio * small
 
 
+def small_on_furniture(box, label, dets, ratio):
+    """달라진 곳이 그 이름의 가구 상자(지금 사진에서 찾은 것)보다 훨씬 작은가 (ratio배 미만).
+
+    의자를 옮기면 의자만큼(또는 더 크게) 달라진다. 그보다 훨씬 작으면 의자 위·옆에 둔 물건으로 본다.
+    ratio가 0이거나 겹치는 가구를 못 찾으면 False(예전처럼 가구로 보고 뺀다).
+    """
+    if not ratio:
+        return False
+    area = box[2] * box[3]
+    sizes = [d.box[2] * d.box[3] for d in dets if d.label == label and overlaps(box, d.box)]
+    return bool(sizes) and area < ratio * max(sizes)
+
+
 def overlaps(a, b, ratio=0.3):
     """두 상자가 작은 쪽 넓이의 ratio 넘게 겹치는지."""
     return inside(a, b, ratio)
@@ -953,7 +966,9 @@ class RoomWatcher:
                 continue  # 이미 개수로 센 물건이거나, 원래 있던 물건(리모컨)을 옮겨서 생긴 빈자리
             label = (self.labeler(frame, box) if self.labeler else None) or UNKNOWN
             if label in FURNITURE:
-                continue  # 의자를 빼 두거나 넣은 자리 (가구는 정리 대상이 아님)
+                if not small_on_furniture(box, label, dets, getattr(desk, "furniture_small", 0.0)):
+                    continue  # 의자를 빼 두거나 넣은 자리 (가구는 정리 대상이 아님)
+                label = UNKNOWN  # 의자보다 훨씬 작은 곳: 의자 위·옆에 둔 물건 (DESK_FURNITURE_SMALL, 11/12 035 가방)
             items[label] = items.get(label, 0) + 1
         return items
 
@@ -996,7 +1011,8 @@ class RoomWatcher:
             extra = found or {}
             if not compared:
                 print(f"정리 확인 {self.room_id}번 방: 책상 사진 비교를 건너뜀 (조명·카메라가 크게 바뀜)")
-        if compared and desk.tune.get("move"):
+        if compared and desk.tune.get("move") and not getattr(desk, "partial", False):
+            # 일부만 본 비교(DESK_KEEP_SMALL)는 못 본 자리가 있어, 예전에 비교를 건너뛸 때처럼 빼지 않고 센다
             now_items = self.not_moved(dets, now_items, base, desk)
         trash, left, confidence = {}, {}, {}
         scores = self.scores(dets)
@@ -1013,7 +1029,8 @@ class RoomWatcher:
             group[label] = group.get(label, 0) + n
             confidence[label] = confidence.get(label, []) + [None] * n  # 자기 점수 없음: 보낼 때 VLM 확률로 채운다
         status = "LEFT_ITEMS" if left else "NEEDS_CLEANING" if trash else "CLEAN"
-        if own and status == "CLEAN" and compared:  # 비교를 건너뛰었으면 물건이 있을 수 있어 사진을 바꾸지 않는다
+        if own and status == "CLEAN" and compared and not getattr(desk, "partial", False):
+            # 비교를 건너뛰었거나 큰 변화를 빼고 일부만 봤으면(DESK_KEEP_SMALL) 물건이 있을 수 있어 사진을 바꾸지 않는다
             self.desk.set_base(photo(), self.objects(dets))  # 깨끗하면 책상 사진도 새로 (햇빛·조명이 천천히 바뀌는 것 따라감)
         if own and status == "CLEAN":  # 깨끗하면 기준을 넓혀 둔다 (줄어든 건 기준에서 빼지 않음: 다시 나와도 괜찮게)
             widened = {k: max(base.get(k, 0), now_items.get(k, 0)) for k in set(base) | set(now_items)}

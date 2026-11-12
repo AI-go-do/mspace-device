@@ -41,6 +41,14 @@ def test_finds_latest_score_of_the_same_setup(tmp_path):
     assert "87.2%" in model_score.describe(score)
 
 
+def test_bad_numbers_keep_the_last_good_score(tmp_path):
+    good = record(WINNER, 0.8723, "2026-11-12T10:16:00+09:00")
+    path = write(tmp_path, good,
+                 {**good, "medianSeconds": float("nan")}, {**good, "medianSeconds": -1},
+                 {**good, "accuracy": 0.9, "cases": float("inf")}, {**good, "leftAccuracy": float("nan")})
+    assert find(GATEWAY_ENV, path)["accuracy"] == 0.8723
+
+
 def test_no_score_when_setup_differs(tmp_path):
     path = write(tmp_path, record(WINNER, 0.8723, "2026-11-12T10:16:00+09:00"))
     no_vlm = {k: v for k, v in GATEWAY_ENV.items() if k != "VLM_URL"}

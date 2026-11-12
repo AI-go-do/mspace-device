@@ -5,6 +5,7 @@
 같은 설정의 기록이 없으면 보내지 않는다 (다른 설정의 점수를 붙이면 화면이 틀린 말을 한다).
 """
 import json
+import math
 import os
 
 DEFAULT_FILE = "eval/tidy/results.jsonl"
@@ -77,9 +78,10 @@ def find(config, load_config, path=DEFAULT_FILE, vlm_model=None):
                     score = {"setup": record.get("candidate", ""), "accuracy": round(float(record["leftAccuracy"]), 4),
                              "cases": int(record["cases"]), "secondsPerPhoto": round(float(record["medianSeconds"]), 2),
                              "measuredAt": record.get("at")}
-                    if 0 <= score["accuracy"] <= 1 and score["cases"] > 0:
-                        found = score  # 아래 줄일수록 최근. 숫자가 이상한 줄은 건너뛴다
-                except (ValueError, TypeError, AttributeError, KeyError):
+                    secs = score["secondsPerPhoto"]
+                    if 0 <= score["accuracy"] <= 1 and score["cases"] > 0 and math.isfinite(secs) and secs >= 0:
+                        found = score  # 아래 줄일수록 최근. 숫자가 이상한 줄(NaN·음수 포함)은 건너뛴다
+                except (ValueError, TypeError, AttributeError, KeyError, OverflowError):
                     continue
     except OSError as e:
         print(f"채점 기록을 못 읽어서 시험 점수는 안 보내요 ({path}: {e.__class__.__name__})")

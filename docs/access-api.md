@@ -83,8 +83,11 @@ Content-Type: application/json
 
 ```json
 {"result":"OPENED"}
+{"result":"OPENED","purpose":"RETRIEVE"}
 {"result":"DENIED","reason":"WRONG_CODE"}
 ```
+
+- `purpose`: 두고 간 물건을 찾으러 온 10분 QR(core `POST /api/reservations/{id}/retrieve-pass`)로 열리면 `"RETRIEVE"`, 그 밖에는 없음(null). 게이트웨이는 이 값을 방 카메라에 넘겨, 찾으러 온 입실이면 앞 예약 다시 확인을 남기고 그 빈 방을 다음 예약 기준으로 쓰지 않는다 (core `AccessController`·`Verdict`)
 
 | `result` | `reason` | 언제 | 상태 |
 |---|---|---|---|

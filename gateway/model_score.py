@@ -22,9 +22,12 @@ def candidate_env(candidate):
     return env
 
 
-def setup_key(config):
-    """점수를 가르는 설정만 모은다. 모델 파일은 이름만 본다 (폴더가 달라도 같은 모델)."""
-    vlm = bool(config.vlm_url)
+def setup_key(config, vlm=None):
+    """점수를 가르는 설정만 모은다. 모델 파일은 이름만 본다 (폴더가 달라도 같은 모델).
+
+    vlm: VLM을 실제로 켰는지 (게이트웨이는 make_vlm 결과로 정한다. 없으면 VLM_URL로)
+    """
+    vlm = bool(config.vlm_url) if vlm is None else vlm
     base = lambda p: os.path.basename(p) if p else None
     return (base(config.yolo_model), base(config.label_model), config.desk_photo, config.desk_area, config.floor_area,
             config.desk_light, config.desk_thresh, config.desk_min_area, config.desk_move, config.desk_move_same,
@@ -32,28 +35,38 @@ def setup_key(config):
             (config.vlm_rule, config.vlm_side, config.vlm_eq) if vlm else None)
 
 
-def find(config, load_config, path=DEFAULT_FILE):
+def find(config, load_config, path=DEFAULT_FILE, vlm_model=None):
     """config와 같은 설정으로 채점한 가장 최근 점수. 없으면 None.
 
     load_config: gateway.load_config (채점 줄의 설정도 게이트웨이와 같은 기본값으로 읽으려고 받는다)
+    vlm_model: 게이트웨이가 실제로 켠 VLM의 모델 이름 (VLM을 안 켰으면 None).
+               VLM을 켰으면 같은 모델로 채점한 줄만 쓴다. 모델 이름이 없는 옛 줄은 쓰지 않는다
     """
-    if not path or not os.path.exists(path):
+    if not path or not os.path.isfile(path):
         return None
-    want, found = setup_key(config), None
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            try:
-                record = json.loads(line)
-                env = {"PORT": "none", **candidate_env(record.get("candidate"))}
-                if setup_key(load_config(env)) == want and "leftAccuracy" in record:
-                    found = record  # 아래 줄일수록 최근
-            except (ValueError, TypeError, AttributeError):
-                continue
-    if found is None:
+    vlm_on = vlm_model is not None
+    want, found = setup_key(config, vlm_on), None
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    record = json.loads(line)
+                    env = {"PORT": "none", **candidate_env(record.get("candidate"))}
+                    if setup_key(load_config(env)) != want:
+                        continue
+                    if vlm_on and (not vlm_model or record.get("vlmModel") != vlm_model):
+                        continue
+                    score = {"setup": record.get("candidate", ""), "accuracy": round(float(record["leftAccuracy"]), 4),
+                             "cases": int(record["cases"]), "secondsPerPhoto": round(float(record["medianSeconds"]), 2),
+                             "measuredAt": record.get("at")}
+                    if 0 <= score["accuracy"] <= 1 and score["cases"] > 0:
+                        found = score  # 아래 줄일수록 최근. 숫자가 이상한 줄은 건너뛴다
+                except (ValueError, TypeError, AttributeError, KeyError):
+                    continue
+    except OSError as e:
+        print(f"채점 기록을 못 읽어서 시험 점수는 안 보내요 ({path}: {e.__class__.__name__})")
         return None
-    return {"setup": found.get("candidate", ""), "accuracy": round(float(found["leftAccuracy"]), 4),
-            "cases": int(found.get("cases", 0)), "secondsPerPhoto": round(float(found.get("medianSeconds", 0)), 2),
-            "measuredAt": found.get("at")}
+    return found
 
 
 def describe(score):

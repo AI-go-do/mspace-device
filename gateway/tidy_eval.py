@@ -266,6 +266,7 @@ def run_score(folder, env, out=print, as_json=False, clock=time.perf_counter):
     result["loadSeconds"] = round(load_seconds, 1)
     result["skipped"] = problems  # 건너뛴 문제. 비교표에 같이 적어 문제집이 다른 걸 알아보게 한다
     result["memoryMB"] = peak_memory_mb()
+    result["vlmModel"] = vlm.model if vlm is not None else None  # 게이트웨이가 같은 VLM 모델의 점수만 쓰게 (model_score)
     candidate = candidate_name(env)
     report(result, candidate, out)
     save_result(folder, result, candidate)

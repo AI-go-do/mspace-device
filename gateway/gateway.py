@@ -879,7 +879,8 @@ def start_room_camera(config, sensors):
     send_check = send_photo = None
     if on_checkout:
         import model_score
-        watcher.model_score = model_score.find(config, load_config, config.tidy_results)
+        watcher.model_score = model_score.find(config, load_config, config.tidy_results,
+                                               vlm_model=vlm.model if vlm is not None else None)
         print(model_score.describe(watcher.model_score))
         tidy = SensorSender(config.server, config.device_token, path=f"/api/rooms/{room}/tidy-checks",
                             drop=TIDY_DROP, name="정리 확인 전송", say_ok=True).start()

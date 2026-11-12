@@ -989,8 +989,8 @@ def tidy_body(check, device_id, event_id=None, model=None):
     model = 지금 설정의 시험 점수 (model_score.find). 같은 설정으로 채점한 기록이 있을 때만 붙인다.
 
     confidence = 이 사진에서 그 물건이 정말 있을 확률 (11/12 수연: 채점 표 값이 아니라 이 사진 기준).
-      YOLO가 찾은 물건은 YOLO 점수, 책상 비교로만 찾은 물건은 VLM이 이 사진 두 장에 "새 물건 있음"이라 할 확률.
-      둘 다 있으면 큰 쪽. 둘 다 없으면 DESK_DIFF_CONF (경고 기준보다 낮게: 알림만).
+      YOLO가 찾은 물건은 YOLO 점수 그대로 (VLM 확률은 "새 물건이 하나라도 있나"라 물건 하나의 확률로 부풀리지 않는다, 재웅 리뷰).
+      책상 비교로만 찾은 물건·unknown은 VLM이 이 사진 두 장에 "새 물건 있음"이라 할 확률. 그것도 없으면 DESK_DIFF_CONF.
     """
     found = {**check["leftItems"], **check["trash"]}
     conf = check.get("confidence", {})
@@ -1000,7 +1000,7 @@ def tidy_body(check, device_id, event_id=None, model=None):
         scores = list(conf.get(label, []))[:n]
         scores += [None] * (n - len(scores))
         for c in scores:
-            c = max(x for x in (c, yes) if x is not None) if (c, yes) != (None, None) else DESK_DIFF_CONF
+            c = c if c is not None else yes if yes is not None else DESK_DIFF_CONF
             items.append({"name": label, "confidence": round(float(c), 3)})
     items.sort(key=lambda i: -i["confidence"])  # 20개가 넘으면 확신이 큰 것부터 남긴다
     body = {

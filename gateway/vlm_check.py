@@ -133,7 +133,6 @@ class VlmCheck:
         if send is post:
             self.send = lambda u, body: post(u, body, timeout=timeout)
         self.cache = {}
-        self.last_yes = None  # 마지막으로 물은 사진 두 장에서 VLM이 YES라고 할 확률
         if cache and os.path.exists(cache):
             with open(cache, encoding="utf-8") as f:
                 self.cache = json.load(f)
@@ -156,16 +155,19 @@ class VlmCheck:
 
     def ask_jpeg(self, a, b):
         """prepare로 만든 JPEG 두 장으로 묻는다 (게이트웨이). (답, 걸린 초, YES일 확률 또는 None)."""
-        new_item, seconds, _ = self.ask_prepared(a, b)
-        return new_item, seconds, self.last_yes
+        new_item, seconds, _, yes = self.ask_with_yes(a, b)
+        return new_item, seconds, yes
 
     def ask_prepared(self, a, b):
-        """(답, 걸린 초, 캐시에서 꺼냈나). YES일 확률은 self.last_yes에 둔다."""
+        """(답, 걸린 초, 캐시에서 꺼냈나)."""
+        return self.ask_with_yes(a, b)[:3]
+
+    def ask_with_yes(self, a, b):
+        """(답, 걸린 초, 캐시에서 꺼냈나, YES일 확률 또는 None). 확률을 바로 돌려줘서 두 스레드가 물어도 안 섞인다."""
         key = self.key(a, b)
         if key in self.cache:
             hit = self.cache[key]
-            self.last_yes = hit.get("yes")
-            return parse(hit["text"]), hit["seconds"], True
+            return parse(hit["text"]), hit["seconds"], True, hit.get("yes")
         body = {"messages": [{"role": "user", "content": [
                     {"type": "text", "text": "Image 1:"}, image_part(a),
                     {"type": "text", "text": "Image 2:"}, image_part(b),
@@ -174,14 +176,14 @@ class VlmCheck:
         started = self.clock()
         reply = self.send(self.url, body)
         seconds = self.clock() - started
-        text, self.last_yes = reply if isinstance(reply, tuple) else (reply, None)
+        text, yes = reply if isinstance(reply, tuple) else (reply, None)
         if self.cache_path:
-            self.cache[key] = {"text": text, "seconds": round(seconds, 3), "yes": self.last_yes}
+            self.cache[key] = {"text": text, "seconds": round(seconds, 3), "yes": yes}
             tmp = self.cache_path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.cache, f)
             os.replace(tmp, self.cache_path)
-        return parse(text), seconds, False
+        return parse(text), seconds, False, yes
 
     def combine(self, status, new_item):
         """YOLO 결과(status)와 VLM 답을 합친다. VLM이 알아듣지 못한 답이면 YOLO 결과 그대로."""

@@ -528,8 +528,8 @@ def test_vlm_yes_lines_split_by_answer():
             {"case": "l1", "answer": "LEFT_ITEMS", "vlmYes": 0.99}, {"case": "x", "answer": "CLEAN", "vlmYes": None}]
     lines = te.vlm_yes_lines(rows)
     assert lines[0].startswith("VLM 있음 확률 (사진 3쌍")
-    assert "c1 12%, c2 85%" in lines[1] and "80% 이상 1쌍" in lines[2]
-    assert "l1 99%" in lines[3]
+    assert "c1 12.0%, c2 85.0%" in lines[1] and "80% 이상 1쌍" in lines[2]
+    assert "l1 99.0%" in lines[3]
     assert te.vlm_yes_lines([{"case": "x", "answer": "CLEAN", "vlmYes": None}]) == []
 
 

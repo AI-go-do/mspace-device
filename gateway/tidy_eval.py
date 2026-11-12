@@ -234,8 +234,8 @@ def vlm_yes_lines(rows, limit=0.8):
         if not group:
             continue
         over = sum(r["vlmYes"] >= limit for r in group)
-        lines.append(f"  정답 {name} {len(group)}쌍: " + ", ".join(f"{r['case']} {r['vlmYes']:.0%}" for r in group))
-        lines.append(f"    {limit:.0%} 이상 {over}쌍, 가장 낮음 {group[0]['vlmYes']:.0%}, 가장 높음 {group[-1]['vlmYes']:.0%}")
+        lines.append(f"  정답 {name} {len(group)}쌍: " + ", ".join(f"{r['case']} {r['vlmYes']:.1%}" for r in group))
+        lines.append(f"    {limit:.0%} 이상 {over}쌍, 가장 낮음 {group[0]['vlmYes']:.1%}, 가장 높음 {group[-1]['vlmYes']:.1%}")
     return lines
 
 

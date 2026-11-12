@@ -215,7 +215,7 @@ ROOM_CAMERA=2 YOLO_MODEL=gateway/yolov8s.onnx SEND_SENSORS=1 ~/mspace-venv/bin/p
 
 ```bash
 # 1) 시험 사진 찍기 (젯슨, 사람이 화면에 보이면 저장 안 함). 질문에 Enter, 정답 번호, 메모를 넣어요
-ROOM_CAMERA=2 YOLO_MODEL=gateway/yolov8s.onnx ~/mspace-venv/bin/python gateway/tidy_eval.py capture
+ROOM_CAMERA=2 YOLO_MODEL=gateway/yolov8s.onnx ~/mspace-venv/bin/python gateway/tidy_eval.py capture ~/AI-go-do
 # 2) 채점 (게이트웨이와 같은 설정 이름). 후보를 바꿔 여러 번 돌려요
 YOLO_MODEL=gateway/yolov8s.onnx ~/mspace-venv/bin/python gateway/tidy_eval.py score ~/AI-go-do
 YOLO_MODEL=gateway/yolov8s.onnx DESK_PHOTO=1 DESK_AREA=0.25,0.22,0.64,0.83 ~/mspace-venv/bin/python gateway/tidy_eval.py score ~/AI-go-do
@@ -225,7 +225,7 @@ YOLO_MODEL=gateway/yolov8s.onnx DESK_PHOTO=1 DESK_AREA=0.25,0.22,0.64,0.83 ~/msp
 - 깨끗한 문제도 꼭 섞어요(잘못 신고 검사). 쓰레기 종류·자리·조명을 바꿔 가며 30~50개
 - 판정은 퇴실 모드와 같아요: `before`를 그 예약의 기준으로 보고 `after`에서 늘어난 것만 봐요
 - **심각한 오류**: 깨끗한데 치울 것·두고 감으로 봄(죄 없는 예약자 신고), 치울 것·두고 감이 있는데 깨끗함으로 봄(다음 팀이 더러운 방을 받음). 치울 것 ↔ 두고 감끼리 바뀐 건 틀림이지만 심각하진 않아요(어느 쪽이든 관리자가 봐요)
-- 채점하면 정확도·심각한 오류·시간, 틀린 문제와 그때 찾은 것을 보여 주고, 아래 **실험 기록** 표에 붙일 한 줄을 만들어 줘요. 매번 `eval/tidy/results.jsonl`에도 남아요
+- 채점하면 정확도·심각한 오류·시간, 틀린 문제와 그때 찾은 것을 보여 주고, 아래 **실험 기록** 표에 붙일 한 줄을 만들어 줘요. 매번 채점한 문제집 폴더의 `results.jsonl`에도 남아요 (예: `~/AI-go-do/results.jsonl`, 폴더를 안 주면 `eval/tidy/results.jsonl`)
 - 설정을 맞추는 데 쓴 사진과 채점 사진은 나눠요. 같은 사진으로 맞추고 채점하면 점수가 실제보다 높게 나와요
 
 **여러 후보를 한 번에 비교 (`compare`)**: `eval/tidy/candidates.txt`에 후보를 한 줄에 하나씩 적고 돌리면, 후보마다 따로 띄워 채점해서 한 표로 보여 줘요.

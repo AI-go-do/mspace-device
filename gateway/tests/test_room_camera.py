@@ -1299,6 +1299,18 @@ def test_tidy_photos_attach_entry_and_after_photos_to_first_check():
     assert list(r.out[1]["photos"]) == ["RECHECK"] and is_jpeg(r.out[1]["photos"]["RECHECK"])
 
 
+def test_photo_logs_say_what_was_taken(capsys):
+    r = PhotoRoom(RoomWatcher(1, on_checkout=True, photos=True))
+    r.run([], 5).run([person()], 5)
+    assert "입실 전 사진 찍음 (" in capsys.readouterr().out
+    r.checkout(1).run([thing("umbrella")], SETTLE_SEC + 6)
+    msg = room_camera.photo_message(r.out[0], r.out[0]["photos"])
+    assert msg.startswith("정리 확인 사진 1번 방 예약 1: 입실 전 찍음 (") and "퇴실 뒤 찍음 (" in msg
+    assert room_camera.photo_message({"roomId": 1, "reservationId": 2, "phase": "FIRST"}, {"ENTRY": b"x"}) == \
+        "정리 확인 사진 1번 방 예약 2: 입실 전 찍음 (1KB), 퇴실 뒤 없음 (사람이 보여서 안 찍음)"
+    assert "3시간 뒤 없음" in room_camera.photo_message({"roomId": 1, "reservationId": 2, "phase": "RECHECK"}, {})
+
+
 def test_tidy_photos_off_by_default_and_skipped_without_photo():
     r = PhotoRoom(RoomWatcher(1, on_checkout=True))
     r.run([], 5).run([person()], 5).checkout(1).run([thing("cup")], SETTLE_SEC + 6)
@@ -1352,7 +1364,7 @@ def test_photo_jpeg_shrinks_big_frames():
     assert room_camera.photo_jpeg(object()) is None  # 못 만들면 None (결과는 그대로)
 
 
-def test_run_room_camera_sends_photos_after_result_and_keeps_them_out_of_log(tmp_path):
+def test_run_room_camera_sends_photos_after_result_and_keeps_them_out_of_log(tmp_path, capsys):
     class PhotoCheck(RoomWatcher):
         def update(self, dets, now, pir=None, now_iso=None, detail=None, photo=None):
             assert photo is not None and photo() is not None  # TIDY_PHOTOS면 화면을 넘긴다
@@ -1366,6 +1378,7 @@ def test_run_room_camera_sends_photos_after_result_and_keeps_them_out_of_log(tmp
                         sleep=lambda s: None, send_check=lambda b: order.append(("check", b["reservationId"])),
                         send_photo=lambda b: order.append((b["phase"], b["reservationId"], b["deviceId"], b["jpg"])))
     assert order == [("check", 7), ("FIRST", 7, "camera-1", b"a"), ("ENTRY", 7, "camera-1", b"b")]
+    assert "정리 확인 사진 1번 방 예약 7: 입실 전 찍음 (1KB), 퇴실 뒤 찍음 (1KB)" in capsys.readouterr().out
     assert "photos" not in json.loads(log.read_text())
 
 

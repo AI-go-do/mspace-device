@@ -600,7 +600,7 @@ class RoomWatcher:
                           f"(QR 뒤 {self.retrieve_sec // 60}분 지나 방이 비면 다시 찍어요)")
                     return
                 self.drop_recheck_on_entry()  # 빈 방 뒤 사람이 들어옴: 후보를 쓰든 버리든 앞 예약 다시 확인은 안 함
-                if pir_since is not None and now - pir_since > ENTRY_PIR_GRACE_SEC:
+                if pir_since is not None and self.person_since - pir_since > ENTRY_PIR_GRACE_SEC:  # 확정 대기(10초)는 빼고 잰다
                     # 카메라엔 안 보였지만 PIR이 오래 켜져 있었다. 그 사이 뭘 두었을 수 있어 이 후보는 버린다
                     print(f"예약 기준 {self.room_id}번 방: 사람이 보이기 전 PIR이 오래 켜져 있어 후보를 쓰지 않음")
                     return
@@ -826,6 +826,8 @@ class RoomWatcher:
             return None
         now_iso = now_iso or datetime.now(KST).isoformat(timespec="seconds")
         if self.pending is None:  # 퇴실 확인이 먼저. 그게 없을 때만 3시간 뒤 다시 확인
+            if self.people(dets) > 0:
+                return None  # 이 장에 사람이 보이면 다시 확인을 쓰지 않는다 (ENTRY_PERSON_SEC 대기 중일 수 있음). 빈 장에서 다시
             reservation_id, _ = self.recheck_pending
             self.recheck_pending = None
             return self.recheck(reservation_id, dets, now_iso, detail, photo) if self.check_objects else None

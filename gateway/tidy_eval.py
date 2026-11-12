@@ -147,7 +147,9 @@ def evidence_row(answer, check):
     import room_camera
     evidence = check.get("evidence") or {}
     return {"left": answer != "CLEAN", "found": check["status"] != "CLEAN",
-            "key": room_camera.check_key({**check, "phase": "FIRST"}), "count": bool(evidence.get("count"))}
+            "key": room_camera.check_key({**check, "phase": "FIRST"}), "count": bool(evidence.get("count")),
+            # 게이트웨이는 VLM을 묻기 전 결과가 남음일 때만 3시간 뒤 다시 확인한다 (recheck_base)
+            "target": (check.get("yoloStatus") or check["status"]) != "CLEAN"}
 
 
 def score(cases, run_case):

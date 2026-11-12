@@ -155,3 +155,20 @@ def test_vlm_url_only_records_count_as_vlm_on(tmp_path):
     path = write(tmp_path, record(candidate, 0.9, "2026-11-12T12:00:00+09:00"))
     assert find(GATEWAY_ENV, path)["accuracy"] == 0.9
     assert find({k: v for k, v in GATEWAY_ENV.items() if k != "VLM_URL"}, path, vlm_model=None) is None
+
+
+def test_recheck_counts_only_rooms_the_gateway_would_recheck():
+    """첫 확인이 깨끗함이면(예: DESK_MOVE로 옮긴 비품을 뺌) 게이트웨이는 다시 확인하지 않으니 recheck에 안 센다."""
+    moved = [{"left": False, "found": False, "key": "none", "count": True, "target": False}] * 5
+    table = model_score.presence_table(rows("yolo", 5, 0, count=True) + moved)
+    assert table["recheck"] == 1.0
+
+
+def test_empty_table_is_not_an_old_record():
+    """근거는 있는데 남음이 한 번도 없으면 빈 표: 옛 이름 점수 대신 모두 0.5(알림만)."""
+    table = model_score.presence_table([{"left": False, "found": False, "key": "none", "count": False}])
+    assert table == {}
+    check = {"reservationId": 37, "phase": "RECHECK", "leftItems": {}, "trash": {"cup": 1},
+             "confidence": {"cup": [0.95]}, "evidence": {"yolo": True, "desk": False}, "checkedAt": "x"}
+    assert tidy_body(check, "camera-1", "e1", presence=table)["items"][0]["confidence"] == 0.5
+    assert "모두 50%" in model_score.describe_presence(table)

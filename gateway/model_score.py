@@ -67,15 +67,17 @@ def presence_table(rows):
     """
     if not isinstance(rows, list) or not rows:
         return None
-    counts = {}
+    counts, valid = {}, False
     for row in rows:
-        if not isinstance(row, dict):
-            continue
+        if not isinstance(row, dict) or not isinstance(row.get("left"), bool):
+            continue  # 정답이 없는 줄은 셀 수 없다
+        valid = True
         left = bool(row.get("left"))
         keys = []
         if row.get("found") and isinstance(row.get("key"), str):
             keys.append(row["key"])
-        if row.get("count"):
+        # 3시간 뒤 다시 확인은 첫 확인(VLM 전)이 남음이었던 예약만 한다 (checkout_check의 recheck_base)
+        if row.get("count") and row.get("target", True):
             keys.append("recheck")
         for key in keys:
             hit, n = counts.get(key, (0, 0))
@@ -84,10 +86,12 @@ def presence_table(rows):
     for key, (hit, n) in counts.items():
         rate = hit / n
         table[key] = round(rate if n >= MIN_CASES else min(rate, LOW), 3)
-    return table or None
+    return table if valid else None  # 근거는 있는데 남음이 한 번도 없으면 빈 표 (모든 경우 LOW)
 
 
 def describe_presence(table):
+    if table == {}:
+        return f"물건이 있을 확률: 채점에서 남음이라 한 경우가 없어서 모두 {LOW:.0%}로 보내요 (알림만)"
     if not table:
         return "물건이 있을 확률: 채점 기록에 경우별 결과가 없어서 예전처럼 이름별 점수를 보내요 (tidy_eval score를 한 번 더 돌리면 생겨요)"
     parts = ", ".join(f"{k} {v:.0%}" for k, v in sorted(table.items(), key=lambda kv: -kv[1]))

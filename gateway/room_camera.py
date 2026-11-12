@@ -916,7 +916,7 @@ def tidy_body(check, device_id, event_id=None, model=None, presence=None):
     """
     found = {**check["leftItems"], **check["trash"]}
     conf = check.get("confidence", {})
-    room = presence.get(check_key(check), DESK_DIFF_CONF) if presence else None
+    room = presence.get(check_key(check), DESK_DIFF_CONF) if presence is not None else None
     items = []
     for label, n in sorted(found.items()):
         scores = list(conf.get(label, []))

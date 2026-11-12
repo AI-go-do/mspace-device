@@ -60,7 +60,10 @@ def test_judge_records_what_found_it_for_the_presence_table():
     check, _ = te.judge(frame(0), frame(1), find)
     assert check["evidence"] == {"yolo": True, "desk": False, "count": True}
     row = te.evidence_row("NEEDS_CLEANING", {**check, "vlm": False})
-    assert row == {"left": True, "found": True, "key": "yolo+vlm-no", "count": True}
+    assert row == {"left": True, "found": True, "key": "yolo+vlm-no", "count": True, "target": True}
+    # VLM이 "없음"이라 CLEAN으로 바뀌어도 VLM 전 결과가 남음이면 3시간 뒤 다시 확인 대상
+    assert te.evidence_row("CLEAN", {**check, "status": "CLEAN", "yoloStatus": "NEEDS_CLEANING"})["target"] is True
+    assert te.evidence_row("CLEAN", {**check, "status": "CLEAN", "yoloStatus": "CLEAN"})["target"] is False
 
 
 def test_score_counts_accuracy_serious_and_time():
@@ -149,7 +152,7 @@ def test_save_result_and_candidate(tmp_path):
     te.save_result(str(tmp_path), result, "후보")
     record = json.loads((tmp_path / "results.jsonl").read_text(encoding="utf-8"))
     assert record["candidate"] == "후보" and record["wrong"] == ["001"] and "rows" not in record
-    assert record["evidence"] == [{"left": False, "found": True, "key": "none", "count": False}]  # 이름·사진은 안 남김
+    assert record["evidence"] == [{"left": False, "found": True, "key": "none", "count": False, "target": True}]  # 이름·사진은 안 남김
 
 
 def test_main_needs_a_command():

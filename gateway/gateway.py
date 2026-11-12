@@ -96,6 +96,7 @@ class Config:
     vlm_rule: str = "or"                   # YOLO와 합치는 법: or(하나라도 남음이면 남음, 10판 1등) / and / vlm (VLM_RULE)
     vlm_side: int = 768                    # VLM에 보내기 전 사진 긴 변 크기 (VLM_SIDE, 채점과 같은 값)
     vlm_eq: bool = False                   # 어두운 사진을 밝게 펴서 보냄 (VLM_EQ=1)
+    tidy_results: str | None = "eval/tidy/results.jsonl"  # 채점 기록. 같은 설정의 시험 점수를 core에 같이 보냄 (TIDY_RESULTS, off면 안 보냄)
     tidy_photos: bool = False              # True면 정리 확인 때 빈 방 사진(입실 전·퇴실 뒤·3시간 뒤)을 core로 올린다 (Q-27)
     label_model: str | None = None         # 달라진 곳에 이름 붙일 모델 (YOLO-World ONNX). 없으면 YOLO_MODEL로
     baseline_file: str | None = "room_baseline.json"  # 깨끗한 방 기준을 적어 두는 파일. BASELINE_FILE=off면 메모리에만
@@ -156,6 +157,8 @@ def load_config(env=None):
         vlm_side=parse_number(env, "VLM_SIDE", Config.vlm_side, 64, 4096, int),
         vlm_eq=env.get("VLM_EQ") == "1",
         tidy_photos=env.get("TIDY_PHOTOS") == "1",
+        tidy_results=None if env.get("TIDY_RESULTS", "").strip().lower() == "off"
+        else (env.get("TIDY_RESULTS") or "").strip() or Config.tidy_results,
         label_model=env.get("LABEL_MODEL") or None,
         baseline_file=(None if env.get("BASELINE_FILE") == "off"
                        else env.get("BASELINE_FILE") or Config.baseline_file),
@@ -875,6 +878,9 @@ def start_room_camera(config, sensors):
     cam = room_camera.open_camera(config.room_camera)
     send_check = send_photo = None
     if on_checkout:
+        import model_score
+        watcher.model_score = model_score.find(config, load_config, config.tidy_results)
+        print(model_score.describe(watcher.model_score))
         tidy = SensorSender(config.server, config.device_token, path=f"/api/rooms/{room}/tidy-checks",
                             drop=TIDY_DROP, name="정리 확인 전송", say_ok=True).start()
         send_check = tidy.push

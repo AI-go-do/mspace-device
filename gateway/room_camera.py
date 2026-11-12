@@ -879,13 +879,14 @@ class RoomWatcher:
 MAX_SERVER_ITEMS = 20
 
 
-def tidy_body(check, device_id, event_id=None):
+def tidy_body(check, device_id, event_id=None, model=None):
     """정리 확인 결과를 서버 POST /api/rooms/{roomId}/tidy-checks 형식으로 바꾼다 (10차, 11/10 지영과 맞춤).
 
     10차: 쓰레기든 물건이든 종류 구분 없이 "두고 감". 장치 결과(치울 것·두고 간 물건) → 서버 2가지:
     남은 것이 하나라도 있으면 LEFT_ITEMS, 없으면 CLEAN.
     items = 물건마다 {"name": 모델 이름(영어), "confidence": 0~1}. 한글 바꾸기·경고 기준(확신도)은 core가 한다.
     phase = FIRST(퇴실 직후, 알림만) | RECHECK(3시간 뒤, 그래도 남았으면 core가 경고).
+    model = 지금 설정의 시험 점수 (model_score.find). 같은 설정으로 채점한 기록이 있을 때만 붙인다.
     """
     found = {**check["leftItems"], **check["trash"]}
     conf = check.get("confidence", {})
@@ -895,7 +896,7 @@ def tidy_body(check, device_id, event_id=None):
         scores += [DESK_DIFF_CONF] * (n - len(scores))  # 점수가 없으면 경고 기준보다 낮은 값
         items += [{"name": label, "confidence": c} for c in scores[:n]]
     items.sort(key=lambda i: -i["confidence"])  # 20개가 넘으면 확신이 큰 것부터 남긴다
-    return {
+    body = {
         "eventId": event_id or str(uuid.uuid4()),
         "reservationId": check["reservationId"],
         "deviceId": device_id,
@@ -904,6 +905,9 @@ def tidy_body(check, device_id, event_id=None):
         "items": items[:MAX_SERVER_ITEMS],
         "observedAt": check["checkedAt"],
     }
+    if model:
+        body["model"] = model
+    return body
 
 
 def photo_body(reservation_id, phase, device_id, jpg):
@@ -1077,7 +1081,7 @@ def finish_check(watcher, check, log_path, send_check, send_photo):
     print(check_message(check))
     safe_log(log_path, check)
     if send_check is not None and "reservationId" in check:
-        send_check(tidy_body(check, f"camera-{watcher.room_id}"))
+        send_check(tidy_body(check, f"camera-{watcher.room_id}", model=getattr(watcher, "model_score", None)))
         if getattr(watcher, "photos", False):
             print(photo_message(check, photos))
         if send_photo is not None and photos:

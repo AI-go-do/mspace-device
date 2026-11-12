@@ -400,6 +400,7 @@ class RoomWatcher:
                  baseline_path=None, desk=None, labeler=None, entry_desk=None, photos=False, vlm=None,
                  retrieve_sec=RETRIEVE_RECHECK_SEC, tile_grid=TILE_GRID):
         self.room_id = room_id
+        self.desk_regions = []        # 마지막 책상 사진 비교의 달라진 곳 {"box", "label", "counted"} (VLM_CROP)
         # 기준 개수를 센 조각 수 (TILE_GRID). 조각 수가 다르면 같은 방도 물건 수가 달라져서, 다른 조각 수로 센 기준 파일은 쓰지 않는다
         self.tile_grid = tile_grid
         # 찾으러 온 뒤 다시 찍기 (11/12 재웅·지영): 두고 간 물건을 찾으러 10분 QR(purpose RETRIEVE)로 들어오면
@@ -956,6 +957,7 @@ class RoomWatcher:
     def desk_items(self, frame, dets, desk=None):
         """책상 사진 비교로 달라진 곳 중, 모델이 이미 찾은 물건·기준 때 있던 물건 자리가 아닌 것에 이름을 붙인다."""
         desk = desk or self.desk
+        self.desk_regions = []  # 이번 비교에서 달라진 곳마다 어떻게 했나 (VLM_CROP이 잘라서 다시 묻는 데 씀)
         changes = desk.changes(frame)
         if changes is None:
             return None  # 비교를 못 함 (기준 없음, 조명·카메라가 크게 바뀜). "달라진 곳 없음"과 구분
@@ -967,9 +969,11 @@ class RoomWatcher:
             label = (self.labeler(frame, box) if self.labeler else None) or UNKNOWN
             if label in FURNITURE:
                 if not small_on_furniture(box, label, dets, getattr(desk, "furniture_small", 0.0)):
+                    self.desk_regions.append({"box": box, "label": label, "counted": False})
                     continue  # 의자를 빼 두거나 넣은 자리 (가구는 정리 대상이 아님)
                 label = UNKNOWN  # 의자보다 훨씬 작은 곳: 의자 위·옆에 둔 물건 (DESK_FURNITURE_SMALL, 11/12 035 가방)
             items[label] = items.get(label, 0) + 1
+            self.desk_regions.append({"box": box, "label": label, "counted": True})
         return items
 
     def not_moved(self, dets, now_items, base, desk):
@@ -1299,6 +1303,36 @@ def apply_vlm(check, new_item, rule, yes=None):
         check["trash"], check["leftItems"], check["confidence"] = {}, {}, {}
         check["status"] = "CLEAN"
     return check
+
+
+def apply_vlm_crop(check, regions, ask):
+    """책상 사진 비교가 찾은 자리를 잘라 VLM에게 다시 물은 답으로 고친다 (VLM_CROP, 11/13 실험).
+
+    ask(box) → (새 물건 있음 True/False/None, 걸린 초, YES일 확률). regions = RoomWatcher.desk_regions.
+    - 센 자리(counted): VLM이 NO면 그 하나를 뺀다 (의자 옮김·빛 얼룩을 물건으로 센 것)
+    - 가구로 보고 뺀 자리: VLM이 YES면 이름 모르는 물건 하나를 더한다 (의자 위 가방)
+    못 알아들은 답(None)이면 그대로 둔다. 돌려주는 값: 묻는 데 걸린 초.
+    """
+    seconds, notes = 0.0, []
+    for r in regions:
+        new_item, took, yes = ask(r["box"])
+        seconds += took
+        notes.append({"label": r["label"], "counted": r["counted"], "answer": new_item, "yes": yes})
+        if new_item is None:
+            continue
+        if r["counted"] and not new_item:
+            group = check["leftItems"] if r["label"] in BELONGINGS else check["trash"]  # check가 더할 때와 같은 갈래
+            if group.get(r["label"], 0) > 0:
+                group[r["label"]] -= 1
+                if not group[r["label"]]:
+                    del group[r["label"]]
+                    check.get("confidence", {}).pop(r["label"], None)
+        elif not r["counted"] and new_item:
+            check["trash"][UNKNOWN] = check["trash"].get(UNKNOWN, 0) + 1
+            check.setdefault("confidence", {})[UNKNOWN] = check.get("confidence", {}).get(UNKNOWN, []) + [None]
+    check["status"] = "LEFT_ITEMS" if check["leftItems"] else "NEEDS_CLEANING" if check["trash"] else "CLEAN"
+    check["vlmCrop"] = notes
+    return seconds
 
 
 def ask_vlm_then_finish(watcher, check, pair, log_path, send_check, send_photo):

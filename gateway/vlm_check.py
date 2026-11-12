@@ -11,6 +11,8 @@ VLM_RULE  YOLO 결과와 합치는 방법 (기본 or)
 VLM_SIDE  보내기 전 사진 긴 변 크기 (기본 768)
 VLM_EQ    1이면 어두운 사진을 밝게 펴서 보낸다 (불 꺼진 방)
 게이트웨이는 퇴실 뒤 첫 확인(FIRST) 때만 묻고, 카메라 스레드를 막지 않게 따로 묻는다 (room_camera.ask_vlm_then_finish).
+VLM_CROP  1이면 책상 사진 비교가 찾은 자리를 잘라 한 번 더 묻는다 (채점 실험, 기본 꺼짐).
+          세어진 "모르는 물건" 자리에 VLM이 NO면 빼고, 의자로 보고 뺀 자리에 YES면 더한다 (11/13)
 VLM_CACHE 답을 적어 둘 파일 (채점 전용). 같은 사진·질문·모델이면 다시 묻지 않아 후보를 여러 개 돌려도 빠르다.
           사진은 적지 않고, 사진의 해시와 답·걸린 시간만 적는다
 """
@@ -37,6 +39,25 @@ PROMPT = (
     "laptop, paper, trash or food, on the desk, chair or floor? Look carefully at small and far objects. "
     "Answer with only one word: YES or NO."
 )
+
+
+CROP_PROMPT = (
+    "Image 1 and Image 2 show the same small part of a study room, from the same camera. "
+    "Image 1 is before the guest used the room, Image 2 is after the guest left. "
+    "Ignore changes in lighting, shadows and brightness, and ignore chairs or furniture that were moved. "
+    "Ignore objects that were in image 1 but are gone in image 2. "
+    "Is there any object in image 2 that was NOT in image 1? "
+    "Answer with only one word: YES or NO."
+)
+
+
+def crop(img, box):
+    """화면에서 상자 주변을 자른다. 상자 크기만큼 사방으로 넓혀 둘레(책상·바닥)가 같이 보이게 한다."""
+    h, w = img.shape[:2]
+    x, y, bw, bh = (int(v) for v in box)
+    x0, y0 = max(0, x - bw), max(0, y - bh)
+    x1, y1 = min(w, x + 2 * bw), min(h, y + 2 * bh)
+    return img[y0:y1, x0:x1]
 
 
 def prepare(img, side=SIDE, eq=False):
@@ -122,10 +143,11 @@ def image_part(jpg):
 
 class VlmCheck:
     def __init__(self, url, rule="or", side=SIDE, eq=False, cache=None, send=post, clock=time.perf_counter,
-                 timeout=TIMEOUT):
+                 timeout=TIMEOUT, crop=False):
         if rule not in RULES:
             raise ValueError(f"VLM_RULE는 {', '.join(RULES)} 중 하나예요: {rule!r}")
         self.url, self.rule, self.side, self.eq = url, rule, side, eq
+        self.crop = crop  # VLM_CROP
         self.cache_path = cache
         self.send, self.clock = send, clock
         self.model = model_name(url) if send is post else "test"
@@ -137,9 +159,9 @@ class VlmCheck:
             with open(cache, encoding="utf-8") as f:
                 self.cache = json.load(f)
 
-    def key(self, a, b):
+    def key(self, a, b, prompt=PROMPT):
         h = hashlib.sha256()
-        for part in (self.model, PROMPT, str(self.side), str(self.eq)):
+        for part in (self.model, prompt, str(self.side), str(self.eq)):
             h.update(part.encode() + b"\0")
         h.update(a)
         h.update(b)
@@ -162,16 +184,22 @@ class VlmCheck:
         """(답, 걸린 초, 캐시에서 꺼냈나)."""
         return self.ask_with_yes(a, b)[:3]
 
-    def ask_with_yes(self, a, b):
+    def ask_region(self, before, after, box):
+        """두 화면에서 같은 자리(box, 화면 좌표)를 잘라 묻는다 (VLM_CROP). (답, 걸린 초, YES일 확률 또는 None)."""
+        a, b = self.prepare(crop(before, box)), self.prepare(crop(after, box))
+        new_item, seconds, _, yes = self.ask_with_yes(a, b, CROP_PROMPT)
+        return new_item, seconds, yes
+
+    def ask_with_yes(self, a, b, prompt=PROMPT):
         """(답, 걸린 초, 캐시에서 꺼냈나, YES일 확률 또는 None). 확률을 바로 돌려줘서 두 스레드가 물어도 안 섞인다."""
-        key = self.key(a, b)
+        key = self.key(a, b, prompt)
         if key in self.cache and "yes" in self.cache[key]:  # 확률을 적기 전(#70 전) 캐시는 다시 묻는다
             hit = self.cache[key]
             return parse(hit["text"]), hit["seconds"], True, hit.get("yes")
         body = {"messages": [{"role": "user", "content": [
                     {"type": "text", "text": "Image 1:"}, image_part(a),
                     {"type": "text", "text": "Image 2:"}, image_part(b),
-                    {"type": "text", "text": PROMPT}]}],
+                    {"type": "text", "text": prompt}]}],
                 "temperature": 0, "max_tokens": 5, "logprobs": True, "top_logprobs": 10}
         started = self.clock()
         reply = self.send(self.url, body)
@@ -214,4 +242,4 @@ def from_env(env):
         raise ValueError(f"VLM_URL은 젯슨 안(127.0.0.1)만 돼요. 사진이 밖으로 나가지 않게 멈춰요: {url}")
     return VlmCheck(url, rule=(env.get("VLM_RULE") or "or").strip().lower(),
                     side=int(env.get("VLM_SIDE") or SIDE), eq=env.get("VLM_EQ") == "1",
-                    cache=(env.get("VLM_CACHE") or None))
+                    cache=(env.get("VLM_CACHE") or None), crop=env.get("VLM_CROP") == "1")

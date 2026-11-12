@@ -140,6 +140,8 @@ def judge(before, after, find, room_items=None, desk=None, labeler=None, clock=t
     if desk is not None:  # 채점 보기용: 사진 비교가 건너뛰었나(None) · 달라진 곳 몇 개였나. 판정에는 안 쓴다
         changes = desk.changes(after)
         check["deskChanges"] = None if changes is None else len(changes)
+    if vlm is not None and getattr(vlm, "crop", False) and desk is not None:  # VLM_CROP (11/13): 달라진 자리를 잘라 다시 묻기
+        seconds += room_camera.apply_vlm_crop(check, watcher.desk_regions, lambda box: vlm.ask_region(before, after, box))
     if vlm is not None:  # VLM_URL (10판): 입실·퇴실 사진을 VLM에게 한 번 더 보여 준다
         new_item, vlm_seconds, _, yes = vlm.ask_with_yes(vlm.prepare(before), vlm.prepare(after))
         check["yoloStatus"] = check["status"]
@@ -171,6 +173,7 @@ def score(cases, run_case):
                      "trash": check.get("trash", {}), "leftItems": check.get("leftItems", {}),
                      "people": check.get("people", 0), "memo": case.memo, "desk": check.get("deskChanges", "off"),
                      "yolo": check.get("yoloStatus"), "vlm": check.get("vlm"), "vlmYes": check.get("vlmYesRaw"),
+                     "crop": check.get("vlmCrop"),
                      "evidence": evidence_row(case.answer, check)})
     n = len(rows)
     right = sum(r["ok"] for r in rows)
@@ -192,7 +195,8 @@ def score(cases, run_case):
 def candidate_name(env):
     """채점한 설정을 한 줄로 (README 기록용). 게이트웨이 설정 이름 그대로."""
     keys = ("YOLO_MODEL", "DESK_PHOTO", "DESK_AREA", "FLOOR_AREA", "DESK_LIGHT", "DESK_THRESH", "DESK_MIN_AREA",
-            "TILE_GRID", "DESK_MOVE", "DESK_MOVE_SAME", "DESK_KEEP_SMALL", "DESK_FURNITURE_SMALL", "LABEL_MODEL", "ROOM_ITEMS", "VLM_NAME", "VLM_RULE", "VLM_SIDE", "VLM_EQ")
+            "TILE_GRID", "DESK_MOVE", "DESK_MOVE_SAME", "DESK_KEEP_SMALL", "DESK_FURNITURE_SMALL", "LABEL_MODEL", "ROOM_ITEMS", "VLM_NAME", "VLM_RULE", "VLM_SIDE", "VLM_EQ",
+            "VLM_CROP")
     if env.get("VLM_URL") and not (env.get("VLM_NAME") or env.get("VLM_RULE")):
         env = {**env, "VLM_RULE": "or"}  # VLM_URL만 줘도 VLM을 켠 것 (기본 규칙 or). 주소는 안 적는다
     parts = [f"{k}={env[k]}" for k in keys if env.get(k)]
@@ -235,7 +239,12 @@ def desk_note(row):
     desk = row.get("desk", "off")
     if desk == "off":
         return ""
-    return " [사진 비교 건너뜀]" if desk is None else f" [사진 비교 {desk}곳]"
+    note = " [사진 비교 건너뜀]" if desk is None else f" [사진 비교 {desk}곳]"
+    crops = row.get("crop")
+    if crops:  # VLM_CROP: 자리마다 (센 자리 / 가구로 뺀 자리) VLM 답
+        mark = {True: "Y", False: "N", None: "?"}
+        note += " [잘라 묻기 " + " ".join(f"{'센' if c['counted'] else '뺀'}{c['label']}:{mark[c['answer']]}" for c in crops) + "]"
+    return note
 
 
 def vlm_yes_lines(rows, limit=0.8):

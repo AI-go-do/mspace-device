@@ -364,3 +364,62 @@ def test_yes_probability_from_first_token():
 def test_ask_jpeg_returns_yes_probability(tmp_path):
     vlm = vc.VlmCheck("http://x", send=lambda url, body: ("YES", 0.97), clock=iter([0.0, 2.0]).__next__)
     assert vlm.ask_jpeg(b"a", b"b") == (True, 2.0, 0.97)
+
+
+# ---------- VLM_CROP (11/13 실험): 달라진 자리를 잘라 다시 묻기 ----------
+
+def test_crop_widens_the_box_by_its_size_and_stays_inside_the_frame():
+    img = frame(0, 100, 200)
+    assert vc.crop(img, (50, 40, 10, 10)).shape[:2] == (30, 30)
+    assert vc.crop(img, (0, 0, 10, 10)).shape[:2] == (20, 20)  # 화면 밖으로는 안 넓힌다
+
+
+def test_ask_region_uses_its_own_question_and_cache_key(tmp_path):
+    calls = []
+    check = vc.VlmCheck("http://x", cache=str(tmp_path / "c.json"), send=fake_send("NO", calls), crop=True,
+                        clock=iter([0.0, 1.0, 2.0, 3.0]).__next__)
+    assert check.ask_region(frame(0), frame(9), (100, 100, 20, 20))[0] is False
+    assert calls[-1]["messages"][0]["content"][-1]["text"] == vc.CROP_PROMPT
+    check.ask(frame(0), frame(9))
+    assert len(calls) == 2  # 잘라 묻기와 전체 묻기는 답을 섞지 않는다
+    assert vc.from_env({"VLM_URL": "http://127.0.0.1:1", "VLM_CROP": "1"}).crop is True
+    assert vc.from_env({"VLM_URL": "http://127.0.0.1:1"}).crop is False  # 기본 꺼짐
+
+
+def test_apply_vlm_crop_drops_counted_spots_vlm_says_no_and_adds_furniture_spots_it_says_yes():
+    check = {"status": "NEEDS_CLEANING", "trash": {"unknown": 2}, "leftItems": {}, "confidence": {"unknown": [None, None]}}
+    regions = [{"box": (0, 0, 1, 1), "label": "unknown", "counted": True},
+               {"box": (5, 5, 1, 1), "label": "unknown", "counted": True},
+               {"box": (9, 9, 1, 1), "label": "chair", "counted": False}]
+    answers = {(0, 0, 1, 1): False, (5, 5, 1, 1): False, (9, 9, 1, 1): None}
+    room_camera.apply_vlm_crop(check, regions, lambda box: (answers[box], 2.0, None))
+    assert check["status"] == "CLEAN" and check["trash"] == {}  # 의자 옮김·빛 얼룩 (003·010)
+    assert [c["answer"] for c in check["vlmCrop"]] == [False, False, None]
+
+    chair = {"status": "CLEAN", "trash": {}, "leftItems": {}, "confidence": {}}
+    took = room_camera.apply_vlm_crop(chair, [{"box": (9, 9, 1, 1), "label": "chair", "counted": False}],
+                                      lambda box: (True, 2.0, 0.9))
+    assert chair["status"] == "NEEDS_CLEANING" and chair["trash"] == {"unknown": 1} and took == 2.0  # 의자 위 가방 (035)
+
+
+def test_apply_vlm_crop_keeps_belongings_and_unclear_answers():
+    check = {"status": "LEFT_ITEMS", "trash": {}, "leftItems": {"cell phone": 1}, "confidence": {"cell phone": [None]}}
+    room_camera.apply_vlm_crop(check, [{"box": (0, 0, 1, 1), "label": "cell phone", "counted": True}],
+                               lambda box: (None, 1.0, None))
+    assert check["status"] == "LEFT_ITEMS"  # 못 알아들은 답이면 그대로
+    room_camera.apply_vlm_crop(check, [{"box": (0, 0, 1, 1), "label": "cell phone", "counted": True}],
+                               lambda box: (False, 1.0, None))
+    assert check["status"] == "CLEAN" and check["leftItems"] == {}
+
+
+def test_judge_asks_crops_only_with_vlm_crop():
+    import desk_diff
+    from test_desk_diff import AREA, PAPER, desk
+    calls = []
+    vlm = vc.VlmCheck("http://x", rule="or", send=fake_send("NO", calls), crop=True, clock=iter(range(100)).__next__)
+    check, _ = te.judge(desk(), desk(PAPER), lambda f: [], desk=desk_diff.DeskCompare(AREA), vlm=vlm)
+    assert check["status"] == "CLEAN" and len(check["vlmCrop"]) == 1  # 종이 자리를 잘라 물었더니 NO
+    assert len(calls) == 2  # 잘라 묻기 1번 + 전체 묻기 1번
+    off = vc.VlmCheck("http://x", rule="or", send=fake_send("NO", []), clock=iter(range(100)).__next__)
+    check, _ = te.judge(desk(), desk(PAPER), lambda f: [], desk=desk_diff.DeskCompare(AREA), vlm=off)
+    assert check["status"] == "NEEDS_CLEANING" and "vlmCrop" not in check  # 기본은 예전과 같음

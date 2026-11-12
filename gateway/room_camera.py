@@ -98,6 +98,7 @@ DESK_DIFF_CONF = 0.5   # 책상 사진 비교로 찾은 물건의 확신도. 모
 PHOTO_MAX_SIDE = 1280  # 정리 확인 사진(TIDY_PHOTOS=1)은 긴 변을 이만큼으로 줄여 올린다
 PHOTO_QUALITY = 80     # JPEG 품질. 1280x720이면 보통 100~300KB
 PHOTO_MAX_BYTES = 1_000_000  # core 한도는 2MB지만 중간 프록시(nginx 기본 1MB)에 막히지 않게 1MB 아래로
+RETRIEVE_RECHECK_SEC = 600  # 찾으러 온 QR(core retrieve-pass, 10분)로 들어온 뒤 이만큼 지나 빈 방이면 다시 찍는다 (RETRIEVE_RECHECK_MIN)
 ENTRY_PIR_GRACE_SEC = 10  # PIR이 먼저 켜진 뒤 이 안에 카메라가 사람을 보면 보통 입실. 더 길면 카메라에 안 보인 사람이
                           # 그동안 뭘 두었을 수 있어 후보를 쓰지 않는다
 
@@ -366,8 +367,15 @@ class RoomWatcher:
     """찾은 목록을 받아서 (1) core에 보낼 재실 이벤트 (2) 정리 확인 결과를 만든다."""
 
     def __init__(self, room_id, check_objects=True, now=None, room_items=None, on_checkout=False,
-                 baseline_path=None, desk=None, labeler=None, entry_desk=None, photos=False, vlm=None):
+                 baseline_path=None, desk=None, labeler=None, entry_desk=None, photos=False, vlm=None,
+                 retrieve_sec=RETRIEVE_RECHECK_SEC):
         self.room_id = room_id
+        # 찾으러 온 뒤 다시 찍기 (11/12 재웅·지영): 두고 간 물건을 찾으러 10분 QR(purpose RETRIEVE)로 들어오면
+        # 앞 예약 다시 확인을 취소하지 않고, QR 시각 + retrieve_sec 뒤 방이 비면 RECHECK를 찍어 보낸다
+        self.retrieve_sec = retrieve_sec
+        self.retrieve = None         # {"reservationId", "at"}: 찾으러 온 QR을 받았고 아직 다시 찍을 때가 안 됨
+        self.retrieve_rid = None     # 찾으러 온 뒤 다시 확인을 요청한 예약 (recheck_pending에 들어감)
+        self.door_events = deque()   # 문 QR 스레드가 넣는 (purpose, 시각). 카메라 스레드가 update에서 꺼내 처리
         # vlm (VLM_URL, 10판): 퇴실 뒤 첫 확인 때 입실 전·퇴실 뒤 사진을 VLM에게 한 번 더 묻는다 (vlm_check.VlmCheck).
         # 입실 전 사진은 VLM에 보낼 크기로만 메모리에 둔다 (파일로 안 씀, 젯슨이 꺼지면 YOLO 결과만 보냄)
         self.vlm = vlm
@@ -543,6 +551,12 @@ class RoomWatcher:
             pir_since, self.pir_since = self.pir_since, None
             if self.snapshot is not None:
                 snap, self.snapshot = self.snapshot, None
+                if self.retrieve is not None:
+                    # 찾으러 온 사람 (10분 QR). 앞 예약 다시 확인은 그대로 두고, 이 빈 방은 다음 예약 기준으로 쓰지 않는다
+                    # (두고 간 물건이 찍힌 빈 방이라). 다음 팀 기준은 그다음 빈 방에서 새로 찍는다
+                    print(f"정리 확인 {self.room_id}번 방: 예약 {self.retrieve['reservationId']} 물건 찾으러 들어옴 "
+                          f"(QR 뒤 {self.retrieve_sec // 60}분 지나 방이 비면 다시 찍어요)")
+                    return
                 self.drop_recheck_on_entry()  # 빈 방 뒤 사람이 들어옴: 후보를 쓰든 버리든 앞 예약 다시 확인은 안 함
                 if pir_since is not None and now - pir_since > ENTRY_PIR_GRACE_SEC:
                     # 카메라엔 안 보였지만 PIR이 오래 켜져 있었다. 그 사이 뭘 두었을 수 있어 이 후보는 버린다
@@ -572,6 +586,40 @@ class RoomWatcher:
         self.snapshot = {"objects": self.count(seen), "img": img, "known": known, "labels": labels, "jpg": jpg,
                          "vlm": self.vlm_photo(photo, dets, seen), "at": now}
         self.pir_since = None
+
+    def door_opened(self, purpose, now):
+        """문 QR이 열렸다 (QR 스레드에서 부름). 카메라 스레드가 다음 update에서 처리한다."""
+        self.door_events.append((purpose, now))
+
+    def handle_door(self):
+        """찾으러 온 QR(RETRIEVE)이면 앞 예약 다시 확인을 남겨 두고, 다른 QR(다음 팀 등)이면 지금처럼 취소한다."""
+        while self.door_events:
+            purpose, at = self.door_events.popleft()
+            if purpose == "RETRIEVE":
+                rid = (self.recheck_base or {}).get("reservationId")
+                if rid is None:
+                    print(f"정리 확인 {self.room_id}번 방: 찾으러 온 QR이지만 다시 확인할 기준이 없어 다시 찍지 않음 "
+                          "(첫 확인이 깨끗했거나 젯슨이 꺼졌다 켜짐)")
+                    continue
+                self.retrieve = {"reservationId": rid, "at": at}
+                if self.recheck_pending and self.recheck_pending[0] == rid:
+                    self.recheck_pending = None  # 3시간 확인이 기다리던 중이었으면 찾으러 온 뒤 확인으로 대신한다
+                print(f"정리 확인 {self.room_id}번 방: 예약 {rid} 물건 찾으러 온 QR. {self.retrieve_sec // 60}분 뒤 빈 방이면 다시 찍어요")
+            else:
+                if self.retrieve is not None or self.retrieve_rid is not None:
+                    print(f"정리 확인 {self.room_id}번 방: 찾으러 온 뒤 다시 확인 전에 다른 QR로 들어와 취소")
+                self.retrieve = self.retrieve_rid = None
+                self.drop_recheck_on_entry()
+
+    def due_retrieve(self, now):
+        """찾으러 온 QR 뒤 retrieve_sec가 지났으면 다시 확인을 요청한다 (방이 비면 checkout_check가 찍는다)."""
+        if self.retrieve is None or now - self.retrieve["at"] < self.retrieve_sec:
+            return
+        if self.pending is not None or self.recheck_pending is not None:
+            return  # 퇴실 확인이 먼저
+        rid, self.retrieve = self.retrieve["reservationId"], None
+        self.retrieve_rid = rid
+        self.recheck_pending = (rid, now)
 
     def drop_recheck_on_entry(self):
         """앞 예약 퇴실 뒤 누가 들어왔다 (다음 팀·워크인·앞 팀이 가지러 옴). 그 뒤 물건은 누구 것인지 모르니
@@ -628,6 +676,9 @@ class RoomWatcher:
             self.sent_people, self.sent_occupied, self.sent_at = people, occupied, now
 
         check = None
+        if self.on_checkout:
+            self.handle_door()
+            self.due_retrieve(now)
         if self.on_checkout and self.check_objects:
             self.track_entry(self.people(dets), pir, now, now_iso, detail, dets, photo)
         if people > 0:
@@ -659,9 +710,13 @@ class RoomWatcher:
                 self.clear_entry()  # 그 예약의 기준이었다. 다음 예약 탓으로 쓰지 않게 버린다
             self.pending = None
         if self.on_checkout and self.recheck_pending and now - self.recheck_pending[1] >= PENDING_MAX_SEC:
-            print(f"정리 확인 {self.room_id}번 방: 예약 {self.recheck_pending[0]} 다시 확인 시각 뒤 10분 동안 "
-                  "방이 비지 않아 건너뜀")
-            self.cancel_recheck(self.recheck_pending[0])
+            rid = self.recheck_pending[0]
+            print(f"정리 확인 {self.room_id}번 방: 예약 {rid} 다시 확인 시각 뒤 10분 동안 방이 비지 않아 건너뜀")
+            if self.retrieve_rid == rid:  # 찾으러 온 뒤 확인만 건너뛴다. 3시간 뒤 확인 기준은 남긴다
+                self.retrieve_rid = None
+                self.postpone_recheck(rid)
+            else:
+                self.cancel_recheck(rid)
         return event, check
 
     def request_check(self, reservation_id, now, phase="FIRST"):
@@ -728,6 +783,8 @@ class RoomWatcher:
         안 잡혀 경고가 안 간다 (잘못 경고하지 않는 쪽).
         """
         base, self.recheck_base = self.recheck_base, None
+        retrieved = self.retrieve_rid == reservation_id
+        self.retrieve_rid = None
         if base is None or base["reservationId"] != reservation_id:
             return {"roomId": self.room_id, "status": "SKIPPED", "checkedAt": now_iso,
                     "reason": f"예약 {reservation_id}: 다시 확인할 기준이 없어 결과를 보내지 않음 (첫 확인이 깨끗했거나 젯슨이 꺼졌다 켜짐)"}
@@ -735,6 +792,10 @@ class RoomWatcher:
         check = self.check(seen, now_iso, base=base["objects"])
         check["reservationId"] = reservation_id
         check["phase"] = "RECHECK"
+        if retrieved:
+            check["afterRetrieve"] = True  # 화면 출력용 (core로는 안 보냄)
+            if check["status"] != "CLEAN":
+                self.recheck_base = base  # 아직 남음: 3시간 뒤 확인은 지금 규칙대로 (core가 그때 다시 부름)
         jpg = self.room_photo(photo, dets, seen)
         if jpg:
             check["photos"] = {"RECHECK": jpg}
@@ -967,7 +1028,9 @@ def check_message(check):
         return f"깨끗한 방 기준 저장 {check['roomId']}번 방: 물건 {n}개{listed}{why}"
     if check["status"] == "SKIPPED":
         return f"정리 확인 {check['roomId']}번 방: 건너뜀 - {check['reason']}"
-    again = " (3시간 뒤 다시 확인)" if check.get("phase") == "RECHECK" else ""
+    again = ""
+    if check.get("phase") == "RECHECK":
+        again = " (찾으러 온 뒤 다시 확인)" if check.get("afterRetrieve") else " (3시간 뒤 다시 확인)"
     if check["status"] == "CLEAN":
         return f"정리 확인 {check['roomId']}번 방{again}: 깨끗함"
     parts = []

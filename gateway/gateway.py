@@ -97,6 +97,7 @@ class Config:
     vlm_side: int = 768                    # VLM에 보내기 전 사진 긴 변 크기 (VLM_SIDE, 채점과 같은 값)
     vlm_eq: bool = False                   # 어두운 사진을 밝게 펴서 보냄 (VLM_EQ=1)
     tidy_results: str | None = "eval/tidy/results.jsonl"  # 채점 기록. 같은 설정의 시험 점수를 core에 같이 보냄 (TIDY_RESULTS, off면 안 보냄)
+    retrieve_recheck_min: int = 10         # 찾으러 온 QR(core retrieve-pass-minutes와 같은 값) 뒤 이만큼 지나 빈 방이면 다시 찍기
     tidy_photos: bool = False              # True면 정리 확인 때 빈 방 사진(입실 전·퇴실 뒤·3시간 뒤)을 core로 올린다 (Q-27)
     label_model: str | None = None         # 달라진 곳에 이름 붙일 모델 (YOLO-World ONNX). 없으면 YOLO_MODEL로
     baseline_file: str | None = "room_baseline.json"  # 깨끗한 방 기준을 적어 두는 파일. BASELINE_FILE=off면 메모리에만
@@ -157,6 +158,7 @@ def load_config(env=None):
         vlm_side=parse_number(env, "VLM_SIDE", Config.vlm_side, 64, 4096, int),
         vlm_eq=env.get("VLM_EQ") == "1",
         tidy_photos=env.get("TIDY_PHOTOS") == "1",
+        retrieve_recheck_min=parse_number(env, "RETRIEVE_RECHECK_MIN", Config.retrieve_recheck_min, 1, 180, int),
         tidy_results=None if env.get("TIDY_RESULTS", "").strip().lower() == "off"
         else (env.get("TIDY_RESULTS") or "").strip() or Config.tidy_results,
         label_model=env.get("LABEL_MODEL") or None,
@@ -547,11 +549,35 @@ def parse_recheck(value):
     return rid, when.timestamp()
 
 
+# 방 번호 → door_opened(purpose, 시각). 방 안 카메라가 켜지면 등록한다 (찾으러 온 QR이면 다시 확인을 남기려고)
+DOOR_LISTENERS = {}
+
+
+class DoorNotifyingVerifier:
+    """확인기를 감싸서, 문이 열리면(OPENED) 그 방 카메라에 core가 알려 준 purpose(RETRIEVE 등)를 전한다."""
+
+    def __init__(self, inner, listeners=None, clock=time.monotonic):
+        self.inner = inner
+        self.listeners = DOOR_LISTENERS if listeners is None else listeners
+        self.clock = clock
+
+    def verify(self, body):
+        res = self.inner.verify(body)
+        if isinstance(res, dict) and res.get("result") == "OPENED":
+            listener = self.listeners.get(body.get("roomId"))
+            if listener is not None:
+                try:
+                    listener(res.get("purpose"), self.clock())
+                except Exception as e:  # noqa: BLE001 - 문 열기 답은 꼭 돌려준다
+                    print(f"문 열림을 방 카메라에 못 알렸어요 ({e.__class__.__name__})")
+        return res
+
+
 def make_verifier(config):
     """설정에 맞는 확인기를 고른다. 나머지 코드는 어느 쪽인지 몰라도 된다."""
     if config.dry_run:
-        return DryRunVerifier()
-    return HttpVerifier(config.server, config.device_token)
+        return DoorNotifyingVerifier(DryRunVerifier())
+    return DoorNotifyingVerifier(HttpVerifier(config.server, config.device_token))
 
 
 # ---------- 우노가 보낸 한 줄 처리 ----------
@@ -624,7 +650,7 @@ def handle_occupancy(event, verifier, sensors=None, use_pir=True):
         print(f"재실 {body['roomId']}번 방 PIR: {state}, 조도: {event['light']} (카메라 이벤트에 합쳐 보냄)")
         return None
     print(f"재실 {body['roomId']}번 방: {state} (pir={event['pir']}, 조도={event['light']})")
-    if isinstance(verifier, DryRunVerifier):  # 연습 모드에서는 core에 보낼 모양을 그대로 보여 준다
+    if isinstance(getattr(verifier, "inner", verifier), DryRunVerifier):  # 연습 모드에서는 core에 보낼 모양을 그대로 보여 준다
         print("[DRY_RUN] POST /api/sensor-events", json.dumps(body, ensure_ascii=False))
     elif sensors is not None:
         sensors.push(body)
@@ -875,7 +901,8 @@ def start_room_camera(config, sensors):
     vlm = make_vlm(config) if on_checkout and detector.finds_objects else None
     watcher = room_camera.RoomWatcher(room, check_objects=detector.finds_objects, room_items=config.room_items,
                                       on_checkout=on_checkout, baseline_path=config.baseline_file,
-                                      desk=desk, labeler=labeler, entry_desk=entry_desk, photos=photos, vlm=vlm)
+                                      desk=desk, labeler=labeler, entry_desk=entry_desk, photos=photos, vlm=vlm,
+                                      retrieve_sec=config.retrieve_recheck_min * 60)
     cam = room_camera.open_camera(config.room_camera)
     send_check = send_photo = None
     if on_checkout:
@@ -892,6 +919,7 @@ def start_room_camera(config, sensors):
         if photos:
             send_photo = PhotoSender(config.server, config.device_token, room).start().push
             print("정리 확인 사진: 사람 0명인 빈 방 사진을 core에 올려요 (입실 전·퇴실 뒤·3시간 뒤, 30일 보관)")
+        DOOR_LISTENERS[room] = watcher.door_opened  # 찾으러 온 QR이면 앞 예약 다시 확인을 남기고 N분 뒤 다시 찍기
         CheckoutPoller(config.server, config.device_token, room,
                        lambda rid: watcher.request_check(rid, time.monotonic()),
                        on_recheck=lambda rid: watcher.request_check(rid, time.monotonic(), "RECHECK"),

@@ -1404,3 +1404,120 @@ def test_start_room_camera_turns_on_photo_sender(monkeypatch):
     gateway.start_room_camera(cfg, None).join(timeout=1)  # 연습 모드는 사진 안 찍음
     assert called == {"photos": False, "send": False}
     assert gateway.load_config({"TIDY_PHOTOS": "1"}).tidy_photos and not gateway.load_config({}).tidy_photos
+
+
+# ---------- 찾으러 온 뒤 다시 찍기 (11/12, core retrieve-pass) ----------
+
+def left_umbrella(retrieve_sec=600):
+    """예약 1이 우산을 두고 퇴실 → 첫 확인 LEFT_ITEMS, 다시 확인 기준이 남은 방."""
+    r = Room(RoomWatcher(1, on_checkout=True, retrieve_sec=retrieve_sec))
+    r.run([], 5).run([person()], 5).checkout(1).run([thing("umbrella")], SETTLE_SEC + 6)
+    r.run([thing("umbrella")], 5)  # 빈 방 후보가 잡힘
+    assert r.w.recheck_base == {"reservationId": 1, "objects": {}}
+    return r
+
+
+def test_retrieve_qr_entry_keeps_recheck(capsys):
+    """찾으러 온 QR(RETRIEVE)로 들어오면 앞 예약 다시 확인을 취소하지 않고, 그 빈 방을 다음 예약 기준으로 쓰지 않는다."""
+    # given
+    r = left_umbrella()
+    # when
+    r.w.door_opened("RETRIEVE", r.t)
+    r.run([person(), thing("umbrella")], 3)
+    # then
+    out = capsys.readouterr().out
+    assert r.w.recheck_base is not None and r.w.retrieve == {"reservationId": 1, "at": r.t - 3}
+    assert "다시 확인은 하지 않음" not in out and "물건 찾으러 들어옴" in out
+    assert r.w.entry is None  # 우산이 찍힌 빈 방을 다음 팀 기준으로 쓰지 않음
+
+
+def test_retrieve_does_not_recheck_before_minutes_pass():
+    """QR 뒤 10분이 안 됐으면 방이 비어도 찍지 않는다."""
+    r = left_umbrella()
+    r.w.door_opened("RETRIEVE", r.t)
+    r.run([person(), thing("umbrella")], 30).run([], 300)  # 우산 들고 나감, 아직 5분대
+    assert [c["phase"] for c in r.out] == ["FIRST"] and r.w.recheck_pending is None
+
+
+def test_retrieve_rechecks_empty_room_after_minutes_and_sends_clean():
+    """10분 뒤 빈 방이면 RECHECK를 찍어 보낸다. 가져갔으면 CLEAN, 3시간 뒤 확인 기준은 없앤다."""
+    # given
+    r = left_umbrella()
+    r.w.door_opened("RETRIEVE", r.t)
+    r.run([person(), thing("umbrella")], 30).run([], 600)
+    # when
+    r.run([], SETTLE_SEC + 2)
+    # then
+    rechecks = [c for c in r.out if c.get("phase") == "RECHECK"]
+    assert [(c["reservationId"], c["status"]) for c in rechecks] == [(1, "CLEAN")]
+    assert tidy_body(rechecks[0], "camera-1")["phase"] == "RECHECK" and "afterRetrieve" not in tidy_body(rechecks[0], "camera-1")
+    assert "찾으러 온 뒤 다시 확인" in check_message(rechecks[0])
+    assert r.w.recheck_base is None and r.w.retrieve is None and r.w.retrieve_rid is None
+
+
+def test_retrieve_recheck_still_left_keeps_three_hour_base():
+    """찾으러 왔는데 그대로 남았으면 LEFT_ITEMS를 보내고, 3시간 뒤 확인 기준은 지금 규칙대로 남긴다."""
+    r = left_umbrella(retrieve_sec=60)
+    r.w.door_opened("RETRIEVE", r.t)
+    r.run([person(), thing("umbrella")], 20).run([thing("umbrella")], 60 + SETTLE_SEC)
+    rechecks = [c for c in r.out if c.get("phase") == "RECHECK"]
+    assert [c["status"] for c in rechecks] == ["LEFT_ITEMS"]
+    assert r.w.recheck_base == {"reservationId": 1, "objects": {}}
+    r.w.request_check(1, r.t, "RECHECK")  # 3시간 뒤 core가 다시 부름
+    r.run([thing("umbrella")], SETTLE_SEC + 2)
+    assert [c["status"] for c in r.out if c.get("phase") == "RECHECK"] == ["LEFT_ITEMS", "LEFT_ITEMS"]
+
+
+def test_next_team_qr_before_retrieve_recheck_cancels(capsys):
+    """10분이 지나기 전에 다른 QR(다음 팀)로 들어오면 지금처럼 다시 확인을 취소한다."""
+    r = left_umbrella()
+    r.w.door_opened("RETRIEVE", r.t)
+    r.run([person(), thing("umbrella")], 30).run([], 60)
+    r.w.door_opened(None, r.t)  # 다음 팀 예약 QR (purpose 없음)
+    r.run([person()], 3).run([], 700)
+    assert r.w.recheck_base is None and r.w.retrieve is None
+    assert [c["phase"] for c in r.out] == ["FIRST"] and "다른 QR로 들어와 취소" in capsys.readouterr().out
+
+
+def test_retrieve_qr_without_base_does_nothing(capsys):
+    """첫 확인이 깨끗했으면(기준 없음) 찾으러 온 QR이 와도 다시 찍지 않는다."""
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([], 5).run([person()], 5).checkout(2).run([], SETTLE_SEC + 6)
+    r.w.door_opened("RETRIEVE", r.t)
+    r.run([], 700)
+    assert r.w.retrieve is None and [c["phase"] for c in r.out] == ["FIRST"]
+    assert "기준이 없어 다시 찍지 않음" in capsys.readouterr().out
+
+
+def test_retrieve_recheck_room_never_empty_keeps_three_hour_base():
+    """찾으러 온 뒤 10분 더 방이 안 비면 그 확인만 건너뛰고 3시간 뒤 확인 기준은 남긴다."""
+    r = left_umbrella(retrieve_sec=60)
+    r.w.door_opened("RETRIEVE", r.t)
+    r.run([person(), thing("umbrella")], 60 + PENDING_MAX_SEC + 5)
+    assert [c["phase"] for c in r.out] == ["FIRST"]
+    assert r.w.recheck_pending is None and r.w.recheck_base is not None and r.w.retrieve_rid is None
+
+
+def test_door_notifying_verifier_passes_purpose_to_room():
+    """문이 열리면(OPENED) 그 방 카메라에 purpose를 전하고, 거부면 안 전한다. 답은 그대로 돌려준다."""
+    seen = []
+
+    class Inner:
+        def __init__(self, res):
+            self.res = res
+
+        def verify(self, body):
+            return self.res
+
+    listeners = {1: lambda purpose, at: seen.append((purpose, at))}
+    v = gateway.DoorNotifyingVerifier(Inner({"result": "OPENED", "purpose": "RETRIEVE"}), listeners, clock=lambda: 7)
+    assert v.verify({"roomId": 1})["purpose"] == "RETRIEVE"
+    v.verify({"roomId": 2})  # 다른 방은 안 전함
+    gateway.DoorNotifyingVerifier(Inner({"result": "DENIED"}), listeners).verify({"roomId": 1})
+    gateway.DoorNotifyingVerifier(Inner(None), listeners).verify({"roomId": 1})
+    assert seen == [("RETRIEVE", 7)]
+
+
+def test_retrieve_recheck_minutes_setting():
+    assert gateway.load_config({"PORT": "x"}).retrieve_recheck_min == 10
+    assert gateway.load_config({"PORT": "x", "RETRIEVE_RECHECK_MIN": "15"}).retrieve_recheck_min == 15

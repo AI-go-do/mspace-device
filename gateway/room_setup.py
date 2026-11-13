@@ -134,7 +134,12 @@ class AutoRegister:
             self.log(f"공간 등록: 치울 것이 계속 보여서({room_camera.describe(leftover)}) 다음 빈 방 때 다시 해요")
             self.counted, self.skipped = [], 0
             return
-        write_profile(self.path, items, len(self.counted), self.skipped, self.minutes)
+        try:
+            write_profile(self.path, items, len(self.counted), self.skipped, self.minutes)
+        except OSError as e:  # 쓰기 권한·디스크 문제: 카메라 루프(인원 감시)는 계속, 모은 장은 버리고 다음 빈 방 때 다시
+            self.log(f"공간 등록: {self.path}에 못 적어서({e.__class__.__name__}) 다음 빈 방 때 다시 해요")
+            self.counted, self.skipped = [], 0
+            return
         self.done = True
         self.log(f"공간 등록 끝: 방 비품 {format_room_items(items) or '없음 (YOLO가 세는 물건 중에는 없음)'} → {self.path} "
                  "(다시 하려면 이 파일을 지우고 게이트웨이를 다시 켜요)")
@@ -172,7 +177,9 @@ def main(env=None):
     minutes = gateway.parse_number(env, "SETUP_MIN", SETUP_MIN, 1, 60, float)
     every = gateway.parse_number(env, "SETUP_EVERY", SETUP_EVERY, 1, 600, float)
     share = gateway.parse_number(env, "SETUP_SHARE", SETUP_SHARE, 0.5, 1.0, float)
-    path = env.get("ROOM_PROFILE") or PROFILE_FILE
+    path = config.room_profile
+    if path is None:
+        raise SystemExit("ROOM_PROFILE=off라서 등록 파일을 안 써요. 등록하려면 ROOM_PROFILE을 빼거나 파일 이름을 주세요.")
     detector = room_camera.make_detector(config.yolo_model, config.desk_area, config.floor_area, config.tile_grid)
     cam = room_camera.open_camera(config.room_camera)
 

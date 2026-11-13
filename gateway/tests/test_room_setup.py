@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 import gateway
 import room_setup
 from room_camera import Detection
@@ -105,6 +107,25 @@ def test_auto_register_starts_over_when_trash_keeps_showing(tmp_path):
     for i in range(6, 12):
         reg.feed(i * 10.0, [], lambda: [REMOTE])
     assert got == [{"remote": 1}]
+
+
+def test_auto_register_keeps_going_when_profile_cannot_be_written(tmp_path):
+    """파일을 못 쓰면 예외를 카메라 루프로 안 넘기고, 모은 장을 버린 뒤 다시 모은다 (모은 장이 끝없이 늘지 않게)."""
+    got, logs = [], []
+    reg = room_setup.AutoRegister(str(tmp_path / "no-dir" / "room_profile.json"), got.append, minutes=1, every=10,
+                                  log=logs.append)
+    for i in range(6):
+        reg.feed(i * 10.0, [], lambda: [REMOTE])
+    assert not got and not reg.done and reg.counted == []
+    assert "못 적어서" in logs[-1]
+
+
+def test_setup_command_does_nothing_with_profile_off(monkeypatch):
+    import room_camera
+    monkeypatch.setattr(room_camera, "open_camera", lambda *a: pytest.fail("카메라를 열면 안 됨"))
+    monkeypatch.setattr(room_camera, "make_detector", lambda *a: object())
+    with pytest.raises(SystemExit, match="ROOM_PROFILE=off"):
+        room_setup.main({"ROOM_CAMERA": "0", "YOLO_MODEL": "gateway/yolov8s.onnx", "ROOM_PROFILE": "off", "PORT": "none"})
 
 
 def test_camera_loop_feeds_the_register():

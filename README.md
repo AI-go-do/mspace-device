@@ -179,9 +179,9 @@ ROOM_CAMERA=2 YOLO_MODEL=gateway/yolov8s.onnx SEND_SENSORS=1 ~/mspace-venv/bin/p
   - **연습 모드** (`DRY_RUN=1`): 서버 없이, 사람이 있다가 다 나가고 30초가 지나면 확인하고 화면·기록 파일에만 남겨요
 - 판정: 기준(퇴실 모드는 입실 직전 빈 방, 연습 모드는 처음 본 빈 방)과 종류별 개수로 비교해서(자리는 안 봐서 조금 옮겨도 괜찮아요) 장치 안에서는 늘어난 컵·병 같은 쓰레기를 `NEEDS_CLEANING`, 노트북·가방·폰 같은 물건을 `LEFT_ITEMS`로 나눠 화면·기록에 보여 줘요. 서버로는 10차대로 둘 다 `LEFT_ITEMS`(두고 감) 하나로 합쳐 보내고, 없으면 `CLEAN`이에요
 - 방 비품: `ROOM_ITEMS=remote:1` 처럼 주면 그 개수까지는 있어도(책상 위) 없어도(바구니 안) 괜찮다고 봐요. 여러 개는 `remote:1,book:3`
-- **공간 등록 (새 방에 카메라를 단 뒤 한 번)**: 방 비품을 손으로 적지 않고 자동으로 정해요. 게이트웨이를 끄고, 방을 비우고 정리된 상태로 둔 뒤 젯슨에서 `cd ~/mspace-device && ROOM_CAMERA=2 YOLO_MODEL=gateway/yolov8s.onnx TILE_GRID=3 ~/mspace-venv/bin/python gateway/room_setup.py`
-  - 5분(`SETUP_MIN`) 동안 10초(`SETUP_EVERY`)마다 한 장씩 정리 확인과 같은 방법으로 물건을 세요. 사람이 보이는 장은 안 써요
-  - 쓸 수 있는 장의 80%(`SETUP_SHARE`) 이상에서 보인 물건만 비품이 돼요. 한두 장에서 잘못 본 것은 빠져요. 컵·종이 같은 치울 것이 계속 보이면 등록하지 않고 "치우고 다시"라고 알려 줘요
+- **공간 등록 (자동, 새 방에서 처음 켤 때)**: 방 비품을 손으로 적지 않아도 돼요. `ROOM_ITEMS`를 안 주고 게이트웨이를 켜면, 젯슨에 `room_profile.json`이 없을 때 **처음 빈 방 5분 동안 혼자 등록**하고 그대로 계속 돌아요. 사람이 들어오면 멈췄다가 다시 비면 이어서 세요. 다시 등록하려면 `room_profile.json`을 지우고 게이트웨이를 다시 켜요. 게이트웨이 없이 따로 해 보려면 `ROOM_CAMERA=2 YOLO_MODEL=gateway/yolov8s.onnx TILE_GRID=3 ~/mspace-venv/bin/python gateway/room_setup.py`
+  - 빈 방을 10초마다 한 장씩, 5분어치(30장) 정리 확인과 같은 방법으로 물건을 세요. 사람이 보이는 장은 안 써요
+  - 쓸 수 있는 장의 80% 이상에서 보인 물건만 비품이 돼요. 한두 장에서 잘못 본 것은 빠져요. 컵·종이 같은 치울 것이 계속 보이면 등록하지 않고 다음 빈 방 때 처음부터 다시 해요
   - 결과는 젯슨의 `room_profile.json`(`ROOM_PROFILE`)에만 써요. 사진은 저장하지 않고 서버로도 안 보내요. 게이트웨이는 `ROOM_ITEMS`를 안 주면 이 파일의 비품을 써요 (`ROOM_ITEMS`를 주면 그게 먼저, `ROOM_PROFILE=off`면 안 읽음)
   - 정확도를 올리는 기능이 아니라 새 방 설치 때 손으로 할 일을 줄이는 기능이에요. 의자 위 물건 확인 같은 건 아직 안 들어 있어요
 - 깨끗한 방 기준: 기준이 없으면 켠 뒤 처음 0명일 때 저장하고 `깨끗한 방 기준 저장 1번 방: 물건 N개`를 띄워요. `room_baseline.json`에 적어 두어서 **껐다 켜도 남아요** (켤 때 `저장된 깨끗한 방 기준 불러옴`). 다시 찍으려면 `rm room_baseline.json` 하고 다시 켜요. 파일 없이 메모리에만 두려면 `BASELINE_FILE=off`. 기준이 없을 때 퇴실하면 결과 대신 그때 모습을 기준으로 저장해요

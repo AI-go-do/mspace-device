@@ -1,5 +1,8 @@
 """공간 등록: 새 방에 카메라를 단 뒤 5분 동안 빈 방을 여러 번 보고 방 비품(ROOM_ITEMS)을 자동으로 정한다.
 
+게이트웨이는 등록 파일이 없으면 켜진 뒤 처음 빈 방 5분 동안 혼자 등록한다 (AutoRegister, 명령어 필요 없음).
+이 파일을 명령어로 돌리는 건 게이트웨이 없이 따로 해 보고 싶을 때만.
+
 지금은 방마다 `ROOM_ITEMS=remote:1`처럼 사람이 직접 적는다. 이걸 대신한다.
 - 몇 초마다 한 장씩 찍어 정리 확인과 같은 방법(detect_detailed: 전체 + 조각 + DESK_AREA·FLOOR_AREA)으로 물건을 센다
 - 사람이 보이는 장은 쓰지 않는다 (사람이 든 휴대폰·가방을 비품으로 넣지 않게)
@@ -79,6 +82,63 @@ def load_profile_items(path):
     return {str(k): int(v) for k, v in items.items() if isinstance(v, int) and v > 0}
 
 
+def count_items(dets):
+    """정리 확인에서 보는 물건만 종류별로 센다. 사람이 보이면 None (그 장은 안 씀)."""
+    import room_camera
+    if any(d.label == "person" for d in dets):
+        return None
+    counts = {}
+    for d in dets:
+        if d.label in room_camera.TRASH or d.label in room_camera.BELONGINGS:
+            counts[d.label] = counts.get(d.label, 0) + 1
+    return counts
+
+
+class AutoRegister:
+    """게이트웨이 안에서 하는 공간 등록 (명령어 없이).
+
+    등록 파일이 없으면 게이트웨이가 켜진 뒤 빈 방을 every초마다 한 장씩 자세히 센다.
+    사람이 보이면 그 장은 건너뛰고(멈춤), 다시 비면 이어서 센다. minutes 분어치 장이 모이면 비품을 정해 파일에 쓰고
+    on_done(비품)을 부른다. 치울 것이 계속 보였으면 모은 장을 버리고 다음 빈 방 때 처음부터 다시 한다.
+    """
+
+    def __init__(self, path, on_done, minutes=SETUP_MIN, every=SETUP_EVERY, share=SETUP_SHARE, log=print):
+        import room_camera
+        self.path, self.on_done, self.every, self.share, self.log = path, on_done, every, share, log
+        self.need = max(MIN_FRAMES, int(round(minutes * 60 / every)))
+        self.minutes = minutes
+        self.trash = room_camera.TRASH
+        self.counted, self.skipped, self.last, self.done = [], 0, None, False
+
+    def feed(self, now, dets, detail):
+        """카메라 한 장마다 부른다. dets = 빠르게 센 것, detail() = 자세히 센 것 (every초에 한 번만 부름)."""
+        if self.done or detail is None or (self.last is not None and now - self.last < self.every):
+            return
+        if any(d.label == "person" for d in dets):
+            return  # 사람이 있는 동안은 기다린다 (자세히 세지도 않음)
+        self.last = now
+        counts = count_items(detail())
+        if counts is None:
+            self.skipped += 1
+            return
+        self.counted.append(counts)
+        if len(self.counted) == 1:
+            self.log(f"공간 등록: 빈 방을 {self.need}장 모으는 중이에요 ({self.every:g}초마다, 사람이 오면 멈춤)")
+        if len(self.counted) < self.need:
+            return
+        items, leftover = decide_room_items(self.counted, self.share, self.trash)
+        if leftover:
+            import room_camera
+            self.log(f"공간 등록: 치울 것이 계속 보여서({room_camera.describe(leftover)}) 다음 빈 방 때 다시 해요")
+            self.counted, self.skipped = [], 0
+            return
+        write_profile(self.path, items, len(self.counted), self.skipped, self.minutes)
+        self.done = True
+        self.log(f"공간 등록 끝: 방 비품 {format_room_items(items) or '없음'} → {self.path} "
+                 "(다시 하려면 이 파일을 지우고 게이트웨이를 다시 켜요)")
+        self.on_done(items)
+
+
 def watch(detect, grab, minutes, every, now=time.monotonic, sleep=time.sleep, log=print):
     """minutes 동안 every초마다 grab()한 장을 detect()로 세서 (장마다 센 것, 사람 때문에 건너뛴 장 수)를 돌려준다."""
     import room_camera
@@ -87,15 +147,11 @@ def watch(detect, grab, minutes, every, now=time.monotonic, sleep=time.sleep, lo
     while True:
         frame = grab()
         if frame is not None:
-            dets = detect(frame)
-            if any(d.label == "person" for d in dets):
+            counts = count_items(detect(frame))
+            if counts is None:
                 skipped += 1
                 log("사람이 보여서 이 장은 안 써요")
             else:
-                counts = {}
-                for d in dets:
-                    if d.label in room_camera.TRASH or d.label in room_camera.BELONGINGS:
-                        counts[d.label] = counts.get(d.label, 0) + 1
                 counted.append(counts)
                 log(f"{len(counted)}장째: {room_camera.describe(counts) or '물건 없음'}")
         if now() + every > end:

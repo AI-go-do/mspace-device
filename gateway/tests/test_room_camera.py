@@ -817,7 +817,7 @@ def test_start_room_camera(monkeypatch):
     monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
 
     def fake_run(watcher, cam, detector, push, pir_now, on_frame=None, preview=None, send_check=None,
-                 send_photo=None):
+                 send_photo=None, register=None):
         gateway.LAST_PIR[3] = (1, gateway.time.monotonic())
         on_frame()
         called.update(room=watcher.room_id, cam=cam, check=watcher.check_objects, pir=pir_now(),
@@ -842,7 +842,7 @@ def test_start_room_camera_uses_checkout_mode_when_sending(monkeypatch):
     monkeypatch.setattr(gateway.CheckoutPoller, "start", lambda self: polled.append(self.url) or self)
 
     def fake_run(watcher, cam, detector, push, pir_now, on_frame=None, preview=None, send_check=None,
-                 send_photo=None):
+                 send_photo=None, register=None):
         called.update(checkout=watcher.on_checkout, send=send_check is not None)
 
     monkeypatch.setattr(room_camera, "run_room_camera", fake_run)
@@ -1486,7 +1486,7 @@ def test_start_room_camera_turns_on_photo_sender(monkeypatch):
     monkeypatch.setattr(gateway.CheckoutPoller, "start", lambda self: self)
 
     def fake_run(watcher, cam, detector, push, pir_now, on_frame=None, preview=None, send_check=None,
-                 send_photo=None):
+                 send_photo=None, register=None):
         called.update(photos=watcher.photos, send=send_photo is not None)
 
     monkeypatch.setattr(room_camera, "run_room_camera", fake_run)

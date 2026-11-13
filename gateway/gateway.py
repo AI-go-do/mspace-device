@@ -928,14 +928,18 @@ def start_room_camera(config, sensors):
                                       retrieve_sec=config.retrieve_recheck_min * 60, tile_grid=config.tile_grid)
     cam = room_camera.open_camera(config.room_camera)
     send_check = send_photo = None
-    if on_checkout:
+
+    def set_score(cfg):
         import model_score
-        score = model_score.find(config, load_config, config.tidy_results,
+        score = model_score.find(cfg, load_config, cfg.tidy_results,
                                  vlm_model=vlm.model if vlm is not None else None)
         if score:
             score.pop("presence", None)  # 채점 표는 core에 안 보낸다. 확신도는 사진마다 (tidy_body)
         watcher.model_score = score
         print(model_score.describe(score))
+
+    if on_checkout:
+        set_score(config)
         print("물건마다 확신도: VLM이 답하면 \"새 물건 있음\"이라 할 확률, 답이 없으면 YOLO 점수 (둘 다 없으면 50%)")
         tidy = SensorSender(config.server, config.device_token, path=f"/api/rooms/{room}/tidy-checks",
                             drop=TIDY_DROP, name="정리 확인 전송", say_ok=True).start()
@@ -953,12 +957,25 @@ def start_room_camera(config, sensors):
               "기준은 사람이 처음 보이기 직전 3초 빈 방 (그 예약 동안 생긴 것만 봄)")
     else:
         print("정리 확인: 연습 모드 (모두 나가고 30초 뒤 확인, 서버로 안 보냄)")
+    register = None
+    if (not config.room_items and config.room_profile and detector.finds_objects
+            and not os.path.exists(config.room_profile)):
+        import room_setup
+
+        def registered(items):  # 등록이 끝나면 바로 그 비품으로 판정하고, 시험 점수도 그 비품 설정으로 다시 찾는다
+            watcher.room_items = dict(items)
+            if on_checkout:
+                set_score(replace(config, room_items=dict(items)))
+
+        register = room_setup.AutoRegister(config.room_profile, registered)
+        print(f"공간 등록: 등록 파일({config.room_profile})이 없어서, 처음 빈 방 "
+              f"{room_setup.SETUP_MIN}분 동안 방 비품을 자동으로 정해요")
     t = threading.Thread(target=room_camera.run_room_camera,
                          args=(watcher, cam, detector, with_light(camera_push(config, sensors), room),
                                lambda: fresh_pir(room)),
                          kwargs={"preview": start_preview(config.preview_port, config.preview_host),
                                  "on_frame": lambda: CAMERA_ROOMS.__setitem__(room, time.monotonic()),
-                                 "send_check": send_check, "send_photo": send_photo},
+                                 "send_check": send_check, "send_photo": send_photo, "register": register},
                          daemon=True)
     t.start()
     return t

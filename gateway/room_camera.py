@@ -1386,13 +1386,14 @@ def finish_check(watcher, check, log_path, send_check, send_photo):
 
 def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path="room_checks.jsonl",
                     every=1.0, clock=time.monotonic, sleep=time.sleep, on_frame=lambda: None, preview=None,
-                    warn_every=10.0, send_check=None, send_photo=None):
+                    warn_every=10.0, send_check=None, send_photo=None, register=None):
     """카메라에서 1초마다 한 장씩 세서 watcher에 넣는다. 사진은 저장하지 않는다
     (TIDY_PHOTOS=1이면 사람 0명인 빈 방 사진만 core로 올리고, 입실 전 사진은 퇴실 확인 때까지만 젯슨에 둔다).
 
     on_frame: 사진을 잘 읽을 때마다 부른다 (게이트웨이가 카메라가 살아 있는지 본다).
     send_check: 퇴실 모드에서 예약에 붙은 정리 확인 결과를 서버로 보낸다 (tidy_body 형식).
     send_photo: 결과에 붙은 빈 방 사진(TIDY_PHOTOS)을 결과 다음에 올린다 (photo_body 형식). 기록 파일엔 안 남긴다.
+    register: 공간 등록(room_setup.AutoRegister). 등록 파일이 없을 때만 주고, 빈 방일 때 몇 초마다 자세히 세어 비품을 정한다.
     """
     print(f"방 안 카메라 켜짐: {watcher.room_id}번 방")
     last_warn = None
@@ -1418,6 +1419,8 @@ def run_room_camera(watcher, cam, detector, push, pir_now=lambda: None, log_path
                         print("화면 보기 오류(카메라는 계속 돌아요):", repr(e))
                 detailed = getattr(detector, "detect_detailed", None)
                 detail = (lambda: detailed(frame)) if detailed else None  # 기준·정리 확인 때만 불림
+                if register is not None:  # 공간 등록 (빈 방일 때 SETUP_EVERY초마다만 자세히 셈)
+                    register.feed(clock(), dets, detail)
                 # 책상 사진 비교(DESK_PHOTO)·정리 확인 사진(TIDY_PHOTOS) 때만 지금 화면을 쓴다
                 photo = ((lambda: frame) if watcher.desk is not None or getattr(watcher, "photos", False)
                          or getattr(watcher, "vlm", None) is not None else None)

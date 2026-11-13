@@ -47,7 +47,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
@@ -84,6 +84,7 @@ class Config:
     preview_host: str = "127.0.0.1"        # 화면 보기를 열 주소. 맥에서 보려면 Tailscale IP (전체 공개 0.0.0.0은 피함)
     yolo_model: str | None = None          # YOLO ONNX 모델 파일. 없으면 사람만 세는 기본 방식(HOG)
     room_items: dict = field(default_factory=dict)  # 방 비품 {"remote": 1}: 그 개수까지는 있어도 없어도 괜찮음
+    room_profile: str | None = "room_profile.json"  # 공간 등록(room_setup.py) 결과. ROOM_ITEMS를 안 주면 여기 비품을 씀
     desk_area: tuple | None = None         # 책상 부분 (x1, y1, x2, y2) 화면 비율. 정리 확인 때 책상만 확대해서 한 번 더 본다
     tile_grid: int = 2                     # 정리 확인 때 화면을 몇 줄로 잘라 보나 (TILE_GRID, 2 = 4조각, 3 = 9조각)
     floor_area: tuple | None = None        # 바닥 부분 (x1, y1, x2, y2) 화면 비율. 정리 확인 때 바닥도 확대해서 한 번 더 본다
@@ -149,6 +150,8 @@ def load_config(env=None):
         preview_port=int(env["PREVIEW_PORT"]) if _is_number(env.get("PREVIEW_PORT", "")) else None,
         preview_host=env.get("PREVIEW_HOST") or Config.preview_host,
         room_items=parse_room_items(env.get("ROOM_ITEMS", "")),
+        room_profile=(None if env.get("ROOM_PROFILE") == "off"
+                      else env.get("ROOM_PROFILE") or Config.room_profile),
         desk_area=parse_desk_area(env.get("DESK_AREA", "")),
         floor_area=parse_desk_area(env.get("FLOOR_AREA", ""), "FLOOR_AREA"),
         tile_grid=parse_number(env, "TILE_GRID", Config.tile_grid, 2, 4, int),
@@ -892,9 +895,23 @@ def make_vlm(config):
     return vlm
 
 
+def room_items(config):
+    """방 비품: ROOM_ITEMS를 주면 그것, 아니면 공간 등록(room_setup.py) 파일의 비품, 둘 다 없으면 없음."""
+    if config.room_items:
+        return config.room_items
+    import room_setup
+    items = room_setup.load_profile_items(config.room_profile)
+    if items is not None:
+        print(f"방 비품: 공간 등록 파일({config.room_profile})에서 {room_setup.format_room_items(items) or '없음'}")
+    return items or {}
+
+
 def start_room_camera(config, sensors):
     """방 안 웹캠 인원 세기·정리 확인을 뒤에서(스레드) 켠다."""
     import room_camera  # 켤 때만 불러온다 (OpenCV는 젯슨에만 있으면 됨)
+    # 비품을 여기서 한 번 정한다: 판정(RoomWatcher)과 시험 점수 찾기(model_score.find)가 같은 비품을 보게.
+    # 오프라인 채점(tidy_eval)은 공간 등록 파일을 안 읽고 ROOM_ITEMS만 쓴다 (문제집마다 정답지 기준이 정해져 있음)
+    config = replace(config, room_items=room_items(config))
     room = config.room_camera_room
     CAMERA_ROOMS[room] = time.monotonic()  # 켤 때 한 번 잡고, 이후 사진을 읽을 때마다 새로 적는다
     detector = room_camera.make_detector(config.yolo_model, config.desk_area, config.floor_area, config.tile_grid)
@@ -913,14 +930,18 @@ def start_room_camera(config, sensors):
                                       retrieve_sec=config.retrieve_recheck_min * 60, tile_grid=config.tile_grid)
     cam = room_camera.open_camera(config.room_camera)
     send_check = send_photo = None
-    if on_checkout:
+
+    def set_score(cfg):
         import model_score
-        score = model_score.find(config, load_config, config.tidy_results,
+        score = model_score.find(cfg, load_config, cfg.tidy_results,
                                  vlm_model=vlm.model if vlm is not None else None)
         if score:
             score.pop("presence", None)  # 채점 표는 core에 안 보낸다. 확신도는 사진마다 (tidy_body)
         watcher.model_score = score
         print(model_score.describe(score))
+
+    if on_checkout:
+        set_score(config)
         print("물건마다 확신도: VLM이 답하면 \"새 물건 있음\"이라 할 확률, 답이 없으면 YOLO 점수 (둘 다 없으면 50%)")
         tidy = SensorSender(config.server, config.device_token, path=f"/api/rooms/{room}/tidy-checks",
                             drop=TIDY_DROP, name="정리 확인 전송", say_ok=True).start()
@@ -938,12 +959,25 @@ def start_room_camera(config, sensors):
               "기준은 사람이 처음 보이기 직전 3초 빈 방 (그 예약 동안 생긴 것만 봄)")
     else:
         print("정리 확인: 연습 모드 (모두 나가고 30초 뒤 확인, 서버로 안 보냄)")
+    register = None
+    if (not config.room_items and config.room_profile and detector.finds_objects
+            and not os.path.exists(config.room_profile)):
+        import room_setup
+
+        def registered(items):  # 등록이 끝나면 바로 그 비품으로 판정하고, 시험 점수도 그 비품 설정으로 다시 찾는다
+            watcher.room_items = dict(items)
+            if on_checkout:
+                set_score(replace(config, room_items=dict(items)))
+
+        register = room_setup.AutoRegister(config.room_profile, registered)
+        print(f"공간 등록: 등록 파일({config.room_profile})이 없어서, 처음 빈 방 "
+              f"{room_setup.SETUP_MIN}분 동안 방 비품을 자동으로 정해요")
     t = threading.Thread(target=room_camera.run_room_camera,
                          args=(watcher, cam, detector, with_light(camera_push(config, sensors), room),
                                lambda: fresh_pir(room)),
                          kwargs={"preview": start_preview(config.preview_port, config.preview_host),
                                  "on_frame": lambda: CAMERA_ROOMS.__setitem__(room, time.monotonic()),
-                                 "send_check": send_check, "send_photo": send_photo},
+                                 "send_check": send_check, "send_photo": send_photo, "register": register},
                          daemon=True)
     t.start()
     return t

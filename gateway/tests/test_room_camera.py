@@ -1447,6 +1447,51 @@ def test_entry_photo_from_another_moment_is_not_used(tmp_path):
     assert w.entry is not None and w.entry["jpg"] is None
 
 
+def red_near(jpg, x, y, r=40):
+    """사진의 (x, y) 둘레 r 픽셀 안에 빨간 픽셀이 있는지 (JPEG라 조금 번진 것도 빨강으로 본다)."""
+    import cv2
+    img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR).astype(int)
+    part = img[max(0, y - r):y + r, max(0, x - r):x + r]
+    return bool(((part[..., 2] > 180) & (part[..., 1] < 90) & (part[..., 0] < 90)).any())
+
+
+def test_draw_marks_circles_each_box_and_keeps_original():
+    out = room_camera.draw_marks(FRAME, [(200, 200, 40, 40)])
+    assert out is not FRAME and (FRAME == 120).all()  # 원본은 그대로 (VLM·책상 비교가 같은 화면을 씀)
+    jpg = room_camera.photo_jpeg(out)
+    assert red_near(jpg, 220, 220, r=60) and not red_near(jpg, 1000, 600)
+    assert room_camera.draw_marks(FRAME, []) is FRAME
+    assert room_camera.draw_marks(object(), [(0, 0, 1, 1)]) is not None  # 못 그려도 원래 것을 돌려줌
+
+
+def test_tidy_photos_circle_left_items_only_on_after_photos():
+    """퇴실 뒤·3시간 뒤 사진에 남은 물건 자리를 빨간 동그라미로 (11/13 수연). 입실 전 사진·결과에는 안 넣는다."""
+    r = PhotoRoom(RoomWatcher(1, on_checkout=True, photos=True))
+    r.run([], 5).run([person()], 5).checkout(1).run([thing("umbrella", x=600, y=300)], SETTLE_SEC + 6)
+    photos = r.out[0]["photos"]
+    assert red_near(photos["FIRST"], 620, 320, r=60) and not red_near(photos["ENTRY"], 620, 320, r=60)
+    assert "marks" not in r.out[0]
+    r.w.request_check(1, r.t, "RECHECK")
+    r.run([thing("umbrella", x=600, y=300)], SETTLE_SEC + 6)
+    assert red_near(r.out[1]["photos"]["RECHECK"], 620, 320, r=60)
+
+
+def test_tidy_photos_circle_only_the_new_one_when_one_was_there_before():
+    """입실 전에 우산 1개가 있었고 2개가 됐으면, 확신도와 같은 쪽(점수 낮은 것) 1개만 동그라미."""
+    old = Detection("umbrella", 0.9, (100, 100, 40, 40))
+    new = Detection("umbrella", 0.5, (900, 500, 40, 40))
+    r = PhotoRoom(RoomWatcher(1, on_checkout=True, photos=True))
+    r.run([old], 5).run([person()], 5).checkout(1).run([old, new], SETTLE_SEC + 6)
+    jpg = r.out[0]["photos"]["FIRST"]
+    assert red_near(jpg, 920, 520, r=60) and not red_near(jpg, 120, 120, r=30)
+
+
+def test_tidy_photos_have_no_circle_when_clean():
+    r = PhotoRoom(RoomWatcher(1, on_checkout=True, photos=True))
+    r.run([], 5).run([person()], 5).checkout(1).run([], SETTLE_SEC + 6)
+    assert r.out[0]["status"] == "CLEAN" and not red_near(r.out[0]["photos"]["FIRST"], 640, 360, r=360)
+
+
 def test_photo_jpeg_shrinks_big_frames():
     import cv2
     jpg = room_camera.photo_jpeg(np.random.randint(0, 255, (2160, 3840, 3), np.uint8))

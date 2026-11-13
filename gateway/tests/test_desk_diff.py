@@ -578,3 +578,32 @@ def test_furniture_seen_setting_comes_from_env():
     assert on.furniture_seen is True
     off = DeskCompare(AREA, **desk_diff.settings(gateway.load_config({"PORT": "x"})))
     assert off.furniture_seen is False  # 기본은 예전과 같음
+
+
+def test_desk_finds_are_circled_on_the_photo_but_moved_room_things_are_not():
+    """책상 비교로 찾은 곳도 사진 동그라미 자리(last_marks)에 들어가고, 원래 있던 리모컨을 옮긴 곳은 안 들어간다."""
+    w = RoomWatcher(1, desk=DeskCompare(AREA))
+    check = visit(w, [], desk(PHONE, PAPER))
+    assert check["trash"] == {"unknown": 2} and "marks" not in check
+    centers = sorted((x + bw / 2, y + bh / 2) for x, y, bw, bh in w.last_marks)
+    assert len(centers) == 2
+    for (cx, cy), (x, y, bw, bh, _) in zip(centers, sorted([PHONE, PAPER])):
+        assert abs(cx - (x + bw / 2)) < 30 and abs(cy - (y + bh / 2)) < 30
+    w = RoomWatcher(1, desk=DeskCompare(AREA, light="ssim", move=True), room_items={"remote": 1})
+    remote = Detection("remote", 0.8, (700, 700, 45, 30))
+    phone = Detection("cell phone", 0.7, (900, 400, 40, 80))
+    t = 0
+    for _ in range(3):
+        w.update([remote], now=t, photo=lambda: desk(REMOTE, noise=6))
+        t += 1
+    for _ in range(5):
+        w.update([Detection("person", 0.9, (0, 0, 50, 100))], now=t)
+        t += 1
+    after = desk(FLIPPED_REMOTE, PHONE, noise=6)
+    laptop = Detection("laptop", 0.4, (698, 699, 50, 33))
+    check = None
+    for _ in range(room_camera.EMPTY_CHECK_SEC + 10):
+        check = check or w.update([laptop, phone], now=t, photo=lambda: after)[1]
+        t += 1
+    assert check["leftItems"] == {"cell phone": 1}
+    assert w.last_marks == [phone.box]  # 뒤집힌 리모컨(laptop으로 봄)은 동그라미 없음

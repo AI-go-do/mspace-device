@@ -389,7 +389,7 @@ def photo_jpeg(frame):
     return None
 
 
-MARK_COLOR = (0, 0, 255)  # 빨강 (OpenCV는 BGR 순서)
+MARK_COLOR = (0, 0, 255)  # 빨강 (OpenCV는 BGR 순서). 11/13 수연: 붉은 주황으로 바꿔 봤다가 "그냥 빨강이 낫네"
 
 
 def draw_marks(frame, marks):
@@ -405,10 +405,17 @@ def draw_marks(frame, marks):
         h, w = out.shape[:2]
         thick = max(2, round(max(h, w) / 300))  # 1280 사진에서 4픽셀 정도: 줄여 올려도 보이게
         for x, y, bw, bh in marks:
-            center = (int(x + bw / 2), int(y + bh / 2))
-            # 상자 네 귀퉁이가 타원 안에 들어가게 반지름을 상자 반쪽의 √2배로 (작은 물건도 보이게 최소 두께의 5배)
-            axes = (max(int(bw / 2 * 1.42), thick * 5), max(int(bh / 2 * 1.42), thick * 5))
-            cv2.ellipse(out, center, axes, 0, 0, 360, MARK_COLOR, thick)
+            # 화면 밖으로 나간 부분은 잘라서, 큰 상자(책상 비교로 넓게 잡힌 곳)도 타원이 화면 안에 다 보이게 (11/13 #57:
+            # 상자의 √2배로 그렸더니 큰 곳은 타원이 화면 밖으로 나가 가장자리 호만 보였다)
+            x1, y1 = max(0.0, x), max(0.0, y)
+            x2, y2 = min(float(w), x + bw), min(float(h), y + bh)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            center = (int((x1 + x2) / 2), int((y1 + y2) / 2))
+            # 상자에 꼭 맞는 타원 + 선 두께 3배 여유. 작은 물건도 잘 보이게 반지름은 최소 두께의 10배
+            # (11/13 수연 "동그라미가 좀 작다": 5배였을 때 마우스만 한 물건이 작게 보임)
+            axes = (max(int((x2 - x1) / 2) + thick * 3, thick * 10), max(int((y2 - y1) / 2) + thick * 3, thick * 10))
+            cv2.ellipse(out, center, axes, 0, 0, 360, MARK_COLOR, thick, cv2.LINE_AA)
         return out
     except Exception as e:  # noqa: BLE001 - 동그라미 못 그려도 사진은 올린다
         print(f"정리 확인 사진에 동그라미를 못 그렸어요 ({e.__class__.__name__}). 그냥 올려요")
@@ -773,6 +780,9 @@ class RoomWatcher:
         marks: 물건이 있는 것 같은 곳(화면 좌표 상자). 빨간 동그라미를 그려서 올린다 (11/13 수연)."""
         if not self.photos or photo is None or any(self.people(d) for d in seen):
             return None
+        if marks:  # 어디에 그렸는지 화면에만 (기록 파일·core에는 안 남김). 동그라미가 이상할 때 상자를 보려고
+            print(f"정리 확인 사진 동그라미 {len(marks)}곳 (x, y, 너비, 높이): "
+                  + ", ".join(f"({x:.0f}, {y:.0f}, {bw:.0f}, {bh:.0f})" for x, y, bw, bh in marks))
         return photo_jpeg(draw_marks(photo(), marks))
 
     def update(self, dets, now, pir=None, now_iso=None, detail=None, photo=None):

@@ -1452,7 +1452,8 @@ def red_near(jpg, x, y, r=40):
     import cv2
     img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR).astype(int)
     part = img[max(0, y - r):y + r, max(0, x - r):x + r]
-    return bool(((part[..., 2] > 180) & (part[..., 1] < 90) & (part[..., 0] < 90)).any())
+    r_, g, b_ = part[..., 2], part[..., 1], part[..., 0]
+    return bool(((r_ > g + 60) & (r_ > b_ + 60)).any())
 
 
 def test_draw_marks_circles_each_box_and_keeps_original():
@@ -1462,6 +1463,14 @@ def test_draw_marks_circles_each_box_and_keeps_original():
     assert red_near(jpg, 220, 220, r=60) and not red_near(jpg, 1000, 600)
     assert room_camera.draw_marks(FRAME, []) is FRAME
     assert room_camera.draw_marks(object(), [(0, 0, 1, 1)]) is not None  # 못 그려도 원래 것을 돌려줌
+
+
+def test_draw_marks_keeps_big_or_edge_boxes_inside_the_photo():
+    """화면 가장자리의 큰 상자도 타원이 화면 안에 보인다 (11/13 #57: 상자보다 크게 그려 가장자리 호만 보임)."""
+    jpg = room_camera.photo_jpeg(room_camera.draw_marks(FRAME, [(900, 100, 600, 700)]))  # 오른쪽·아래가 화면 밖
+    assert red_near(jpg, 900, 410, r=25)        # 타원 왼쪽 끝이 상자 왼쪽 근처에 보임
+    assert red_near(jpg, 1090, 100, r=25)       # 위쪽 끝도 화면 안
+    assert room_camera.draw_marks(FRAME, [(2000, 900, 50, 50)]) is not None  # 완전히 밖이면 건너뜀
 
 
 def test_tidy_photos_circle_left_items_only_on_after_photos():

@@ -172,7 +172,7 @@ def test_trash_and_left_items():
     check = run_visit(RoomWatcher(1), after)
     assert check["status"] == "LEFT_ITEMS"
     assert check["trash"] == {"cup": 2} and check["leftItems"] == {"laptop": 1}
-    assert check_message(check) == "정리 확인 1번 방: 두고 간 물건 노트북 1 / 치울 것 컵 2"
+    assert check_message(check).splitlines()[0] == "정리 확인 1번 방: 두고 간 물건 노트북 1 / 치울 것 컵 2"
 
 
 def test_item_that_was_there_when_clean_is_ignored():
@@ -250,6 +250,20 @@ def test_tile_boxes_cover_screen_with_overlap():
     tiles = tile_boxes(1920, 1080)
     assert tiles[0] == (0, 0, 1056, 594) and tiles[3] == (864, 486, 1056, 594)
     assert tiles[0][2] > tiles[1][0]  # 왼쪽 조각 끝(1056)이 오른쪽 조각 시작(864)보다 뒤: 가운데가 겹침
+
+
+def test_tile_grid_3_makes_nine_overlapping_tiles():
+    """TILE_GRID=3: 9조각. 조각 하나 = 화면의 1/3 × 1.1, 옆 조각과 겹치고 화면 끝까지 덮는다 (책상 상자 없이 작은 물건 보기)."""
+    tiles = tile_boxes(1920, 1080, grid=3)
+    assert len(tiles) == 9 and tiles[0] == (0, 0, 704, 396) and tiles[-1] == (1216, 684, 704, 396)
+    assert tiles[0][0] + tiles[0][2] > tiles[1][0]  # 첫 조각 끝(704)이 둘째 조각 시작(608)보다 뒤: 겹침
+    assert tile_boxes(1920, 1080, grid=2) == tile_boxes(1920, 1080)  # 2는 지금까지와 똑같음
+
+
+def test_tile_grid_setting():
+    assert gateway.load_config({}).tile_grid == 2
+    assert gateway.load_config({"TILE_GRID": "3"}).tile_grid == 3
+    assert gateway.load_config({"TILE_GRID": "9"}).tile_grid == 2  # 범위(2~4) 밖이면 기본값
 
 
 def test_detect_tiled_moves_boxes_back_and_merges():
@@ -459,6 +473,14 @@ def test_pir_just_before_the_camera_is_a_normal_entry():
     assert r.w.entry is not None
 
 
+def test_pir_just_before_the_camera_is_a_normal_entry_with_person_wait(monkeypatch):
+    """ENTRY_PERSON_SEC(10초)를 기다려도 PIR이 먼저 켜진 시간은 처음 사람이 보인 때까지로 잰다 (CodeRabbit #79)."""
+    monkeypatch.setattr(room_camera, "ENTRY_PERSON_SEC", 10)
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([], 5).run([], 2, pir=True).run([person()], 12, pir=True)
+    assert r.w.entry is not None
+
+
 def test_candidate_is_retaken_when_room_is_empty_again_after_pir():
     """PIR만 켜졌다 꺼지고 다시 3초 비면 후보를 바로 새로 찍는다 (그 사이 둔 컵이 기준에 들어감)."""
     r = Room(RoomWatcher(1, on_checkout=True))
@@ -476,6 +498,43 @@ def test_entry_baseline_survives_restart_and_is_deleted_after_check(tmp_path):
     r2.run([person()], 3).checkout(4).run([thing("cup")], SETTLE_SEC + 6)
     assert [(c["reservationId"], c["trash"]) for c in r2.out] == [(4, {"cup": 1})]
     assert not entry.exists()  # 보냈으면 지움
+
+
+def test_entry_loaded_after_restart_is_replaced_at_next_entry(tmp_path, capsys):
+    """11/12 #47: 다시 켜기 전 기준(가짜 노트북 포함)을 그대로 써서 두고 간 노트북을 놓쳤다 → 다음 입실 때 새로 잡는다."""
+    base = str(tmp_path / "room_baseline.json")
+    r = Room(RoomWatcher(1, on_checkout=True, baseline_path=base))
+    r.run([thing("laptop")], 5).run([person(), thing("laptop")], 3)
+    assert r.w.entry["objects"] == {"laptop": 1}
+    r2 = Room(RoomWatcher(1, on_checkout=True, baseline_path=base), t=100)  # 젯슨을 껐다 켬
+    assert r2.w.entry.get("loaded")
+    r2.run([], 5).run([person()], 3)  # 빈 방(노트북 없음) 뒤 사람이 들어옴: QR이 없어도 새로 잡는다
+    assert r2.w.entry["objects"] == {} and not r2.w.entry.get("loaded")
+    assert "다시 켜기 전 기준 대신" in capsys.readouterr().out
+    r2.run([person()], 2).run([], 5).run([person()], 3)  # 그 뒤 화장실은 처음 기준 그대로
+    assert r2.w.entry["objects"] == {}
+
+
+def test_qr_entry_uses_empty_room_held_from_a_person_seen_just_before(capsys):
+    """QR이 처리되기 직전 사람이 먼저 잡혀 빈 방 후보를 써 버려도, 그 후보로 기준을 다시 잡는다."""
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([thing("cup")], 5).run([person(), thing("cup")], 3)  # 앞 사람이 잡은 기준 (컵 있음)
+    r.run([], 5)  # 빈 방 후보 (컵 치움)
+    r.run([person()], 1)  # 문 앞에서 먼저 잡힘: 화장실 규칙으로 후보를 안 씀 (들고만 있음)
+    assert r.w.entry["objects"] == {"cup": 1} and r.w.held_snapshot is not None
+    r.w.door_opened("CHECKIN", r.t)
+    r.run([person()], 2)
+    assert r.w.entry["objects"] == {}
+    assert "입실 문이 열려 그 직전 빈 방으로" in capsys.readouterr().out
+
+
+def test_held_empty_room_is_not_used_when_too_old():
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([thing("cup")], 5).run([person(), thing("cup")], 3).run([], 5).run([person()], 1)
+    r.run([person()], room_camera.HELD_SNAPSHOT_SEC + 5)
+    r.w.door_opened("CHECKIN", r.t)
+    r.run([person()], 2)
+    assert r.w.entry["objects"] == {"cup": 1}
 
 
 @pytest.mark.parametrize("text", ["{broken", "null", "[]", '"x"', "1", '{"roomId": 2, "objects": {}}',
@@ -754,7 +813,7 @@ def test_start_room_camera(monkeypatch):
     class Det:
         finds_objects = False
 
-    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None: Det())
+    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None, grid=2: Det())
     monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
 
     def fake_run(watcher, cam, detector, push, pir_now, on_frame=None, preview=None, send_check=None,
@@ -777,7 +836,7 @@ def test_start_room_camera_uses_checkout_mode_when_sending(monkeypatch):
     class Det:
         finds_objects = True
 
-    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None: Det())
+    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None, grid=2: Det())
     monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
     monkeypatch.setattr(gateway.SensorSender, "start", lambda self: self)
     monkeypatch.setattr(gateway.CheckoutPoller, "start", lambda self: polled.append(self.url) or self)
@@ -835,8 +894,9 @@ def test_yolo_detector_uses_onnxruntime(monkeypatch):
     out[0, 4, 0] = 0.9
 
     class Session:
-        def __init__(self, path, providers):
+        def __init__(self, path, sess_options, providers):
             self.providers = providers
+            seen["threads"] = sess_options.intra_op_num_threads
 
         def get_inputs(self):
             return [types.SimpleNamespace(name="images")]
@@ -845,15 +905,19 @@ def test_yolo_detector_uses_onnxruntime(monkeypatch):
             assert "images" in feed
             return [out]
 
-    ort = types.SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"], InferenceSession=Session)
+    seen = {}
+    ort = types.SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"], InferenceSession=Session,
+                                SessionOptions=types.SimpleNamespace)
     cv2 = types.SimpleNamespace(dnn=types.SimpleNamespace(blobFromImage=lambda *a, **k: "blob"), __version__="4.6.0")
     monkeypatch.setitem(sys.modules, "onnxruntime", ort)
     monkeypatch.setitem(sys.modules, "cv2", cv2)
     from room_camera import YoloDetector
 
+    monkeypatch.delenv("YOLO_THREADS", raising=False)
     det = YoloDetector("m.onnx")
     found = det.detect(np.zeros((640, 640, 3)))
     assert [d.label for d in found] == ["person"]
+    assert seen["threads"] == 2  # VLM에 코어를 남긴다
 
 
 # ---- 이상 탐지 (쓰러짐 의심) ----
@@ -1113,7 +1177,7 @@ def test_baseline_survives_restart(tmp_path, capsys):
     w = RoomWatcher(1, baseline_path=path)
     w.update([thing("remote")], now=0, now_iso="2026-11-06T17:00:00+09:00")
     with open(path) as f:
-        assert json.load(f) == {"roomId": 1, "objects": {"remote": 1}, "savedAt": "2026-11-06T17:00:00+09:00"}
+        assert json.load(f) == {"roomId": 1, "objects": {"remote": 1}, "tileGrid": 2, "savedAt": "2026-11-06T17:00:00+09:00"}
 
     again = RoomWatcher(1, baseline_path=path)  # 껐다 켬
     assert again.baseline == {"remote": 1}
@@ -1141,6 +1205,20 @@ def test_bad_baseline_file_takes_new_one(tmp_path, capsys, content):
     assert w.baseline is None and "새로 찍어요" in capsys.readouterr().out
     w.update([thing("remote")], now=0)
     assert json.loads(path.read_text())["objects"] == {"remote": 1}
+
+
+def test_saved_files_from_another_tile_grid_are_not_used(tmp_path, capsys):
+    """TILE_GRID를 바꾸고 다시 켜면 다른 조각 수로 센 기준·예약 기준은 버린다 (CodeRabbit #78). 옛 파일은 기본(2)으로 센 것."""
+    base, entry = tmp_path / "base.json", tmp_path / "base_entry.json"
+    base.write_text('{"roomId": 1, "objects": {"cup": 1}}')
+    entry.write_text('{"roomId": 1, "objects": {"cup": 1}}')
+    w = RoomWatcher(1, baseline_path=str(base), on_checkout=True)
+    assert w.baseline == {"cup": 1} and w.entry["objects"] == {"cup": 1}  # 옛 파일 + 기본 2: 그대로 씀
+    w = RoomWatcher(1, baseline_path=str(base), on_checkout=True, tile_grid=3)
+    out = capsys.readouterr().out
+    assert w.baseline is None and w.entry is None and "다른 조각 수" in out
+    w.update([thing("remote")], now=0)
+    assert json.loads(base.read_text())["tileGrid"] == 3
 
 
 def test_baseline_write_failure_keeps_running(tmp_path, capsys):
@@ -1285,6 +1363,20 @@ class PhotoRoom(Room):
         return self
 
 
+def test_entry_loaded_after_restart_still_asks_vlm_with_saved_photo(tmp_path):
+    """다시 켜서 메모리의 VLM 사진이 없어도, 저장된 입실 전 사진으로 VLM에게 묻는다 (11/12 #47)."""
+    import vlm_check as vc
+    base = str(tmp_path / "room_baseline.json")
+    r = PhotoRoom(RoomWatcher(1, on_checkout=True, baseline_path=base, photos=True))
+    r.run([], 5).run([person()], 3)
+    vlm = vc.VlmCheck("http://127.0.0.1:1", send=lambda url, body: ("YES", 0.9))
+    r2 = PhotoRoom(RoomWatcher(1, on_checkout=True, baseline_path=base, photos=True, vlm=vlm), t=100)
+    assert r2.w.entry["jpg"] and not r2.w.entry.get("vlm")
+    r2.run([person()], 3).checkout(5).run([thing("laptop")], SETTLE_SEC + 6)
+    a, b = r2.out[0]["vlmPhotos"]
+    assert a[:2] == b[:2] == b"\xff\xd8"
+
+
 def is_jpeg(b):
     return isinstance(b, bytes) and b[:2] == b"\xff\xd8" and len(b) <= room_camera.PHOTO_MAX_BYTES
 
@@ -1388,7 +1480,7 @@ def test_start_room_camera_turns_on_photo_sender(monkeypatch):
     class Det:
         finds_objects = True
 
-    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None: Det())
+    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None, grid=2: Det())
     monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
     monkeypatch.setattr(gateway.SensorSender, "start", lambda self: self)
     monkeypatch.setattr(gateway.CheckoutPoller, "start", lambda self: self)
@@ -1404,3 +1496,180 @@ def test_start_room_camera_turns_on_photo_sender(monkeypatch):
     gateway.start_room_camera(cfg, None).join(timeout=1)  # 연습 모드는 사진 안 찍음
     assert called == {"photos": False, "send": False}
     assert gateway.load_config({"TIDY_PHOTOS": "1"}).tidy_photos and not gateway.load_config({}).tidy_photos
+
+
+# ---------- 찾으러 온 뒤 다시 찍기 (11/12, core retrieve-pass) ----------
+
+def left_umbrella(retrieve_sec=600):
+    """예약 1이 우산을 두고 퇴실 → 첫 확인 LEFT_ITEMS, 다시 확인 기준이 남은 방."""
+    r = Room(RoomWatcher(1, on_checkout=True, retrieve_sec=retrieve_sec))
+    r.run([], 5).run([person()], 5).checkout(1).run([thing("umbrella")], SETTLE_SEC + 6)
+    r.run([thing("umbrella")], 5)  # 빈 방 후보가 잡힘
+    assert r.w.recheck_base == {"reservationId": 1, "objects": {}}
+    return r
+
+
+def test_retrieve_qr_entry_keeps_recheck(capsys):
+    """찾으러 온 QR(RETRIEVE)로 들어오면 앞 예약 다시 확인을 취소하지 않고, 그 빈 방을 다음 예약 기준으로 쓰지 않는다."""
+    # given
+    r = left_umbrella()
+    # when
+    r.w.door_opened("RETRIEVE", r.t)
+    r.run([person(), thing("umbrella")], 3)
+    # then
+    out = capsys.readouterr().out
+    assert r.w.recheck_base is not None and r.w.retrieve == {"reservationId": 1, "at": r.t - 3}
+    assert "다시 확인은 하지 않음" not in out and "물건 찾으러 들어옴" in out
+    assert r.w.entry is None  # 우산이 찍힌 빈 방을 다음 팀 기준으로 쓰지 않음
+
+
+def test_retrieve_does_not_recheck_before_minutes_pass():
+    """QR 뒤 10분이 안 됐으면 방이 비어도 찍지 않는다."""
+    r = left_umbrella()
+    r.w.door_opened("RETRIEVE", r.t)
+    r.run([person(), thing("umbrella")], 30).run([], 300)  # 우산 들고 나감, 아직 5분대
+    assert [c["phase"] for c in r.out] == ["FIRST"] and r.w.recheck_pending is None
+
+
+def test_retrieve_rechecks_empty_room_after_minutes_and_sends_clean():
+    """10분 뒤 빈 방이면 RECHECK를 찍어 보낸다. 가져갔으면 CLEAN, 3시간 뒤 확인 기준은 없앤다."""
+    # given
+    r = left_umbrella()
+    r.w.door_opened("RETRIEVE", r.t)
+    r.run([person(), thing("umbrella")], 30).run([], 600)
+    # when
+    r.run([], SETTLE_SEC + 2)
+    # then
+    rechecks = [c for c in r.out if c.get("phase") == "RECHECK"]
+    assert [(c["reservationId"], c["status"]) for c in rechecks] == [(1, "CLEAN")]
+    assert tidy_body(rechecks[0], "camera-1")["phase"] == "RECHECK" and "afterRetrieve" not in tidy_body(rechecks[0], "camera-1")
+    assert "찾으러 온 뒤 다시 확인" in check_message(rechecks[0])
+    assert r.w.recheck_base is None and r.w.retrieve is None and r.w.retrieve_rid is None
+
+
+def test_retrieve_recheck_still_left_keeps_three_hour_base():
+    """찾으러 왔는데 그대로 남았으면 LEFT_ITEMS를 보내고, 3시간 뒤 확인 기준은 지금 규칙대로 남긴다."""
+    r = left_umbrella(retrieve_sec=60)
+    r.w.door_opened("RETRIEVE", r.t)
+    r.run([person(), thing("umbrella")], 20).run([thing("umbrella")], 60 + SETTLE_SEC)
+    rechecks = [c for c in r.out if c.get("phase") == "RECHECK"]
+    assert [c["status"] for c in rechecks] == ["LEFT_ITEMS"]
+    assert r.w.recheck_base == {"reservationId": 1, "objects": {}}
+    r.w.request_check(1, r.t, "RECHECK")  # 3시간 뒤 core가 다시 부름
+    r.run([thing("umbrella")], SETTLE_SEC + 2)
+    assert [c["status"] for c in r.out if c.get("phase") == "RECHECK"] == ["LEFT_ITEMS", "LEFT_ITEMS"]
+
+
+def test_next_team_qr_before_retrieve_recheck_cancels(capsys):
+    """10분이 지나기 전에 다른 QR(다음 팀)로 들어오면 지금처럼 다시 확인을 취소한다."""
+    r = left_umbrella()
+    r.w.door_opened("RETRIEVE", r.t)
+    r.run([person(), thing("umbrella")], 30).run([], 60)
+    r.w.door_opened(None, r.t)  # 다음 팀 예약 QR (purpose 없음)
+    r.run([person()], 3).run([], 700)
+    assert r.w.recheck_base is None and r.w.retrieve is None
+    assert [c["phase"] for c in r.out] == ["FIRST"] and "다른 QR로 들어와 취소" in capsys.readouterr().out
+
+
+def test_retrieve_qr_without_base_does_nothing(capsys):
+    """첫 확인이 깨끗했으면(기준 없음) 찾으러 온 QR이 와도 다시 찍지 않는다."""
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([], 5).run([person()], 5).checkout(2).run([], SETTLE_SEC + 6)
+    r.w.door_opened("RETRIEVE", r.t)
+    r.run([], 700)
+    assert r.w.retrieve is None and [c["phase"] for c in r.out] == ["FIRST"]
+    assert "기준이 없어 다시 찍지 않음" in capsys.readouterr().out
+
+
+def test_retrieve_recheck_waits_until_room_is_empty():
+    """찾으러 온 뒤 10분 넘게 방이 안 비어도 건너뛰지 않고, 빌 때 찍는다 (core #130은 따로 다시 부르지 않음)."""
+    r = left_umbrella(retrieve_sec=60)
+    r.w.door_opened("RETRIEVE", r.t)
+    r.run([person(), thing("umbrella")], 60 + PENDING_MAX_SEC + 5)  # 20분쯤 머무름
+    assert [c["phase"] for c in r.out] == ["FIRST"] and r.w.recheck_pending is not None
+    r.run([], SETTLE_SEC + 6)  # 물건 챙겨 나감
+    assert [(c["phase"], c["status"]) for c in r.out] == [("FIRST", "LEFT_ITEMS"), ("RECHECK", "CLEAN")]
+
+
+def test_door_notifying_verifier_passes_purpose_to_room():
+    """문이 열리면(OPENED) 그 방 카메라에 purpose를 전하고, 거부면 안 전한다. 답은 그대로 돌려준다."""
+    seen = []
+
+    class Inner:
+        def __init__(self, res):
+            self.res = res
+
+        def verify(self, body):
+            return self.res
+
+    listeners = {1: lambda purpose, at: seen.append((purpose, at))}
+    v = gateway.DoorNotifyingVerifier(Inner({"result": "OPENED", "purpose": "RETRIEVE"}), listeners, clock=lambda: 7)
+    assert v.verify({"roomId": 1})["purpose"] == "RETRIEVE"
+    v.verify({"roomId": 2})  # 다른 방은 안 전함
+    gateway.DoorNotifyingVerifier(Inner({"result": "DENIED"}), listeners).verify({"roomId": 1})
+    gateway.DoorNotifyingVerifier(Inner(None), listeners).verify({"roomId": 1})
+    assert seen == [("RETRIEVE", 7)]
+
+
+def test_retrieve_recheck_minutes_setting():
+    assert gateway.load_config({"PORT": "x"}).retrieve_recheck_min == 10
+    assert gateway.load_config({"PORT": "x", "RETRIEVE_RECHECK_MIN": "15"}).retrieve_recheck_min == 15
+
+
+def test_entry_baseline_is_the_empty_room_just_before_checkin_door():
+    """퇴실 뒤 치우러 잠깐 들어갔다 나와도(QR 없이), 실제 입실 문이 열린 직전 빈 방이 기준이 된다 (11/12 #39)."""
+    # given: 예약 1이 우산을 두고 퇴실
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([], 5).run([person()], 5).checkout(1).run([thing("umbrella")], SETTLE_SEC + 6)
+    r.run([thing("umbrella")], 5).run([person(), thing("umbrella")], 10)  # 치우러 들어감 (QR 없음)
+    assert r.w.entry["objects"] == {"umbrella": 1}
+    r.run([], 5)  # 우산 치우고 나감
+    # when: 예약 2가 QR로 입실
+    r.w.door_opened(None, r.t)
+    r.run([person()], 3)
+    # then
+    assert r.w.entry["objects"] == {}
+
+
+def test_bathroom_door_open_keeps_first_entry_baseline():
+    """입실 뒤 화장실 다녀와 문을 다시 열어도 기준은 처음 입실 직전 그대로 (그 사이 둔 컵을 놓치지 않게)."""
+    r = Room(RoomWatcher(1, on_checkout=True))
+    r.run([], 5)
+    r.w.door_opened(None, r.t)
+    r.run([person()], 5)
+    first = dict(r.w.entry)
+    r.run([thing("cup")], 5)  # 컵 두고 화장실
+    r.w.door_opened(None, r.t)
+    r.run([person(), thing("cup")], 3)
+    assert r.w.entry == first
+
+
+def test_three_hour_recheck_during_retrieve_wait_is_replaced():
+    """찾으러 온 뒤 확인을 기다리는 중에 3시간 확인이 와도 N분 전에 찍지 않고, 찾으러 온 뒤 확인이 대신한다."""
+    # given
+    r = left_umbrella(retrieve_sec=120)
+    r.w.door_opened("RETRIEVE", r.t)
+    r.run([person(), thing("umbrella")], 10)
+    # when: 3시간 확인이 먼저 옴, 방은 바로 빔
+    r.w.request_check(1, r.t, "RECHECK")
+    r.run([], 60)
+    # then: 아직 안 찍음, 기준 그대로
+    assert [c["phase"] for c in r.out] == ["FIRST"] and r.w.recheck_base is not None
+    r.run([], 60 + SETTLE_SEC)
+    rechecks = [c for c in r.out if c.get("phase") == "RECHECK"]
+    assert len(rechecks) == 1 and rechecks[0].get("afterRetrieve") and rechecks[0]["status"] == "CLEAN"
+
+
+def test_yolo_threads_default_leaves_cores_for_vlm():
+    from room_camera import yolo_threads, YOLO_THREADS
+    assert yolo_threads({}) == YOLO_THREADS == 2
+    assert yolo_threads({"YOLO_THREADS": "4"}) == 4
+    assert yolo_threads({"YOLO_THREADS": "0"}) == 0  # onnxruntime 기본
+    assert yolo_threads({"YOLO_THREADS": "abc"}) == 2
+
+
+def test_check_message_shows_yolo_score_per_item():
+    """11/12 수연: 서버엔 안 보내도 물건마다 YOLO 점수를 화면에서 보고 싶음."""
+    msg = check_message({"roomId": 1, "status": "LEFT_ITEMS", "leftItems": {"cell phone": 1, "handbag": 1},
+                         "trash": {"unknown": 1}, "confidence": {"cell phone": [0.72], "handbag": [0.6], "unknown": [None]}})
+    assert "휴대폰 72%" in msg and "손가방 60%" in msg and "점수 없음" in msg

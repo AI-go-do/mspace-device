@@ -17,6 +17,7 @@ VLM_CACHE 답을 적어 둘 파일 (채점 전용). 같은 사진·질문·모�
 import base64
 import hashlib
 import json
+import math
 import os
 import time
 import urllib.request
@@ -70,12 +71,39 @@ def parse(text):
 DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
+def yes_probability(choice):
+    """첫 단어가 YES일 확률 (0~1). llama-server가 준 첫 토큰 후보(top_logprobs)에서 YES·NO 몫만 비교한다.
+
+    이 사진 두 장에 대해 VLM이 "새 물건 있음"을 얼마나 확신했나. 후보가 없으면(옛 서버) None.
+    """
+    try:
+        tops = choice["logprobs"]["content"][0]["top_logprobs"]  # 고른 토큰 하나만으로는 반대쪽 몫을 몰라서 안 쓴다
+    except (KeyError, IndexError, TypeError):
+        return None
+    yes = no = 0.0
+    for t in tops:
+        try:
+            word = str(t["token"]).strip().upper()
+            p = math.exp(float(t["logprob"]))
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        if word in ("YES", "Y"):
+            yes += p
+        elif word in ("NO", "N"):
+            no += p
+    if yes + no <= 0:
+        return None
+    return round(yes / (yes + no), 3)
+
+
 def post(url, body, timeout=TIMEOUT):
+    """(답 글자, YES일 확률 또는 None)."""
     req = urllib.request.Request(url.rstrip("/") + "/v1/chat/completions", data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
     with DIRECT.open(req, timeout=timeout) as res:
         data = json.loads(res.read().decode())
-    return data["choices"][0]["message"]["content"]
+    choice = data["choices"][0]
+    return choice["message"]["content"], yes_probability(choice)
 
 
 def model_name(url, timeout=10):
@@ -126,30 +154,36 @@ class VlmCheck:
         return self.ask_prepared(self.prepare(before), self.prepare(after))
 
     def ask_jpeg(self, a, b):
-        """prepare로 만든 JPEG 두 장으로 묻는다 (게이트웨이). (답, 걸린 초)."""
-        new_item, seconds, _ = self.ask_prepared(a, b)
-        return new_item, seconds
+        """prepare로 만든 JPEG 두 장으로 묻는다 (게이트웨이). (답, 걸린 초, YES일 확률 또는 None)."""
+        new_item, seconds, _, yes = self.ask_with_yes(a, b)
+        return new_item, seconds, yes
 
     def ask_prepared(self, a, b):
+        """(답, 걸린 초, 캐시에서 꺼냈나)."""
+        return self.ask_with_yes(a, b)[:3]
+
+    def ask_with_yes(self, a, b):
+        """(답, 걸린 초, 캐시에서 꺼냈나, YES일 확률 또는 None). 확률을 바로 돌려줘서 두 스레드가 물어도 안 섞인다."""
         key = self.key(a, b)
-        if key in self.cache:
+        if key in self.cache and "yes" in self.cache[key]:  # 확률을 적기 전(#70 전) 캐시는 다시 묻는다
             hit = self.cache[key]
-            return parse(hit["text"]), hit["seconds"], True
+            return parse(hit["text"]), hit["seconds"], True, hit.get("yes")
         body = {"messages": [{"role": "user", "content": [
                     {"type": "text", "text": "Image 1:"}, image_part(a),
                     {"type": "text", "text": "Image 2:"}, image_part(b),
                     {"type": "text", "text": PROMPT}]}],
-                "temperature": 0, "max_tokens": 5}
+                "temperature": 0, "max_tokens": 5, "logprobs": True, "top_logprobs": 10}
         started = self.clock()
-        text = self.send(self.url, body)
+        reply = self.send(self.url, body)
         seconds = self.clock() - started
+        text, yes = reply if isinstance(reply, tuple) else (reply, None)
         if self.cache_path:
-            self.cache[key] = {"text": text, "seconds": round(seconds, 3)}
+            self.cache[key] = {"text": text, "seconds": round(seconds, 3), "yes": yes}
             tmp = self.cache_path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.cache, f)
             os.replace(tmp, self.cache_path)
-        return parse(text), seconds, False
+        return parse(text), seconds, False, yes
 
     def combine(self, status, new_item):
         """YOLO 결과(status)와 VLM 답을 합친다. VLM이 알아듣지 못한 답이면 YOLO 결과 그대로."""

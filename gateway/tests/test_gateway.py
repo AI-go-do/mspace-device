@@ -286,8 +286,8 @@ def test_handle_line_non_string_sensor_type(bad_type):
 
 
 def test_make_verifier_picks_by_config():
-    assert isinstance(gateway.make_verifier(gateway.Config(dry_run=True)), gateway.DryRunVerifier)
-    http = gateway.make_verifier(gateway.Config(server="http://core", device_token="t"))
+    assert isinstance(gateway.make_verifier(gateway.Config(dry_run=True)).inner, gateway.DryRunVerifier)
+    http = gateway.make_verifier(gateway.Config(server="http://core", device_token="t")).inner
     assert isinstance(http, gateway.HttpVerifier) and http.url == "http://core/api/access/verify"
 
 

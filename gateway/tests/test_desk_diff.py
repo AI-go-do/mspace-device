@@ -73,7 +73,8 @@ def test_desk_settings_come_from_env(capsys):
     import gateway
     config = gateway.load_config({"DESK_THRESH": "50", "DESK_MIN_AREA": "0.004", "DESK_LIGHT": "local", "PORT": "x"})
     d = DeskCompare(AREA, **desk_diff.settings(config))
-    assert d.tune == {"thresh": 50, "min_area": 0.004, "light": "local", "move": False, "move_same": 1.0}
+    assert d.tune == {"thresh": 50, "min_area": 0.004, "light": "local", "move": False, "move_same": 1.0,
+                      "keep_small": 0.0}
     config = gateway.load_config({"DESK_THRESH": "999", "DESK_MIN_AREA": "abc", "PORT": "x"})
     assert (config.desk_thresh, config.desk_min_area, config.desk_light) == (35, 0.0012, "mean")
     assert "DESK_THRESH가 이상해서" in capsys.readouterr().out
@@ -170,7 +171,7 @@ def test_unknown_things_become_cleaning_and_named_ones_left_items():
     assert check["leftItems"] == {"power bank": 1}
     assert check["trash"] == {"unknown": 1}
     assert check["status"] == "LEFT_ITEMS"
-    assert room_camera.check_message(check) == "정리 확인 1번 방: 두고 간 물건 보조배터리 1 / 치울 것 모르는 물건 1"
+    assert room_camera.check_message(check).splitlines()[0] == "정리 확인 1번 방: 두고 간 물건 보조배터리 1 / 치울 것 모르는 물건 1"
 
 
 def test_moved_chair_is_not_trash():
@@ -363,7 +364,7 @@ def test_gateway_gives_entry_desk_only_in_checkout_mode_with_desk_photo(monkeypa
             return []
 
     got = []
-    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None: Det())
+    monkeypatch.setattr(room_camera, "make_detector", lambda path, desk=None, floor=None, grid=2: Det())
     monkeypatch.setattr(room_camera, "open_camera", lambda dev: "cam")
     monkeypatch.setattr(gateway.SensorSender, "start", lambda self: self)
     monkeypatch.setattr(gateway.CheckoutPoller, "start", lambda self: self)
@@ -466,3 +467,86 @@ def test_entry_desk_keeps_known_labels_for_move():
     assert d.known_labels == ["remote"]
     d.clear()
     assert d.known_labels == [] and d.moved == []
+
+
+def test_keep_small_still_finds_things_when_much_of_the_view_changed():
+    """DESK_KEEP_SMALL: 화면이 크게 달라져도(35% 넘게) 포기하지 않고 물건 크기 변화만 본다 (11/12 1차 11쌍)."""
+    base, _ = prepare(desk(), AREA)
+    shade = (500, 230, 600, 720, (0, 0, 0))  # 책상 왼쪽 절반 넘게 어둡게 (그늘)
+    phone = (1300, 400, 40, 80, (20, 20, 20))
+    now, _ = prepare(desk(shade, phone), AREA)
+    assert find_changes(base, now, light="ssim") is None  # 예전처럼 비교를 건너뜀
+    found = find_changes(base, now, light="ssim", keep_small=0.05)
+    assert len(found) == 1  # 크게 바뀐 곳은 빼고 휴대폰 자리만
+    x, y, w, h = found[0]
+    assert w * h < 0.05 * base.shape[0] * base.shape[1]
+    assert find_changes(base, prepare(desk(shade), AREA)[0], light="ssim", keep_small=0.05) == []  # 그늘만이면 없음
+
+
+def test_keep_small_changes_nothing_when_the_view_did_not_change_much():
+    base, _ = prepare(desk(noise=6), AREA)
+    now, _ = prepare(desk(PHONE, PAPER, CARD, noise=6), AREA)
+    assert find_changes(base, now, keep_small=0.05) == find_changes(base, now)
+
+
+def test_small_change_on_a_chair_is_a_thing_with_furniture_small():
+    """DESK_FURNITURE_SMALL: 의자로 이름 붙은 곳이라도 의자보다 훨씬 작으면 의자 위·옆 물건 (11/12 035 가방)."""
+    chair = Detection("chair", 0.8, (1000, 500, 400, 400))
+    w = RoomWatcher(1, desk=DeskCompare(AREA), labeler=lambda frame, box: "chair")
+    assert visit(w, [chair], desk(PAPER))["status"] == "CLEAN"  # 기본(0)은 예전처럼 가구로 보고 뺀다
+    w = RoomWatcher(1, desk=DeskCompare(AREA, furniture_small=0.5), labeler=lambda frame, box: "chair")
+    check = visit(w, [chair], desk(PAPER))
+    assert check["status"] == "NEEDS_CLEANING" and check["trash"] == {"unknown": 1}
+
+
+def test_chair_sized_change_is_still_the_chair_with_furniture_small():
+    """의자만큼 달라진 곳(의자를 옮김)은 그대로 가구로 보고 뺀다. 가구를 못 찾았을 때도 예전처럼 뺀다."""
+    chair = Detection("chair", 0.8, (1090, 590, 140, 110))
+    w = RoomWatcher(1, desk=DeskCompare(AREA, furniture_small=0.5), labeler=lambda frame, box: "chair")
+    assert visit(w, [chair], desk(PAPER))["status"] == "CLEAN"
+    w = RoomWatcher(1, desk=DeskCompare(AREA, furniture_small=0.5), labeler=lambda frame, box: "chair")
+    assert visit(w, [], desk(PAPER))["status"] == "CLEAN"
+
+
+def test_keep_small_and_furniture_small_settings():
+    import desk_diff
+    import gateway
+    config = gateway.load_config({"DESK_KEEP_SMALL": "0.05", "DESK_FURNITURE_SMALL": "0.5", "PORT": "x"})
+    assert config.desk_keep_small == 0.05 and config.desk_furniture_small == 0.5
+    d = DeskCompare(AREA, **desk_diff.settings(config))
+    assert d.tune["keep_small"] == 0.05 and d.furniture_small == 0.5
+    off = gateway.load_config({"PORT": "x"})
+    assert off.desk_keep_small == 0.0 and off.desk_furniture_small == 0.0  # 기본은 예전과 같음
+
+
+def test_keep_small_does_not_turn_shade_edges_into_things():
+    """그늘 바로 옆 변화는 그늘과 하나로 보고 뺀다. 그늘 가장자리 조각을 물건으로 세지 않기 위함 (CodeRabbit #81)."""
+    base, _ = prepare(desk(), AREA)
+    shade = (500, 230, 600, 720, (0, 0, 0))
+    edge = (1160, 300, 30, 30, (0, 0, 0))  # 그늘 끝 가까이 떨어진 작은 조각 (join_near 간격 안)
+    now, _ = prepare(desk(shade, edge), AREA)
+    assert find_changes(base, now, light="ssim", keep_small=0.05) == []
+
+def test_partial_compare_does_not_refresh_desk_photo():
+    """큰 변화를 빼고 일부만 본 비교는 깨끗해도 기준 사진을 바꾸지 않는다 (CodeRabbit #81)."""
+    d = DeskCompare(AREA, light="ssim", keep_small=0.05)
+    w = RoomWatcher(1, desk=d)
+    check = visit(w, [], desk((500, 230, 600, 720, (0, 0, 0))))
+    assert check["status"] == "CLEAN" and d.partial
+    assert (d.base == prepare(desk(), AREA)[0]).all()  # 그늘 진 사진으로 바꾸지 않음
+
+
+def test_partial_compare_does_not_drop_renamed_things():
+    """일부만 본 비교는 못 본 자리가 있어 '이름만 바뀐 원래 물건' 빼기를 하지 않는다 (CodeRabbit #81). 예전 비교 건너뜀과 같음."""
+    import tidy_eval
+    shade = (500, 230, 400, 720, (0, 0, 0))
+    before, after = desk(REMOTE, noise=6), desk(FLIPPED_REMOTE, shade, noise=6)
+    remote = Detection("remote", 0.8, (700, 700, 45, 30))
+    laptop = Detection("laptop", 0.4, (698, 699, 50, 33))
+
+    def find(frame):
+        return [remote] if frame is before else [laptop]
+
+    d = DeskCompare(AREA, light="ssim", move=True, keep_small=0.05)
+    check, _ = tidy_eval.judge(before, after, find, room_items={"remote": 1}, desk=d)
+    assert d.partial and check["leftItems"] == {"laptop": 1}

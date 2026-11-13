@@ -85,6 +85,7 @@ class Config:
     yolo_model: str | None = None          # YOLO ONNX 모델 파일. 없으면 사람만 세는 기본 방식(HOG)
     room_items: dict = field(default_factory=dict)  # 방 비품 {"remote": 1}: 그 개수까지는 있어도 없어도 괜찮음
     desk_area: tuple | None = None         # 책상 부분 (x1, y1, x2, y2) 화면 비율. 정리 확인 때 책상만 확대해서 한 번 더 본다
+    tile_grid: int = 2                     # 정리 확인 때 화면을 몇 줄로 잘라 보나 (TILE_GRID, 2 = 4조각, 3 = 9조각)
     floor_area: tuple | None = None        # 바닥 부분 (x1, y1, x2, y2) 화면 비율. 정리 확인 때 바닥도 확대해서 한 번 더 본다
     desk_photo: bool = False               # True면 깨끗한 책상 사진(사람 0명일 때)을 젯슨에만 두고 퇴실 뒤 책상과 비교
     desk_thresh: int = 35                  # 책상 비교: 밝기 차이가 이보다 크면 "달라짐" (DESK_THRESH, 1~255)
@@ -92,11 +93,14 @@ class Config:
     desk_light: str = "mean"               # 책상 비교 방식: mean(전체 밝기) / local(자리마다 밝기) / ssim(모양 비교)
     desk_move: bool = False                # 책상 비교: 원래 있던 걸 옮기거나 뒤집은 것은 새 물건으로 안 셈 (DESK_MOVE=1, 9판)
     desk_move_same: float = 1.0            # DESK_MOVE에서 "원래 있던 자리"로 볼 기준 (DESK_MOVE_SAME, 높을수록 덜 뺌. 9판 1등 1.0)
+    desk_keep_small: float = 0.0           # 화면이 크게 달라도 비교를 포기하지 않고, 화면의 이 비율보다 작은 곳만 본다 (DESK_KEEP_SMALL, 0이면 끔: 포기)
+    desk_furniture_small: float = 0.0      # 의자 등 가구로 이름 붙은 곳이라도 그 가구 상자의 이 비율보다 작으면 물건으로 본다 (DESK_FURNITURE_SMALL, 0이면 끔)
     vlm_url: str | None = None             # 정리 확인을 VLM(llama-server, 127.0.0.1)에게 한 번 더 물음 (VLM_URL, 10판). 비우면 끔
     vlm_rule: str = "or"                   # YOLO와 합치는 법: or(하나라도 남음이면 남음, 10판 1등) / and / vlm (VLM_RULE)
     vlm_side: int = 768                    # VLM에 보내기 전 사진 긴 변 크기 (VLM_SIDE, 채점과 같은 값)
     vlm_eq: bool = False                   # 어두운 사진을 밝게 펴서 보냄 (VLM_EQ=1)
     tidy_results: str | None = "eval/tidy/results.jsonl"  # 채점 기록. 같은 설정의 시험 점수를 core에 같이 보냄 (TIDY_RESULTS, off면 안 보냄)
+    retrieve_recheck_min: int = 10         # 찾으러 온 QR(core retrieve-pass-minutes와 같은 값) 뒤 이만큼 지나 빈 방이면 다시 찍기
     tidy_photos: bool = False              # True면 정리 확인 때 빈 방 사진(입실 전·퇴실 뒤·3시간 뒤)을 core로 올린다 (Q-27)
     label_model: str | None = None         # 달라진 곳에 이름 붙일 모델 (YOLO-World ONNX). 없으면 YOLO_MODEL로
     baseline_file: str | None = "room_baseline.json"  # 깨끗한 방 기준을 적어 두는 파일. BASELINE_FILE=off면 메모리에만
@@ -146,17 +150,21 @@ def load_config(env=None):
         room_items=parse_room_items(env.get("ROOM_ITEMS", "")),
         desk_area=parse_desk_area(env.get("DESK_AREA", "")),
         floor_area=parse_desk_area(env.get("FLOOR_AREA", ""), "FLOOR_AREA"),
+        tile_grid=parse_number(env, "TILE_GRID", Config.tile_grid, 2, 4, int),
         desk_photo=env.get("DESK_PHOTO") == "1",
         desk_thresh=parse_number(env, "DESK_THRESH", Config.desk_thresh, 1, 255, int),
         desk_min_area=parse_number(env, "DESK_MIN_AREA", Config.desk_min_area, 0.0, 0.3, float),
         desk_light=env.get("DESK_LIGHT") if env.get("DESK_LIGHT") in ("local", "ssim") else Config.desk_light,
         desk_move=env.get("DESK_MOVE") == "1",
         desk_move_same=parse_number(env, "DESK_MOVE_SAME", Config.desk_move_same, 0.1, 10.0, float),
+        desk_keep_small=parse_number(env, "DESK_KEEP_SMALL", Config.desk_keep_small, 0.0, 1.0, float),
+        desk_furniture_small=parse_number(env, "DESK_FURNITURE_SMALL", Config.desk_furniture_small, 0.0, 1.0, float),
         vlm_url=(env.get("VLM_URL") or "").strip() or None,
         vlm_rule=(env.get("VLM_RULE") or Config.vlm_rule).strip().lower(),
         vlm_side=parse_number(env, "VLM_SIDE", Config.vlm_side, 64, 4096, int),
         vlm_eq=env.get("VLM_EQ") == "1",
         tidy_photos=env.get("TIDY_PHOTOS") == "1",
+        retrieve_recheck_min=parse_number(env, "RETRIEVE_RECHECK_MIN", Config.retrieve_recheck_min, 1, 180, int),
         tidy_results=None if env.get("TIDY_RESULTS", "").strip().lower() == "off"
         else (env.get("TIDY_RESULTS") or "").strip() or Config.tidy_results,
         label_model=env.get("LABEL_MODEL") or None,
@@ -547,11 +555,35 @@ def parse_recheck(value):
     return rid, when.timestamp()
 
 
+# 방 번호 → door_opened(purpose, 시각). 방 안 카메라가 켜지면 등록한다 (찾으러 온 QR이면 다시 확인을 남기려고)
+DOOR_LISTENERS = {}
+
+
+class DoorNotifyingVerifier:
+    """확인기를 감싸서, 문이 열리면(OPENED) 그 방 카메라에 core가 알려 준 purpose(RETRIEVE 등)를 전한다."""
+
+    def __init__(self, inner, listeners=None, clock=time.monotonic):
+        self.inner = inner
+        self.listeners = DOOR_LISTENERS if listeners is None else listeners
+        self.clock = clock
+
+    def verify(self, body):
+        res = self.inner.verify(body)
+        if isinstance(res, dict) and res.get("result") == "OPENED":
+            listener = self.listeners.get(body.get("roomId"))
+            if listener is not None:
+                try:
+                    listener(res.get("purpose"), self.clock())
+                except Exception as e:  # noqa: BLE001 - 문 열기 답은 꼭 돌려준다
+                    print(f"문 열림을 방 카메라에 못 알렸어요 ({e.__class__.__name__})")
+        return res
+
+
 def make_verifier(config):
     """설정에 맞는 확인기를 고른다. 나머지 코드는 어느 쪽인지 몰라도 된다."""
     if config.dry_run:
-        return DryRunVerifier()
-    return HttpVerifier(config.server, config.device_token)
+        return DoorNotifyingVerifier(DryRunVerifier())
+    return DoorNotifyingVerifier(HttpVerifier(config.server, config.device_token))
 
 
 # ---------- 우노가 보낸 한 줄 처리 ----------
@@ -624,7 +656,7 @@ def handle_occupancy(event, verifier, sensors=None, use_pir=True):
         print(f"재실 {body['roomId']}번 방 PIR: {state}, 조도: {event['light']} (카메라 이벤트에 합쳐 보냄)")
         return None
     print(f"재실 {body['roomId']}번 방: {state} (pir={event['pir']}, 조도={event['light']})")
-    if isinstance(verifier, DryRunVerifier):  # 연습 모드에서는 core에 보낼 모양을 그대로 보여 준다
+    if isinstance(getattr(verifier, "inner", verifier), DryRunVerifier):  # 연습 모드에서는 core에 보낼 모양을 그대로 보여 준다
         print("[DRY_RUN] POST /api/sensor-events", json.dumps(body, ensure_ascii=False))
     elif sensors is not None:
         sensors.push(body)
@@ -863,7 +895,7 @@ def start_room_camera(config, sensors):
     import room_camera  # 켤 때만 불러온다 (OpenCV는 젯슨에만 있으면 됨)
     room = config.room_camera_room
     CAMERA_ROOMS[room] = time.monotonic()  # 켤 때 한 번 잡고, 이후 사진을 읽을 때마다 새로 적는다
-    detector = room_camera.make_detector(config.yolo_model, config.desk_area, config.floor_area)
+    detector = room_camera.make_detector(config.yolo_model, config.desk_area, config.floor_area, config.tile_grid)
     on_checkout = sensors is not None  # 서버로 보내는 중이면 "퇴실하면 확인", 아니면(연습) "30초 빈 방"
     desk, labeler = desk_compare(config, detector)
     entry_desk = None
@@ -875,23 +907,26 @@ def start_room_camera(config, sensors):
     vlm = make_vlm(config) if on_checkout and detector.finds_objects else None
     watcher = room_camera.RoomWatcher(room, check_objects=detector.finds_objects, room_items=config.room_items,
                                       on_checkout=on_checkout, baseline_path=config.baseline_file,
-                                      desk=desk, labeler=labeler, entry_desk=entry_desk, photos=photos, vlm=vlm)
+                                      desk=desk, labeler=labeler, entry_desk=entry_desk, photos=photos, vlm=vlm,
+                                      retrieve_sec=config.retrieve_recheck_min * 60, tile_grid=config.tile_grid)
     cam = room_camera.open_camera(config.room_camera)
     send_check = send_photo = None
     if on_checkout:
         import model_score
         score = model_score.find(config, load_config, config.tidy_results,
                                  vlm_model=vlm.model if vlm is not None else None)
-        watcher.presence = score.pop("presence", None) if score else None  # 표는 core에 안 보내고 확신도에만 쓴다
+        if score:
+            score.pop("presence", None)  # 채점 표는 core에 안 보낸다. 확신도는 사진마다 (tidy_body)
         watcher.model_score = score
         print(model_score.describe(score))
-        print(model_score.describe_presence(watcher.presence))
+        print("물건마다 확신도: VLM이 답하면 \"새 물건 있음\"이라 할 확률, 답이 없으면 YOLO 점수 (둘 다 없으면 50%)")
         tidy = SensorSender(config.server, config.device_token, path=f"/api/rooms/{room}/tidy-checks",
                             drop=TIDY_DROP, name="정리 확인 전송", say_ok=True).start()
         send_check = tidy.push
         if photos:
             send_photo = PhotoSender(config.server, config.device_token, room).start().push
             print("정리 확인 사진: 사람 0명인 빈 방 사진을 core에 올려요 (입실 전·퇴실 뒤·3시간 뒤, 30일 보관)")
+        DOOR_LISTENERS[room] = watcher.door_opened  # 찾으러 온 QR이면 앞 예약 다시 확인을 남기고 N분 뒤 다시 찍기
         CheckoutPoller(config.server, config.device_token, room,
                        lambda rid: watcher.request_check(rid, time.monotonic()),
                        on_recheck=lambda rid: watcher.request_check(rid, time.monotonic(), "RECHECK"),

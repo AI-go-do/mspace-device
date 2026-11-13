@@ -1,3 +1,4 @@
+import math
 import json
 
 import numpy as np
@@ -54,7 +55,8 @@ def test_ask_sends_two_photos_and_caches_answer(tmp_path):
     images = [p for p in calls[0]["messages"][0]["content"] if p["type"] == "image_url"]
     assert len(images) == 2 and calls[0]["temperature"] == 0
     saved = json.loads(cache.read_text())
-    assert list(saved.values()) == [{"text": "YES", "seconds": 7.5}]  # 사진은 적지 않는다
+    assert list(saved.values()) == [{"text": "YES", "seconds": 7.5, "yes": None}]  # 사진은 적지 않는다
+    assert calls[0]["logprobs"] is True  # 첫 단어 후보 확률도 받는다 (이 사진의 "있음" 확률)
 
     again = vc.VlmCheck("http://x", cache=str(cache), send=fake_send("NO", calls))
     assert again.ask(frame(0), frame(9)) == (True, 7.5, True)  # 같은 사진이면 다시 묻지 않음
@@ -149,6 +151,84 @@ def test_watcher_keeps_vlm_entry_photo_and_attaches_pair_to_first_check():
     entry_jpg = w.entry["vlm"] if w.entry else None
     a, b = out[0]["vlmPhotos"]
     assert a[:2] == b[:2] == b"\xff\xd8" and entry_jpg is None  # 보낸 뒤 기준은 지운다
+
+
+def test_recheck_asks_vlm_again_with_kept_entry_photo():
+    """11/12 수연: 3시간 뒤에도 입실 전 사진과 지금 사진을 VLM에게 다시 묻는다 (입실 전 사진은 메모리에만 보관)."""
+    vlm = vc.VlmCheck("http://127.0.0.1:1", send=fake_send("YES", []))
+    w = RoomWatcher(1, on_checkout=True, vlm=vlm)
+    run_room(w, [], 0, 5)
+    run_room(w, [person()], 5, 5)
+    entry = w.entry["vlm"]
+    w.request_check(1, 10)
+    first = run_room(w, [], 10, SETTLE_SEC + 6)[0]
+    assert first["status"] == "CLEAN" and "vlmPhotos" in first  # YOLO는 깨끗해도 VLM 답을 기다리니 기준을 남긴다
+    assert w.recheck_base["vlm"] == entry and w.entry is None
+    w.request_check(1, 100, "RECHECK")
+    again = run_room(w, [], 100, SETTLE_SEC + 6)[0]
+    assert again["phase"] == "RECHECK" and again["vlmPhotos"][0] == entry
+    assert w.recheck_base is None  # 다시 확인이 끝나면 사진도 버린다
+
+
+def test_first_check_clean_by_vlm_too_drops_kept_photo(tmp_path):
+    w = RoomWatcher(1, on_checkout=True, vlm=vc.VlmCheck("http://127.0.0.1:1", send=fake_send("NO", [])))
+    w.recheck_base = {"reservationId": 7, "objects": {}, "vlm": b"x"}
+    room_camera.ask_vlm_then_finish(w, base_check(), (b"a", b"b"), str(tmp_path / "log.jsonl"), None, None)
+    assert w.recheck_base is None
+
+
+def test_recheck_vlm_photo_is_dropped_when_someone_enters():
+    vlm = vc.VlmCheck("http://127.0.0.1:1", send=fake_send("YES", []))
+    w = RoomWatcher(1, on_checkout=True, vlm=vlm)
+    run_room(w, [], 0, 5)
+    run_room(w, [person()], 5, 5)
+    w.request_check(1, 10)
+    run_room(w, [], 10, SETTLE_SEC + 6)
+    assert w.recheck_base["vlm"]
+    run_room(w, [person()], 40, 5)
+    assert w.recheck_base is None
+
+
+def test_passer_by_does_not_cancel_recheck(monkeypatch):
+    """11/12 예약 51: 지나가는 사람이 몇 초 찍혀 다시 확인이 취소됨. ENTRY_PERSON_SEC(10초) 넘게 보여야 들어온 것."""
+    monkeypatch.setattr(room_camera, "ENTRY_PERSON_SEC", 10)
+    vlm = vc.VlmCheck("http://127.0.0.1:1", send=fake_send("YES", []))
+    w = RoomWatcher(1, on_checkout=True, vlm=vlm)
+    run_room(w, [], 0, 5)
+    run_room(w, [person()], 5, 15)
+    w.request_check(1, 20)
+    run_room(w, [], 20, SETTLE_SEC + 6)
+    assert w.recheck_base["vlm"]
+    run_room(w, [person()], 40, 5)  # 5초 지나감
+    run_room(w, [], 45, 5)
+    assert w.recheck_base is not None and w.person_since is None
+    run_room(w, [person()], 50, 12)  # 12초 머묾: 들어온 것
+    assert w.recheck_base is None
+
+
+def test_seated_person_blinking_still_counts_as_entered(monkeypatch):
+    """앉은 사람을 YOLO가 한 장 놓쳐도(깜빡임) 10초는 처음부터 다시 세지 않는다 (지영 #79). 0명이 3초 이어져야 지나간 사람."""
+    monkeypatch.setattr(room_camera, "ENTRY_PERSON_SEC", 10)
+    vlm = vc.VlmCheck("http://127.0.0.1:1", send=fake_send("YES", []))
+    w = RoomWatcher(1, on_checkout=True, vlm=vlm)
+    run_room(w, [], 0, 5)
+    run_room(w, [person()], 5, 15)
+    w.request_check(1, 20)
+    run_room(w, [], 20, SETTLE_SEC + 6)
+    assert w.recheck_base["vlm"]
+    run_room(w, [person()], 40, 6)
+    run_room(w, [], 46, 1)  # 한 장 놓침
+    run_room(w, [person()], 47, 6)  # 처음 보인 지 13초
+    assert w.recheck_base is None
+
+
+def test_ask_vlm_on_recheck_sends_vlm_confidence(tmp_path):
+    sent = []
+    w = RoomWatcher(1, on_checkout=True, vlm=vc.VlmCheck("http://127.0.0.1:1", send=lambda url, body: ("YES", 0.97)))
+    check = {**base_check("LEFT_ITEMS", left={"handbag": 1}), "phase": "RECHECK",
+             "confidence": {"handbag": [0.6]}}
+    room_camera.ask_vlm_then_finish(w, check, (b"a", b"b"), str(tmp_path / "log.jsonl"), sent.append, None)
+    assert sent[0]["phase"] == "RECHECK" and sent[0]["items"] == [{"name": "handbag", "confidence": 0.97}]
 
 
 def test_watcher_without_vlm_attaches_nothing():
@@ -266,6 +346,21 @@ def test_vlm_requests_ignore_proxy_settings(monkeypatch):
     monkeypatch.setenv("no_proxy", "")
     import importlib
     importlib.reload(vc)  # 프록시 설정이 있는 젯슨에서 게이트웨이를 켠 것처럼
-    assert vc.post(f"http://127.0.0.1:{server.server_port}", {}, timeout=5) == "NO"  # 사진은 젯슨 안에서 바로 간다
+    assert vc.post(f"http://127.0.0.1:{server.server_port}", {}, timeout=5) == ("NO", None)  # 사진은 젯슨 안에서 바로 간다
     assert seen == ["/v1/chat/completions"]
     server.server_close()
+
+
+def test_yes_probability_from_first_token():
+    choice = {"logprobs": {"content": [{"token": "YES", "logprob": -0.05, "top_logprobs": [
+        {"token": "YES", "logprob": math.log(0.9)}, {"token": "NO", "logprob": math.log(0.1)},
+        {"token": "Maybe", "logprob": -9}]}]}}
+    assert vc.yes_probability(choice) == 0.9
+    assert vc.yes_probability({"message": {"content": "YES"}}) is None  # 옛 서버: 후보 없음
+    only = {"logprobs": {"content": [{"token": "YES", "logprob": math.log(0.6)}]}}  # top_logprobs 없이 고른 토큰만
+    assert vc.yes_probability(only) is None  # 반대쪽 몫을 모르면 0.6을 1.0으로 부풀리지 않는다
+
+
+def test_ask_jpeg_returns_yes_probability(tmp_path):
+    vlm = vc.VlmCheck("http://x", send=lambda url, body: ("YES", 0.97), clock=iter([0.0, 2.0]).__next__)
+    assert vlm.ask_jpeg(b"a", b"b") == (True, 2.0, 0.97)

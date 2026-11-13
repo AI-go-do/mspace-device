@@ -17,6 +17,9 @@
 여러 후보 한 번에 비교 (eval/tidy/candidates.txt에 한 줄에 하나: `이름 | YOLO_MODEL=... DESK_PHOTO=1`):
     ~/mspace-venv/bin/python gateway/tidy_eval.py compare
     → 후보마다 따로 띄워 채점하고 정확도·심각 오류·시간(최대)·메모리·모델 올리기·라이선스·판단 표를 만든다
+점수를 core로 보내기 (관리자 화면 "모델 시험 정확도"): score가 끝나면 숫자만 POST /api/rooms/{방}/model-scores.
+    SERVER·DEVICE_TOKEN·ROOM_CAMERA_ROOM은 게이트웨이와 같다. SERVER가 없거나 DRY_RUN=1이면 보낼 내용만 찍는다.
+    마지막 결과 다시 보내기: tidy_eval.py push-last [문제집 폴더] (같은 eventId라 core는 한 번만 저장)
 """
 from __future__ import annotations
 
@@ -27,6 +30,7 @@ import os
 import statistics
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -133,10 +137,14 @@ def judge(before, after, find, room_items=None, desk=None, labeler=None, clock=t
         raise RuntimeError("정리 확인 결과가 비어 있어요 (RoomWatcher.check)")
     # 3시간 뒤 다시 확인(RECHECK)처럼 YOLO 개수만 봤으면 남음이었나 (물건이 있을 확률 표의 "recheck" 칸)
     check["evidence"]["count"] = watcher.check(found, "", base=base)["status"] != "CLEAN"
+    if desk is not None:  # 채점 보기용: 사진 비교가 건너뛰었나(None) · 달라진 곳 몇 개였나. 판정에는 안 쓴다
+        changes = desk.changes(after)
+        check["deskChanges"] = None if changes is None else len(changes)
     if vlm is not None:  # VLM_URL (10판): 입실·퇴실 사진을 VLM에게 한 번 더 보여 준다
-        new_item, vlm_seconds, _ = vlm.ask(before, after)
+        new_item, vlm_seconds, _, yes = vlm.ask_with_yes(vlm.prepare(before), vlm.prepare(after))
         check["yoloStatus"] = check["status"]
-        room_camera.apply_vlm(check, new_item, vlm.rule)  # 게이트웨이와 같은 방법으로 합친다
+        room_camera.apply_vlm(check, new_item, vlm.rule, yes)
+        check["vlmYesRaw"] = yes  # 못 알아들은 답이어도 확률은 따로 남긴다 (채점 기록용)  # 게이트웨이와 같은 방법으로 합친다
         seconds += vlm_seconds  # 캐시에서 꺼냈어도 처음 물었을 때 걸린 시간을 더한다
     check["people"] = watcher.people(found)
     return check, seconds
@@ -161,8 +169,8 @@ def score(cases, run_case):
         rows.append({"case": case.name, "answer": case.answer, "got": got, "seconds": round(seconds, 3),
                      "ok": got == case.answer, "leftOk": left_ok(case.answer, got), "serious": is_serious(case.answer, got),
                      "trash": check.get("trash", {}), "leftItems": check.get("leftItems", {}),
-                     "people": check.get("people", 0), "memo": case.memo,
-                     "yolo": check.get("yoloStatus"), "vlm": check.get("vlm"),
+                     "people": check.get("people", 0), "memo": case.memo, "desk": check.get("deskChanges", "off"),
+                     "yolo": check.get("yoloStatus"), "vlm": check.get("vlm"), "vlmYes": check.get("vlmYesRaw"),
                      "evidence": evidence_row(case.answer, check)})
     n = len(rows)
     right = sum(r["ok"] for r in rows)
@@ -184,7 +192,7 @@ def score(cases, run_case):
 def candidate_name(env):
     """채점한 설정을 한 줄로 (README 기록용). 게이트웨이 설정 이름 그대로."""
     keys = ("YOLO_MODEL", "DESK_PHOTO", "DESK_AREA", "FLOOR_AREA", "DESK_LIGHT", "DESK_THRESH", "DESK_MIN_AREA",
-            "DESK_MOVE", "DESK_MOVE_SAME", "LABEL_MODEL", "ROOM_ITEMS", "VLM_NAME", "VLM_RULE", "VLM_SIDE", "VLM_EQ")
+            "TILE_GRID", "DESK_MOVE", "DESK_MOVE_SAME", "DESK_KEEP_SMALL", "DESK_FURNITURE_SMALL", "LABEL_MODEL", "ROOM_ITEMS", "VLM_NAME", "VLM_RULE", "VLM_SIDE", "VLM_EQ")
     if env.get("VLM_URL") and not (env.get("VLM_NAME") or env.get("VLM_RULE")):
         env = {**env, "VLM_RULE": "or"}  # VLM_URL만 줘도 VLM을 켠 것 (기본 규칙 or). 주소는 안 적는다
     parts = [f"{k}={env[k]}" for k in keys if env.get(k)]
@@ -206,8 +214,14 @@ def report(result, candidate, out=print):
         seen = ", ".join(f"{k} {v}" for k, v in sorted(found.items())) or "찾은 것 없음"
         mark = " [심각]" if r["serious"] else (" [종류만]" if r["leftOk"] else "")
         person = f" (사람 {r['people']}명 보임: 다시 찍어요)" if r["people"] else ""
-        out(f"  틀림{mark} {r['case']}: 정답 {KOREAN[r['answer']]} → {KOREAN[r['got']]} ({seen}){person}"
+        out(f"  틀림{mark} {r['case']}: 정답 {KOREAN[r['answer']]} → {KOREAN[r['got']]} ({seen}){person}{desk_note(r)}"
             f"{' - ' + r['memo'] if r['memo'] else ''}")
+    skipped = [r["case"] for r in result["rows"] if r.get("desk", "off") is None]
+    if any(r.get("desk", "off") != "off" for r in result["rows"]):
+        out(f"사진 비교 건너뜀 (화면이 크게 달라 조명이 바뀐 것으로 봄): {len(skipped)}쌍"
+            f"{' (' + ' '.join(skipped) + ')' if skipped else ''}")
+    for line in vlm_yes_lines(result["rows"]):
+        out(line)
     out("통과" if result["passed"] else "아직 기준 못 넘음")
     names = " ".join(r["case"] for r in wrong) or "없음"
     out("README 실험 기록에 붙일 줄:")
@@ -216,14 +230,122 @@ def report(result, candidate, out=print):
         f"| {result['medianSeconds']:.2f}초 | (바꾼 것) | 문제 {result['cases']}개, 틀림 {names} |")
 
 
-def save_result(folder, result, candidate):
-    record = {"at": datetime.now(KST).isoformat(timespec="seconds"), "candidate": candidate,
+def desk_note(row):
+    """틀린 문제 줄 끝에 사진 비교(DESK_PHOTO)가 어땠는지. 꺼져 있으면 빈 글자."""
+    desk = row.get("desk", "off")
+    if desk == "off":
+        return ""
+    return " [사진 비교 건너뜀]" if desk is None else f" [사진 비교 {desk}곳]"
+
+
+def vlm_yes_lines(rows, limit=0.8):
+    """VLM이 "새 물건 있음"이라 할 확률을 정답별로 (11/12 지영: camera-warn 켜기 전 깨끗한 방 숫자)."""
+    have = [r for r in rows if r.get("vlmYes") is not None]
+    if not have:
+        return []
+    lines = [f"VLM 있음 확률 (사진 {len(have)}쌍, 경고 기준 {limit:.0%}):"]
+    for name, pick in (("깨끗함", lambda r: r["answer"] == "CLEAN"), ("물건 남음", lambda r: r["answer"] != "CLEAN")):
+        group = sorted((r for r in have if pick(r)), key=lambda r: r["vlmYes"])
+        if not group:
+            continue
+        over = sum(r["vlmYes"] >= limit for r in group)
+        lines.append(f"  정답 {name} {len(group)}쌍: " + ", ".join(f"{r['case']} {r['vlmYes']:.1%}" for r in group))
+        lines.append(f"    {limit:.0%} 이상 {over}쌍, 가장 낮음 {group[0]['vlmYes']:.1%}, 가장 높음 {group[-1]['vlmYes']:.1%}")
+    return lines
+
+
+def save_result(folder, result, candidate, compare=False):
+    """results.jsonl에 한 줄 더한다. core로 보낼 때 쓰는 eventId도 같이 적어, 다시 보내도 한 번만 저장되게 한다."""
+    record = {"at": datetime.now(KST).isoformat(timespec="seconds"), "eventId": str(uuid.uuid4()), "candidate": candidate,
               **{k: v for k, v in result.items() if k != "rows"},
               "wrong": [r["case"] for r in result["rows"] if not r["ok"]],
+              "vlmYes": [{"case": r["case"], "answer": r["answer"], "yes": r["vlmYes"]}
+                         for r in result["rows"] if r.get("vlmYes") is not None],
               "evidence": [r["evidence"] for r in result["rows"] if r.get("evidence")]}
+    if compare:  # compare 후보 줄. push-last가 다시 보낼 대상에서 뺀다 (core에는 고른 score 결과만)
+        record["compare"] = True
     os.makedirs(folder, exist_ok=True)
     with open(os.path.join(folder, "results.jsonl"), "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return record
+
+
+# ---------- 점수를 core로 (관리자 화면 "모델 시험 정확도") ----------
+
+def model_name(candidate):
+    """채점 줄의 YOLO_MODEL 파일 이름에서 확장자를 뺀 것 (예: gateway/yolov8s.onnx → yolov8s)."""
+    for part in (candidate or "").split():
+        key, _, value = part.partition("=")
+        if key == "YOLO_MODEL" and value:
+            return os.path.splitext(os.path.basename(value))[0]
+    return None
+
+
+def score_body(record):
+    """채점 기록 한 줄 → core POST body. 숫자만 보낸다 (사진·문제 이름·후보 설정은 안 보낸다). 정확도는 0~1 소수."""
+    return {"eventId": record["eventId"], "kind": "TIDY", "model": model_name(record.get("candidate")),
+            "accuracy": round(main_accuracy(record), 4), "accuracy3": round(record["accuracy"], 4),
+            "cases": record["cases"], "serious": record["serious"], "medianSeconds": record["medianSeconds"],
+            "measuredAt": record["at"]}
+
+
+def http_post(loopback):
+    """보낼 함수. 내 컴퓨터(loopback)로 보낼 때는 환경 프록시(HTTP_PROXY·ALL_PROXY 등)를 아예 안 읽는 세션을 쓴다.
+
+    proxies={"http": None, "https": None}만 주면 ALL_PROXY는 그대로 골라져서 토큰이 프록시로 샐 수 있다.
+    """
+    import requests
+    if not loopback:
+        return requests.post
+    session = requests.Session()
+    session.trust_env = False
+    return session.post
+
+
+def push_score(record, env, out=print, post=None):
+    """점수를 core로 보낸다. 실패해도 채점은 실패로 치지 않고 한 줄만 찍는다. 반환: HTTP 상태 (안 보냈으면 None)."""
+    import gateway
+    body = score_body(record)
+    config = gateway.load_config({**env, "PORT": env.get("PORT") or "0"})  # PORT는 안 쓰지만 없으면 USB 포트를 찾으려 해서
+    if config.dry_run or not env.get("SERVER"):
+        out("[DRY_RUN] POST /api/rooms/%d/model-scores %s" % (config.room_camera_room, json.dumps(body, ensure_ascii=False)))
+        return None
+    if not gateway.is_safe_server(config.server):
+        out("점수 보내기 안 함: SERVER가 https가 아니에요 (장치 토큰이 실려서 https만)")
+        return None
+    if not config.device_token:
+        out("점수 보내기 안 함: DEVICE_TOKEN이 없어요 (.env를 읽고 실행해요)")
+        return None
+    url = f"{config.server}/api/rooms/{config.room_camera_room}/model-scores"
+    if post is None:
+        post = http_post(gateway.is_loopback(config.server))
+    try:
+        r = post(url, json=body, headers={"Authorization": f"Bearer {config.device_token}"},
+                 timeout=(gateway.CONNECT_TIMEOUT, gateway.TIMEOUT), allow_redirects=False)
+    except Exception as e:  # noqa: BLE001 - 채점 결과는 이미 저장됨. 오류 이름만 한 줄
+        out(f"점수 보내기 실패: {e.__class__.__name__} (채점 기록은 그대로, push-last로 다시 보내요)")
+        return None
+    hint = {401: "토큰 확인", 403: "토큰·방 번호 확인", 404: "core에 아직 API가 없음"}.get(r.status_code, "")
+    if 200 <= r.status_code < 300:
+        out(f"점수를 core로 보냄 ({r.status_code}): {body['accuracy']:.1%}, 문제 {body['cases']}개")
+    else:
+        out(f"점수 보내기 실패 ({r.status_code}{', ' + hint if hint else ''}). 채점 기록은 그대로, push-last로 다시 보내요")
+    return r.status_code
+
+
+def last_record(folder):
+    """results.jsonl에서 compare 후보가 아닌 마지막 줄. eventId가 없는 옛 줄이면 그 자리에서 정해 보낸다 (그 줄은 고치지 않는다)."""
+    path = os.path.join(folder, "results.jsonl")
+    if not os.path.exists(path):
+        raise SystemExit(f"{path}가 없어요. 먼저 score를 돌려요")
+    with open(path, encoding="utf-8") as f:
+        lines = [line for line in f if line.strip()]
+    lines = [line for line in lines if not json.loads(line).get("compare")]
+    if not lines:
+        raise SystemExit(f"{path}에 보낼 score 결과가 없어요 (compare 후보 줄만 있음)")
+    record = json.loads(lines[-1])
+    record.setdefault("eventId", str(uuid.uuid5(uuid.NAMESPACE_URL, "mspace-tidy-score:" + lines[-1].strip())))
+    return record
 
 
 def peak_memory_mb():
@@ -236,7 +358,7 @@ def peak_memory_mb():
     return round(kb / (1024 * 1024 if sys.platform == "darwin" else 1024), 1)  # 맥은 바이트, 리눅스는 KB
 
 
-def run_score(folder, env, out=print, as_json=False, clock=time.perf_counter):
+def run_score(folder, env, out=print, as_json=False, clock=time.perf_counter, push=True):
     import cv2
     import desk_diff
     import room_camera
@@ -251,7 +373,7 @@ def run_score(folder, env, out=print, as_json=False, clock=time.perf_counter):
     if not config.yolo_model:
         raise SystemExit("YOLO_MODEL을 넣어요. 예: YOLO_MODEL=gateway/yolov8s.onnx")
     loading = clock()
-    detector = room_camera.make_detector(config.yolo_model, config.desk_area, config.floor_area)
+    detector = room_camera.make_detector(config.yolo_model, config.desk_area, config.floor_area, config.tile_grid)
     find = getattr(detector, "detect_detailed", detector.detect)
     use_desk = config.desk_photo and config.desk_area
     if config.desk_photo and not config.desk_area:
@@ -285,11 +407,13 @@ def run_score(folder, env, out=print, as_json=False, clock=time.perf_counter):
     result["vlmModel"] = vlm.model if vlm is not None else None  # 게이트웨이가 같은 VLM 모델의 점수만 쓰게 (model_score)
     candidate = candidate_name(env)
     report(result, candidate, out)
-    save_result(folder, result, candidate)
+    record = save_result(folder, result, candidate, compare=as_json)
     if as_json:  # compare가 읽는 줄
         summary = {k: v for k, v in result.items() if k != "rows"}
         summary["wrong"] = [r["case"] for r in result["rows"] if not r["ok"]]
         out(RESULT_MARK + json.dumps(summary, ensure_ascii=False))
+    elif push:  # compare가 후보마다 부를 때는 안 보낸다 (고른 결과만 화면에)
+        push_score(record, env, out)
     return result
 
 
@@ -520,14 +644,16 @@ def run_capture(folder, env):
 def main(argv=None, env=None):
     argv = sys.argv[1:] if argv is None else argv
     env = os.environ if env is None else env
-    if not argv or argv[0] not in ("capture", "score", "compare"):
-        raise SystemExit("사용법: tidy_eval.py capture|score|compare [문제집 폴더, 기본 eval/tidy]")
+    if not argv or argv[0] not in ("capture", "score", "compare", "push-last"):
+        raise SystemExit("사용법: tidy_eval.py capture|score|compare|push-last [문제집 폴더, 기본 eval/tidy]")
     args = [a for a in argv[1:] if not a.startswith("--")]
     folder = args[0] if args else DEFAULT_DIR
     if argv[0] == "capture":
         run_capture(folder, env)
     elif argv[0] == "compare":
         run_compare(folder, env)
+    elif argv[0] == "push-last":
+        push_score(last_record(folder), env)
     else:
         run_score(folder, env, as_json="--json" in argv)
 

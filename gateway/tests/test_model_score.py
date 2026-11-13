@@ -118,19 +118,34 @@ def test_find_keeps_the_presence_table_of_that_record(tmp_path):
     assert find(GATEWAY_ENV, path)["presence"] == {"yolo+desk+vlm": 0.9, "recheck": 0.9}
 
 
-def test_presence_replaces_name_scores_with_the_chance_something_is_there():
-    check = {"reservationId": 37, "phase": "FIRST", "leftItems": {}, "trash": {"cup": 1, "bottle": 1},
-             "confidence": {"cup": [0.57], "bottle": [0.39]}, "evidence": {"yolo": True, "desk": True}, "vlm": True,
+def test_confidence_is_about_this_photo():
+    """11/12 수연: 확신도는 이름이 맞을 확률이 아니라 이 사진 두 장에서 새 물건이 정말 있을 확률."""
+    check = {"reservationId": 37, "phase": "FIRST", "leftItems": {"handbag": 1}, "trash": {"unknown": 1, "cup": 1},
+             "confidence": {"handbag": [None], "unknown": [None], "cup": [0.57]},
              "checkedAt": "2026-11-12T13:00:00+09:00"}
-    table = {"yolo+desk+vlm": 0.9, "recheck": 0.85}
-    body = tidy_body(check, "camera-1", "e1", presence=table)
-    assert [i["confidence"] for i in body["items"]] == [0.9, 0.9] and {i["name"] for i in body["items"]} == {"cup", "bottle"}
-    assert [i["confidence"] for i in tidy_body(check, "camera-1", "e1")["items"]] == [0.57, 0.39]  # 표가 없으면 예전대로
-    unseen = {**check, "vlm": None}  # VLM이 못 알아들은 경우는 표에 없음 → 알림만
-    assert {i["confidence"] for i in tidy_body(unseen, "camera-1", "e1", presence=table)["items"]} == {0.5}
-    recheck = {**check, "phase": "RECHECK", "evidence": {"yolo": True, "desk": False}}
-    recheck.pop("vlm")
-    assert {i["confidence"] for i in tidy_body(recheck, "camera-1", "e1", presence=table)["items"]} == {0.85}
+    by = lambda body: {i["name"]: i["confidence"] for i in body["items"]}
+    assert by(tidy_body({**check, "vlmYes": 0.98}, "camera-1", "e1")) == {"handbag": 0.98, "unknown": 0.98, "cup": 0.98}
+    # VLM은 없다(20%)인데 YOLO가 컵 57%: 높은 값 (11/12 수연, 예약 #51 마우스 71%인데 24%로 보이던 것)
+    assert by(tidy_body({**check, "vlmYes": 0.2}, "camera-1", "e1")) == {"handbag": 0.2, "unknown": 0.2, "cup": 0.57}
+    assert by(tidy_body(check, "camera-1", "e1")) == {"handbag": 0.5, "unknown": 0.5, "cup": 0.57}  # VLM 답 없음: YOLO 점수
+
+
+def test_vlm_confidence_keeps_yolo_order_for_the_item_limit():
+    """VLM 확률은 모두 같아서, 20개 제한에서 남길 순서는 YOLO 점수로 (CodeRabbit #72)."""
+    from room_camera import MAX_SERVER_ITEMS
+    n = MAX_SERVER_ITEMS + 1
+    check = {"reservationId": 1, "phase": "FIRST", "leftItems": {"aaa": n - 1, "zzz": 1}, "trash": {},
+             "confidence": {"aaa": [0.3] * (n - 1), "zzz": [0.9]}, "vlmYes": 0.95, "checkedAt": "t"}
+    items = tidy_body(check, "camera-1", "e1")["items"]
+    assert len(items) == MAX_SERVER_ITEMS and items[0] == {"name": "zzz", "confidence": 0.95}
+
+
+def test_unparsed_vlm_answer_keeps_yolo_confidence():
+    from room_camera import apply_vlm
+    check = {"reservationId": 1, "status": "LEFT_ITEMS", "leftItems": {"cup": 1}, "trash": {},
+             "confidence": {"cup": [0.57]}, "checkedAt": "t"}
+    apply_vlm(check, None, "or", 0.9)
+    assert "vlmYes" not in check and tidy_body(check, "camera-1", "e1")["items"] == [{"name": "cup", "confidence": 0.57}]
 
 
 def test_evidence_keys():
@@ -165,10 +180,6 @@ def test_recheck_counts_only_rooms_the_gateway_would_recheck():
 
 
 def test_empty_table_is_not_an_old_record():
-    """근거는 있는데 남음이 한 번도 없으면 빈 표: 옛 이름 점수 대신 모두 0.5(알림만)."""
     table = model_score.presence_table([{"left": False, "found": False, "key": "none", "count": False}])
     assert table == {}
-    check = {"reservationId": 37, "phase": "RECHECK", "leftItems": {}, "trash": {"cup": 1},
-             "confidence": {"cup": [0.95]}, "evidence": {"yolo": True, "desk": False}, "checkedAt": "x"}
-    assert tidy_body(check, "camera-1", "e1", presence=table)["items"][0]["confidence"] == 0.5
     assert "모두 50%" in model_score.describe_presence(table)

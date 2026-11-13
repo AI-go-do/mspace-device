@@ -47,7 +47,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
@@ -907,6 +907,9 @@ def room_items(config):
 def start_room_camera(config, sensors):
     """방 안 웹캠 인원 세기·정리 확인을 뒤에서(스레드) 켠다."""
     import room_camera  # 켤 때만 불러온다 (OpenCV는 젯슨에만 있으면 됨)
+    # 비품을 여기서 한 번 정한다: 판정(RoomWatcher)과 시험 점수 찾기(model_score.find)가 같은 비품을 보게.
+    # 오프라인 채점(tidy_eval)은 공간 등록 파일을 안 읽고 ROOM_ITEMS만 쓴다 (문제집마다 정답지 기준이 정해져 있음)
+    config = replace(config, room_items=room_items(config))
     room = config.room_camera_room
     CAMERA_ROOMS[room] = time.monotonic()  # 켤 때 한 번 잡고, 이후 사진을 읽을 때마다 새로 적는다
     detector = room_camera.make_detector(config.yolo_model, config.desk_area, config.floor_area, config.tile_grid)
@@ -919,7 +922,7 @@ def start_room_camera(config, sensors):
         entry_desk = desk_diff.DeskCompare(config.desk_area, path=path, **desk_diff.settings(config))
     photos = config.tidy_photos and on_checkout  # 연습 모드는 서버로 안 보내니 사진도 안 찍는다
     vlm = make_vlm(config) if on_checkout and detector.finds_objects else None
-    watcher = room_camera.RoomWatcher(room, check_objects=detector.finds_objects, room_items=room_items(config),
+    watcher = room_camera.RoomWatcher(room, check_objects=detector.finds_objects, room_items=config.room_items,
                                       on_checkout=on_checkout, baseline_path=config.baseline_file,
                                       desk=desk, labeler=labeler, entry_desk=entry_desk, photos=photos, vlm=vlm,
                                       retrieve_sec=config.retrieve_recheck_min * 60, tile_grid=config.tile_grid)

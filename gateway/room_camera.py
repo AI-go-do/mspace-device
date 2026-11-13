@@ -389,8 +389,7 @@ def photo_jpeg(frame):
     return None
 
 
-MARK_COLOR = (60, 100, 235)  # 붉은 주황 (OpenCV는 BGR 순서). 11/13 수연 "너무 새빨게" → 순빨강(0, 0, 255)에서 낮춤
-MARK_ALPHA = 0.7             # 선을 사진 위에 이만큼만 진하게 (1이면 그대로 덮음)
+MARK_COLOR = (0, 0, 255)  # 빨강 (OpenCV는 BGR 순서). 11/13 수연: 붉은 주황으로 바꿔 봤다가 "그냥 빨강이 낫네"
 
 
 def draw_marks(frame, marks):
@@ -417,7 +416,6 @@ def draw_marks(frame, marks):
             # (11/13 수연 "동그라미가 좀 작다": 5배였을 때 마우스만 한 물건이 작게 보임)
             axes = (max(int((x2 - x1) / 2) + thick * 3, thick * 10), max(int((y2 - y1) / 2) + thick * 3, thick * 10))
             cv2.ellipse(out, center, axes, 0, 0, 360, MARK_COLOR, thick, cv2.LINE_AA)
-        out = cv2.addWeighted(out, MARK_ALPHA, frame, 1 - MARK_ALPHA, 0)
         return out
     except Exception as e:  # noqa: BLE001 - 동그라미 못 그려도 사진은 올린다
         print(f"정리 확인 사진에 동그라미를 못 그렸어요 ({e.__class__.__name__}). 그냥 올려요")

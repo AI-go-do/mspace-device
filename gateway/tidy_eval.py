@@ -20,6 +20,8 @@
 점수를 core로 보내기 (관리자 화면 "모델 시험 정확도"): score가 끝나면 숫자만 POST /api/rooms/{방}/model-scores.
     SERVER·DEVICE_TOKEN·ROOM_CAMERA_ROOM은 게이트웨이와 같다. SERVER가 없거나 DRY_RUN=1이면 보낼 내용만 찍는다.
     마지막 결과 다시 보내기: tidy_eval.py push-last [문제집 폴더] (같은 eventId라 core는 한 번만 저장)
+동그라미 사진 보기 (TIDY_MARKS=1, 11/13 수연): score 때 문제마다 입실 전 | 퇴실 뒤(동그라미) 사진을
+    [문제집]/marks/에 저장하고 marks/index.html(틀린 문제부터)을 만든다. 젯슨 안에만 두고 tailscale로만 본다
 """
 from __future__ import annotations
 
@@ -135,6 +137,7 @@ def judge(before, after, find, room_items=None, desk=None, labeler=None, clock=t
     seconds = clock() - started
     if check is None:
         raise RuntimeError("정리 확인 결과가 비어 있어요 (RoomWatcher.check)")
+    marks = list(watcher.last_marks)  # 게이트웨이가 퇴실 뒤 사진에 그리는 동그라미 자리 (아래 개수만 다시 보기 전에 꺼냄)
     # 3시간 뒤 다시 확인(RECHECK)처럼 YOLO 개수만 봤으면 남음이었나 (물건이 있을 확률 표의 "recheck" 칸)
     check["evidence"]["count"] = watcher.check(found, "", base=base)["status"] != "CLEAN"
     if desk is not None:  # 채점 보기용: 사진 비교가 건너뛰었나(None) · 달라진 곳 몇 개였나. 판정에는 안 쓴다
@@ -147,7 +150,49 @@ def judge(before, after, find, room_items=None, desk=None, labeler=None, clock=t
         check["vlmYesRaw"] = yes  # 못 알아들은 답이어도 확률은 따로 남긴다 (채점 기록용)  # 게이트웨이와 같은 방법으로 합친다
         seconds += vlm_seconds  # 캐시에서 꺼냈어도 처음 물었을 때 걸린 시간을 더한다
     check["people"] = watcher.people(found)
+    check["marks"] = marks  # 동그라미 사진(TIDY_MARKS)용. 기록 파일에는 안 남긴다 (score가 rows에 안 넣음)
     return check, seconds
+
+
+MARKS_DIR = "marks"
+MARK_ANSWERS = {"CLEAN": "clean", "NEEDS_CLEANING": "cleaning", "LEFT_ITEMS": "left"}
+
+
+def marks_image(before, after, marks, answer, got, vlm=None):
+    """입실 전 | 퇴실 뒤(게이트웨이와 같은 동그라미) 한 장. 위에 정답·판정 한 줄 (OpenCV는 한글을 못 써서 영어)."""
+    import cv2
+    import numpy as np
+    import room_camera
+    marked = room_camera.draw_marks(after, marks)
+    h = max(before.shape[0], marked.shape[0])
+    pad = lambda img: cv2.copyMakeBorder(img, 0, h - img.shape[0], 0, 0, cv2.BORDER_CONSTANT)  # noqa: E731
+    pair = np.hstack([pad(before), np.full((h, 8, 3), 255, np.uint8), pad(marked)])
+    bar = np.full((60, pair.shape[1], 3), 255, np.uint8)
+    ok = left_ok(answer, got)  # 채점과 같은 기준 (깨끗함/남음)
+    text = f"answer {MARK_ANSWERS.get(answer, answer)} / got {MARK_ANSWERS.get(got, got)}   circles {len(marks)}"
+    if vlm is not None:
+        text += f"   vlm {vlm}"
+    cv2.putText(bar, text, (12, 42), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 140, 0) if ok else (0, 0, 220), 2, cv2.LINE_AA)
+    return np.vstack([bar, pair])
+
+
+def write_marks_page(folder, rows):
+    """marks/index.html: 틀린 문제부터 사진을 늘어놓는다. 사진은 같은 폴더의 상대 경로로만 (밖으로 안 나감)."""
+    import html
+    order = sorted(rows, key=lambda r: (r["leftOk"], r["case"]))
+    parts = ["<!doctype html><meta charset='utf-8'><title>채점 동그라미</title>",
+             "<style>body{font-family:sans-serif;margin:16px}img{max-width:100%;border:1px solid #ccc}"
+             "h3.bad{color:#c00}h3.ok{color:#080}</style>",
+             f"<h1>채점 동그라미 ({sum(not r['leftOk'] for r in rows)}개 틀림 / {len(rows)}개)</h1>",
+             "<p>왼쪽 입실 전, 오른쪽 퇴실 뒤. 빨간 동그라미 = 게이트웨이가 남았다고 본 자리 (VLM만 남음이라 한 건 동그라미 없음)</p>"]
+    for r in order:
+        cls = "ok" if r["leftOk"] else "bad"
+        found = ", ".join(f"{k} {v}" for k, v in {**r["leftItems"], **r["trash"]}.items()) or "없음"
+        parts.append(f"<h3 class='{cls}'>{html.escape(r['case'])}: 정답 {r['answer']} · 판정 {r['got']}"
+                     f" · 찾은 것 {html.escape(found)} · {html.escape(r.get('memo') or '')}</h3>"
+                     f"<img loading='lazy' src='{html.escape(r['case'])}.jpg'>")
+    with open(os.path.join(folder, MARKS_DIR, "index.html"), "w", encoding="utf-8") as f:
+        f.write("\n".join(parts))
 
 
 def evidence_row(answer, check):
@@ -396,7 +441,15 @@ def run_score(folder, env, out=print, as_json=False, clock=time.perf_counter, pu
             if img is None:
                 raise SystemExit(f"{case.name}/{key}를 못 읽었어요 (파일이 깨졌을 수 있어요). 다시 찍거나 answers.csv에서 빼요")
         desk = desk_diff.DeskCompare(config.desk_area, **desk_diff.settings(config)) if use_desk else None  # 메모리에만 (파일 안 씀)
-        return judge(before, after, timed_find, config.room_items, desk, labeler, vlm=vlm)
+        check, seconds = judge(before, after, timed_find, config.room_items, desk, labeler, vlm=vlm)
+        if marks_on:
+            img = marks_image(before, after, check.get("marks") or [], case.answer, check["status"], check.get("vlm"))
+            cv2.imwrite(os.path.join(folder, MARKS_DIR, f"{case.name}.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        return check, seconds
+
+    marks_on = env.get("TIDY_MARKS") == "1"
+    if marks_on:
+        os.makedirs(os.path.join(folder, MARKS_DIR), exist_ok=True)
 
     run_case(cases[0])  # 처음 한 번은 모델 준비로 느리다. 시간에 넣지 않고, 첫 장까지를 "모델 올리기"로 둔다
     load_seconds = first_seen[0] - loading
@@ -405,6 +458,9 @@ def run_score(folder, env, out=print, as_json=False, clock=time.perf_counter, pu
     result["skipped"] = problems  # 건너뛴 문제. 비교표에 같이 적어 문제집이 다른 걸 알아보게 한다
     result["memoryMB"] = peak_memory_mb()
     result["vlmModel"] = vlm.model if vlm is not None else None  # 게이트웨이가 같은 VLM 모델의 점수만 쓰게 (model_score)
+    if marks_on:
+        write_marks_page(folder, result["rows"])
+        out(f"동그라미 사진: {os.path.join(folder, MARKS_DIR)}/index.html (젯슨 안에만, tailscale로 보기)")
     candidate = candidate_name(env)
     report(result, candidate, out)
     record = save_result(folder, result, candidate, compare=as_json)

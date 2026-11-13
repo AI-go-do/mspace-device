@@ -582,3 +582,33 @@ def test_judge_records_how_many_places_the_desk_photo_changed():
 def test_new_desk_settings_are_in_the_candidate_name():
     name = te.candidate_name({"DESK_KEEP_SMALL": "0.05", "DESK_FURNITURE_SMALL": "0.5"})
     assert "DESK_KEEP_SMALL=0.05" in name and "DESK_FURNITURE_SMALL=0.5" in name
+
+
+def test_run_score_saves_circled_photos_only_with_tidy_marks(tmp_path, monkeypatch):
+    """TIDY_MARKS=1이면 문제마다 입실 전 | 퇴실 뒤(동그라미) 사진과 index.html을 문제집/marks에 (11/13 수연)."""
+    import cv2
+    import room_camera
+    for name, after in (("001", 0), ("002", 200)):
+        (tmp_path / name).mkdir()
+        cv2.imwrite(str(tmp_path / name / "before.jpg"), frame(0))
+        cv2.imwrite(str(tmp_path / name / "after.jpg"), frame(after))
+    te.append_answer(str(tmp_path), te.Case("001", "CLEAN"))
+    te.append_answer(str(tmp_path), te.Case("002", "CLEAN"))  # 컵이 보여 틀리게 → 페이지 맨 위
+
+    class Fake:
+        finds_objects = True
+
+        def detect(self, f):
+            return [det("cup")] if f[0, 0, 0] > 100 else []
+
+    monkeypatch.setattr(room_camera, "make_detector", lambda model, area, floor=None, grid=2: Fake())
+    te.run_score(str(tmp_path), {"YOLO_MODEL": "m.onnx"}, out=lambda s: None, push=False)
+    assert not (tmp_path / "marks").exists()  # 기본은 안 만듦
+    lines = []
+    te.run_score(str(tmp_path), {"YOLO_MODEL": "m.onnx", "TIDY_MARKS": "1"}, out=lines.append, push=False)
+    img = cv2.imread(str(tmp_path / "marks" / "002.jpg"))
+    assert img is not None and img.shape[1] > frame(0).shape[1] * 2  # 두 장 나란히
+    page = (tmp_path / "marks" / "index.html").read_text(encoding="utf-8")
+    assert "002.jpg" in page and "001.jpg" in page and page.index("002") < page.index("001.jpg")  # 틀린 것 먼저
+    assert any("동그라미 사진" in line for line in lines)
+    assert '"marks"' not in (tmp_path / "results.jsonl").read_text(encoding="utf-8")  # 기록 파일엔 자리 안 남김

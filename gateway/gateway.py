@@ -84,6 +84,7 @@ class Config:
     preview_host: str = "127.0.0.1"        # 화면 보기를 열 주소. 맥에서 보려면 Tailscale IP (전체 공개 0.0.0.0은 피함)
     yolo_model: str | None = None          # YOLO ONNX 모델 파일. 없으면 사람만 세는 기본 방식(HOG)
     room_items: dict = field(default_factory=dict)  # 방 비품 {"remote": 1}: 그 개수까지는 있어도 없어도 괜찮음
+    room_profile: str | None = "room_profile.json"  # 공간 등록(room_setup.py) 결과. ROOM_ITEMS를 안 주면 여기 비품을 씀
     desk_area: tuple | None = None         # 책상 부분 (x1, y1, x2, y2) 화면 비율. 정리 확인 때 책상만 확대해서 한 번 더 본다
     tile_grid: int = 2                     # 정리 확인 때 화면을 몇 줄로 잘라 보나 (TILE_GRID, 2 = 4조각, 3 = 9조각)
     floor_area: tuple | None = None        # 바닥 부분 (x1, y1, x2, y2) 화면 비율. 정리 확인 때 바닥도 확대해서 한 번 더 본다
@@ -148,6 +149,8 @@ def load_config(env=None):
         preview_port=int(env["PREVIEW_PORT"]) if _is_number(env.get("PREVIEW_PORT", "")) else None,
         preview_host=env.get("PREVIEW_HOST") or Config.preview_host,
         room_items=parse_room_items(env.get("ROOM_ITEMS", "")),
+        room_profile=(None if env.get("ROOM_PROFILE") == "off"
+                      else env.get("ROOM_PROFILE") or Config.room_profile),
         desk_area=parse_desk_area(env.get("DESK_AREA", "")),
         floor_area=parse_desk_area(env.get("FLOOR_AREA", ""), "FLOOR_AREA"),
         tile_grid=parse_number(env, "TILE_GRID", Config.tile_grid, 2, 4, int),
@@ -890,6 +893,17 @@ def make_vlm(config):
     return vlm
 
 
+def room_items(config):
+    """방 비품: ROOM_ITEMS를 주면 그것, 아니면 공간 등록(room_setup.py) 파일의 비품, 둘 다 없으면 없음."""
+    if config.room_items:
+        return config.room_items
+    import room_setup
+    items = room_setup.load_profile_items(config.room_profile)
+    if items is not None:
+        print(f"방 비품: 공간 등록 파일({config.room_profile})에서 {room_setup.format_room_items(items) or '없음'}")
+    return items or {}
+
+
 def start_room_camera(config, sensors):
     """방 안 웹캠 인원 세기·정리 확인을 뒤에서(스레드) 켠다."""
     import room_camera  # 켤 때만 불러온다 (OpenCV는 젯슨에만 있으면 됨)
@@ -905,7 +919,7 @@ def start_room_camera(config, sensors):
         entry_desk = desk_diff.DeskCompare(config.desk_area, path=path, **desk_diff.settings(config))
     photos = config.tidy_photos and on_checkout  # 연습 모드는 서버로 안 보내니 사진도 안 찍는다
     vlm = make_vlm(config) if on_checkout and detector.finds_objects else None
-    watcher = room_camera.RoomWatcher(room, check_objects=detector.finds_objects, room_items=config.room_items,
+    watcher = room_camera.RoomWatcher(room, check_objects=detector.finds_objects, room_items=room_items(config),
                                       on_checkout=on_checkout, baseline_path=config.baseline_file,
                                       desk=desk, labeler=labeler, entry_desk=entry_desk, photos=photos, vlm=vlm,
                                       retrieve_sec=config.retrieve_recheck_min * 60, tile_grid=config.tile_grid)

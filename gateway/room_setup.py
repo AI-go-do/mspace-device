@@ -125,6 +125,8 @@ class AutoRegister:
         if len(self.counted) == 1:
             self.log(f"공간 등록: 빈 방을 {self.need}장 모으는 중이에요 ({self.every:g}초마다, 사람이 오면 멈춤)")
         if len(self.counted) < self.need:
+            if len(self.counted) % 10 == 0:
+                self.log(f"공간 등록: {len(self.counted)}장째 / {self.need}장")
             return
         items, leftover = decide_room_items(self.counted, self.share, self.trash)
         if leftover:
@@ -134,7 +136,7 @@ class AutoRegister:
             return
         write_profile(self.path, items, len(self.counted), self.skipped, self.minutes)
         self.done = True
-        self.log(f"공간 등록 끝: 방 비품 {format_room_items(items) or '없음'} → {self.path} "
+        self.log(f"공간 등록 끝: 방 비품 {format_room_items(items) or '없음 (YOLO가 세는 물건 중에는 없음)'} → {self.path} "
                  "(다시 하려면 이 파일을 지우고 게이트웨이를 다시 켜요)")
         self.on_done(items)
 
@@ -194,7 +196,7 @@ def main(env=None):
                          "파일은 그대로 뒀어요.")
     write_profile(path, items, len(counted), skipped, minutes)
     print(f"등록 끝: {len(counted)}장 사용 (사람 때문에 {skipped}장 건너뜀)")
-    print(f"방 비품: {room_camera.describe(items) or '없음'} → {path}에 적었어요")
+    print(f"방 비품: {room_camera.describe(items) or '없음 (YOLO가 세는 물건 중에는 없음)'} → {path}에 적었어요")
     print(f"게이트웨이는 ROOM_ITEMS를 안 주면 이걸 써요. 직접 적으려면: ROOM_ITEMS={format_room_items(items)}")
     return items
 

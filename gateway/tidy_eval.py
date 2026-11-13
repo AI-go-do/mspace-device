@@ -158,6 +158,11 @@ MARKS_DIR = "marks"
 MARK_ANSWERS = {"CLEAN": "clean", "NEEDS_CLEANING": "cleaning", "LEFT_ITEMS": "left"}
 
 
+def marks_file(case_name):
+    """문제 이름 → marks 폴더 안 파일 이름 하나 (하위 폴더 이름이어도 marks 바로 아래 한 파일로)."""
+    return case_name.replace("/", "_").replace(os.sep, "_") + ".jpg"
+
+
 def marks_image(before, after, marks, answer, got, vlm=None):
     """입실 전 | 퇴실 뒤(게이트웨이와 같은 동그라미) 한 장. 위에 정답·판정 한 줄 (OpenCV는 한글을 못 써서 영어)."""
     import cv2
@@ -179,6 +184,7 @@ def marks_image(before, after, marks, answer, got, vlm=None):
 def write_marks_page(folder, rows):
     """marks/index.html: 틀린 문제부터 사진을 늘어놓는다. 사진은 같은 폴더의 상대 경로로만 (밖으로 안 나감)."""
     import html
+    from urllib.parse import quote
     order = sorted(rows, key=lambda r: (r["leftOk"], r["case"]))
     parts = ["<!doctype html><meta charset='utf-8'><title>채점 동그라미</title>",
              "<style>body{font-family:sans-serif;margin:16px}img{max-width:100%;border:1px solid #ccc}"
@@ -190,7 +196,7 @@ def write_marks_page(folder, rows):
         found = ", ".join(f"{k} {v}" for k, v in {**r["leftItems"], **r["trash"]}.items()) or "없음"
         parts.append(f"<h3 class='{cls}'>{html.escape(r['case'])}: 정답 {r['answer']} · 판정 {r['got']}"
                      f" · 찾은 것 {html.escape(found)} · {html.escape(r.get('memo') or '')}</h3>"
-                     f"<img loading='lazy' src='{html.escape(r['case'])}.jpg'>")
+                     f"<img loading='lazy' src='{html.escape(quote(marks_file(r['case'])))}'>")
     with open(os.path.join(folder, MARKS_DIR, "index.html"), "w", encoding="utf-8") as f:
         f.write("\n".join(parts))
 
@@ -444,7 +450,8 @@ def run_score(folder, env, out=print, as_json=False, clock=time.perf_counter, pu
         check, seconds = judge(before, after, timed_find, config.room_items, desk, labeler, vlm=vlm)
         if marks_on:
             img = marks_image(before, after, check.get("marks") or [], case.answer, check["status"], check.get("vlm"))
-            cv2.imwrite(os.path.join(folder, MARKS_DIR, f"{case.name}.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if not cv2.imwrite(os.path.join(folder, MARKS_DIR, marks_file(case.name)), img, [cv2.IMWRITE_JPEG_QUALITY, 80]):
+                out(f"동그라미 사진을 못 저장했어요: {case.name} (채점은 계속)")
         return check, seconds
 
     marks_on = env.get("TIDY_MARKS") == "1"

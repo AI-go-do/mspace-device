@@ -966,9 +966,15 @@ class RoomWatcher:
                 continue  # 이미 개수로 센 물건이거나, 원래 있던 물건(리모컨)을 옮겨서 생긴 빈자리
             label = (self.labeler(frame, box) if self.labeler else None) or UNKNOWN
             if label in FURNITURE:
-                if not small_on_furniture(box, label, dets, getattr(desk, "furniture_small", 0.0)):
+                seen_there = any(d.label == label and overlaps(box, d.box) for d in dets)
+                if getattr(desk, "furniture_seen", False) and not seen_there:
+                    # DESK_FURNITURE_SEEN: 잘라 본 조각에만 가구 이름이 붙고, 화면 전체에서는 모델이 그 자리에
+                    # 그 가구를 못 찾음 → 잘못 붙은 이름으로 보고 물건으로 센다 (11/13 2차 013 진단에서 나옴, 1차로 고름)
+                    label = UNKNOWN
+                elif not small_on_furniture(box, label, dets, getattr(desk, "furniture_small", 0.0)):
                     continue  # 의자를 빼 두거나 넣은 자리 (가구는 정리 대상이 아님)
-                label = UNKNOWN  # 의자보다 훨씬 작은 곳: 의자 위·옆에 둔 물건 (DESK_FURNITURE_SMALL, 11/12 035 가방)
+                else:
+                    label = UNKNOWN  # 의자보다 훨씬 작은 곳: 의자 위·옆에 둔 물건 (DESK_FURNITURE_SMALL, 11/12 035 가방)
             items[label] = items.get(label, 0) + 1
         return items
 

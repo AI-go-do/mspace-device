@@ -550,3 +550,31 @@ def test_partial_compare_does_not_drop_renamed_things():
     d = DeskCompare(AREA, light="ssim", move=True, keep_small=0.05)
     check, _ = tidy_eval.judge(before, after, find, room_items={"remote": 1}, desk=d)
     assert d.partial and check["leftItems"] == {"laptop": 1}
+
+
+def judge_with(desk_kwargs, before, after, before_dets, after_dets, labeler=None):
+    import tidy_eval
+    d = DeskCompare(AREA, light="ssim", move=True, **desk_kwargs)
+    check, _ = tidy_eval.judge(before, after, lambda f: before_dets if f is before else after_dets,
+                               desk=d, labeler=labeler)
+    return check
+
+
+def test_furniture_seen_counts_a_spot_only_named_chair():
+    """DESK_FURNITURE_SEEN: 조각 이름만 "의자"이고 화면 전체에서 모델이 그 자리에 의자를 못 찾았으면 물건으로 센다 (12판)."""
+    before, after = desk(noise=6), desk(PAPER, noise=6)
+    chair_name = lambda frame, box: "chair"
+    assert judge_with({}, before, after, [], [], chair_name)["status"] == "CLEAN"  # 꺼 두면 예전처럼 의자로 보고 뺌
+    check = judge_with({"furniture_seen": True}, before, after, [], [], chair_name)
+    assert check["trash"] == {"unknown": 1}
+    chair = Detection("chair", 0.8, (1090, 590, 140, 110))
+    assert judge_with({"furniture_seen": True}, before, after, [], [chair], chair_name)["status"] == "CLEAN"  # 진짜 의자는 그대로 뺌
+
+
+def test_furniture_seen_setting_comes_from_env():
+    import desk_diff
+    import gateway
+    on = DeskCompare(AREA, **desk_diff.settings(gateway.load_config({"DESK_FURNITURE_SEEN": "1", "PORT": "x"})))
+    assert on.furniture_seen is True
+    off = DeskCompare(AREA, **desk_diff.settings(gateway.load_config({"PORT": "x"})))
+    assert off.furniture_seen is False  # 기본은 예전과 같음

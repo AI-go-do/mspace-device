@@ -389,6 +389,32 @@ def photo_jpeg(frame):
     return None
 
 
+MARK_COLOR = (0, 0, 255)  # 빨강 (OpenCV는 BGR 순서)
+
+
+def draw_marks(frame, marks):
+    """물건이 있는 것 같은 곳마다 상자를 감싸는 빨간 타원을 그린 복사본. 없으면 원래 화면 그대로.
+
+    원본(frame)은 건드리지 않는다 (같은 화면을 VLM·책상 비교가 쓸 수 있어서). 그리기에 실패해도 사진은 그대로 올린다.
+    """
+    if not marks:
+        return frame
+    try:
+        import cv2
+        out = frame.copy()
+        h, w = out.shape[:2]
+        thick = max(2, round(max(h, w) / 300))  # 1280 사진에서 4픽셀 정도: 줄여 올려도 보이게
+        for x, y, bw, bh in marks:
+            center = (int(x + bw / 2), int(y + bh / 2))
+            # 상자 네 귀퉁이가 타원 안에 들어가게 반지름을 상자 반쪽의 √2배로 (작은 물건도 보이게 최소 두께의 5배)
+            axes = (max(int(bw / 2 * 1.42), thick * 5), max(int(bh / 2 * 1.42), thick * 5))
+            cv2.ellipse(out, center, axes, 0, 0, 360, MARK_COLOR, thick)
+        return out
+    except Exception as e:  # noqa: BLE001 - 동그라미 못 그려도 사진은 올린다
+        print(f"정리 확인 사진에 동그라미를 못 그렸어요 ({e.__class__.__name__}). 그냥 올려요")
+        return frame
+
+
 def photo_sum(jpg):
     return hashlib.sha256(jpg).hexdigest()[:16] if jpg else None
 
@@ -419,6 +445,7 @@ class RoomWatcher:
         # photos (TIDY_PHOTOS=1, docs Q-27): 퇴실 모드에서 입실 전(ENTRY)·퇴실 뒤(FIRST)·3시간 뒤(RECHECK) 빈 방 컬러 사진을
         # 결과에 붙여 core로 올린다. 사람이 0명인 장만 찍는다. 입실 전 사진은 정리 확인을 보내면 젯슨에서 지운다
         self.photos = photos
+        self.last_marks = []         # 마지막 정리 확인에서 물건이 있는 것 같은 곳 (사진 동그라미용, 화면 좌표 상자)
         # desk: 깨끗한 책상 사진 비교(desk_diff.DeskCompare, DESK_PHOTO=1). 모델이 모르는 물건도 "남음"으로 잡는다
         # labeler(frame, box): 달라진 곳에 이름 붙이기. 못 붙이면 None → "모르는 물건"
         self.desk = desk
@@ -740,11 +767,13 @@ class RoomWatcher:
             print(f"VLM 사진을 못 만들었어요 ({e.__class__.__name__}). YOLO 결과만 써요")
             return None
 
-    def room_photo(self, photo, *seen):
-        """TIDY_PHOTOS일 때 지금 화면을 JPEG로. 빠르게 센 것·자세히 찾은 것 어디에도 사람이 없을 때만 (사람 사진은 안 올림)."""
+    def room_photo(self, photo, *seen, marks=()):
+        """TIDY_PHOTOS일 때 지금 화면을 JPEG로. 빠르게 센 것·자세히 찾은 것 어디에도 사람이 없을 때만 (사람 사진은 안 올림).
+
+        marks: 물건이 있는 것 같은 곳(화면 좌표 상자). 빨간 동그라미를 그려서 올린다 (11/13 수연)."""
         if not self.photos or photo is None or any(self.people(d) for d in seen):
             return None
-        return photo_jpeg(photo())
+        return photo_jpeg(draw_marks(photo(), marks))
 
     def update(self, dets, now, pir=None, now_iso=None, detail=None, photo=None):
         """한 번 센 결과를 넣는다. 보낼 재실 이벤트(dict)와 정리 확인 결과(dict)를 (event, check)로 돌려준다.
@@ -862,7 +891,7 @@ class RoomWatcher:
         after = self.vlm_photo(photo, dets, seen) if before else None
         if after:  # VLM은 카메라 스레드를 막지 않게 run_room_camera가 따로 묻는다 (사진은 결과를 보내면 버림)
             check["vlmPhotos"] = (before, after)
-        photos = {"FIRST": self.room_photo(photo, dets, seen), "ENTRY": self.entry.get("jpg") if self.photos else None}
+        photos = {"FIRST": self.room_photo(photo, dets, seen, marks=self.last_marks), "ENTRY": self.entry.get("jpg") if self.photos else None}
         photos = {k: v for k, v in photos.items() if v}  # 퇴실 뒤 사진부터 (입실 전은 core가 아직 안 받을 수 있음)
         if photos:
             check["photos"] = photos
@@ -901,7 +930,7 @@ class RoomWatcher:
                 # 아직 남음: 기준은 남겨 둔다. core는 예약마다 RECHECK를 한 번만 받아서(두 번째는 409) 보통 다시 부르지 않고,
                 # /current에서 recheck가 빠지면 on_recheck_gone이 지운다. 남은 물건은 core가 처리 (결정 30: 경고·알림 없음)
                 self.recheck_base = base
-        jpg = self.room_photo(photo, dets, seen)
+        jpg = self.room_photo(photo, dets, seen, marks=self.last_marks)
         if jpg:
             check["photos"] = {"RECHECK": jpg}
         return check
@@ -953,8 +982,10 @@ class RoomWatcher:
             items[d.label] = items.get(d.label, 0) + 1
         return items
 
-    def desk_items(self, frame, dets, desk=None):
-        """책상 사진 비교로 달라진 곳 중, 모델이 이미 찾은 물건·기준 때 있던 물건 자리가 아닌 것에 이름을 붙인다."""
+    def desk_items(self, frame, dets, desk=None, boxes=None):
+        """책상 사진 비교로 달라진 곳 중, 모델이 이미 찾은 물건·기준 때 있던 물건 자리가 아닌 것에 이름을 붙인다.
+
+        boxes: 리스트를 주면 물건으로 센 곳의 상자(화면 좌표)를 넣어 준다 (사진 동그라미용)."""
         desk = desk or self.desk
         changes = desk.changes(frame)
         if changes is None:
@@ -976,9 +1007,11 @@ class RoomWatcher:
                 else:
                     label = UNKNOWN  # 의자보다 훨씬 작은 곳: 의자 위·옆에 둔 물건 (DESK_FURNITURE_SMALL, 11/12 035 가방)
             items[label] = items.get(label, 0) + 1
+            if boxes is not None:
+                boxes.append(box)
         return items
 
-    def not_moved(self, dets, now_items, base, desk):
+    def not_moved(self, dets, now_items, base, desk, dropped=None):
         """DESK_MOVE=1: 늘어난 물건 중 "원래 있던 걸 옮기거나 다른 이름으로 잘못 본 것"은 빼고 다시 센다 (9판).
 
         - 책상 비교가 "옮긴 자리"로 본 곳에 있는 것 (리모컨을 옮김·뒤집음)
@@ -993,6 +1026,8 @@ class RoomWatcher:
             renamed = any(label != d.label and overlaps(d.box, box) and similar_size(d.box, box) for box, label in known)
             if renamed or any(overlaps(d.box, box) for box in desk.moved):
                 items[d.label] -= 1
+                if dropped is not None:
+                    dropped.append(d)  # 옮김·이름 잘못 봄으로 뺀 것 (사진에 동그라미 안 침)
         return {k: v for k, v in items.items() if v > 0}
 
     def check(self, dets, now_iso, photo=None, base=None, desk=None):
@@ -1009,18 +1044,22 @@ class RoomWatcher:
         now_items = self.count(dets)
         extra = {}
         compared = False
+        desk_boxes, dropped = [], []
         if desk is not None and desk.ready and photo is not None:
             frame = photo()
-            found = self.desk_items(frame, dets, desk)
+            found = self.desk_items(frame, dets, desk, boxes=desk_boxes)
             del frame
             compared = found is not None
             extra = found or {}
             if not compared:
+                desk_boxes = []
+            if not compared:
                 print(f"정리 확인 {self.room_id}번 방: 책상 사진 비교를 건너뜀 (조명·카메라가 크게 바뀜)")
         if compared and desk.tune.get("move") and not getattr(desk, "partial", False):
             # 일부만 본 비교(DESK_KEEP_SMALL)는 못 본 자리가 있어, 예전에 비교를 건너뛸 때처럼 빼지 않고 센다
-            now_items = self.not_moved(dets, now_items, base, desk)
+            now_items = self.not_moved(dets, now_items, base, desk, dropped=dropped)
         trash, left, confidence = {}, {}, {}
+        marks = []
         scores = self.scores(dets)
         by_yolo = False
         for label, n in now_items.items():
@@ -1030,11 +1069,17 @@ class RoomWatcher:
                 (trash if label in TRASH else left)[label] = more
                 # 어느 것이 새로 생긴 건지 모르니 점수가 낮은 쪽부터 쓴다 (확신도를 부풀려 잘못 경고하지 않게)
                 confidence[label] = scores[label][:more]
+                # 사진 동그라미: 확신도와 같은 물건(점수 낮은 쪽부터 more개). 옮김으로 뺀 것은 뺀다
+                kept = sorted((d for d in self.objects(dets) if d.label == label and d not in dropped),
+                              key=lambda d: d.score)
+                marks += [d.box for d in kept[:more]]
         for label, n in extra.items():  # 책상 사진 비교로 찾은 것: 자리가 새로 생긴 것이라 기준 개수와 빼지 않는다
             group = left if label in BELONGINGS else trash  # 이름 모름(unknown)·쓰레기는 치울 것
             group[label] = group.get(label, 0) + n
             confidence[label] = confidence.get(label, []) + [None] * n  # 자기 점수 없음: 보낼 때 VLM 확률로 채운다
         status = "LEFT_ITEMS" if left else "NEEDS_CLEANING" if trash else "CLEAN"
+        # 정리 확인 사진(TIDY_PHOTOS)에 동그라미 칠 곳. 결과(core·기록 파일)에는 안 넣는다
+        self.last_marks = marks + desk_boxes if status != "CLEAN" else []
         if own and status == "CLEAN" and compared and not getattr(desk, "partial", False):
             # 비교를 건너뛰었거나 큰 변화를 빼고 일부만 봤으면(DESK_KEEP_SMALL) 물건이 있을 수 있어 사진을 바꾸지 않는다
             self.desk.set_base(photo(), self.objects(dets))  # 깨끗하면 책상 사진도 새로 (햇빛·조명이 천천히 바뀌는 것 따라감)

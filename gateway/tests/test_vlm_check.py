@@ -364,3 +364,72 @@ def test_yes_probability_from_first_token():
 def test_ask_jpeg_returns_yes_probability(tmp_path):
     vlm = vc.VlmCheck("http://x", send=lambda url, body: ("YES", 0.97), clock=iter([0.0, 2.0]).__next__)
     assert vlm.ask_jpeg(b"a", b"b") == (True, 2.0, 0.97)
+
+
+# ---------- 2단계 확인 (VLM_MARKS, 11/14 수연) ----------
+
+def answers(*replies):
+    """물을 때마다 차례로 답한다. 무엇을 물었는지(본문)는 calls에 남긴다."""
+    calls, it = [], iter(replies)
+
+    def send(url, body):
+        calls.append(body)
+        return next(it)
+    return send, calls
+
+
+def test_marks_ask_each_circle_and_clear_when_vlm_says_nothing_new():
+    phone = Detection("cell phone", 0.9, (100, 100, 40, 60))
+    find = lambda f: [phone] if f[0, 0, 0] == 1 else []
+    send, calls = answers(("NO", 0.1), ("NO", 0.05))  # 동그라미 자리: 없음 → 사진 전체: 없음
+    vlm = vc.VlmCheck("http://x", rule="or", send=send, marks=True)
+    check, _ = te.judge(frame(0), frame(1), find, vlm=vlm)
+    assert check["markStatus"] == "LEFT_ITEMS" and check["markCleared"]
+    assert check["status"] == "CLEAN" and check["leftItems"] == {}
+    assert check["markVotes"] == [{"box": [100, 100, 40, 60], "new": False, "yes": 0.1}]
+    assert vc.MARK_PROMPT in json.dumps(calls[0]) and vc.PROMPT in json.dumps(calls[1])
+
+
+def test_marks_keep_a_circle_vlm_confirms_or_does_not_understand():
+    phone = Detection("cell phone", 0.9, (100, 100, 40, 60))
+    find = lambda f: [phone] if f[0, 0, 0] == 1 else []
+    for reply in (("YES", 0.9), ("hmm", None)):
+        send, _ = answers(reply, ("NO", 0.05))
+        check, _ = te.judge(frame(0), frame(1), find, vlm=vc.VlmCheck("http://x", rule="or", send=send, marks=True))
+        assert check["status"] == "LEFT_ITEMS" and not check.get("markCleared")
+
+
+def test_marks_off_by_default_and_clean_rooms_are_not_asked_again():
+    phone = Detection("cell phone", 0.9, (100, 100, 40, 60))
+    find = lambda f: [phone] if f[0, 0, 0] == 1 else []
+    send, calls = answers(("NO", 0.05))
+    check, _ = te.judge(frame(0), frame(1), find, vlm=vc.VlmCheck("http://x", rule="or", send=send))
+    assert check["status"] == "LEFT_ITEMS" and "markVotes" not in check and len(calls) == 1
+    send, calls = answers(("NO", 0.05))
+    check, _ = te.judge(frame(0), frame(0), lambda f: [], vlm=vc.VlmCheck("http://x", rule="or", send=send, marks=True))
+    assert check["status"] == "CLEAN" and len(calls) == 1  # 동그라미가 없으면 사진 전체만 묻는다
+
+
+def test_mark_crop_stays_inside_and_is_big_enough():
+    img = frame(0, 480, 640)
+    assert vc.mark_crop(img, (10, 10, 20, 20)).shape[:2] == (160, 160)
+    assert vc.mark_crop(img, (600, 450, 30, 20)).shape[:2] == (160, 160)  # 가장자리여도 화면 안에서 자른다
+    assert vc.mark_crop(img, (0, 0, 640, 480)).shape[:2] == (480, 640)
+
+
+def test_marks_setting_comes_from_env(monkeypatch):
+    monkeypatch.setattr(vc, "model_name", lambda url, timeout=10: "m")
+    assert vc.from_env({"VLM_URL": "http://127.0.0.1:8091", "VLM_MARKS": "1"}).marks is True
+    assert vc.from_env({"VLM_URL": "http://127.0.0.1:8091"}).marks is False
+    assert "VLM_MARKS=1" in te.candidate_name({"VLM_URL": "http://127.0.0.1:8091", "VLM_MARKS": "1"})
+
+
+def test_mark_lines_say_what_vlm_said_per_circle():
+    rows = [{"case": "003", "answer": "CLEAN", "markVotes": [{"new": False, "yes": 0.1}], "markCleared": True},
+            {"case": "019", "answer": "NEEDS_CLEANING", "markVotes": [{"new": True, "yes": 0.9}, {"new": None, "yes": None}]},
+            {"case": "001", "answer": "CLEAN"}]
+    lines = te.mark_lines(rows)
+    assert "003 (정답 깨끗함): 없음 10% → 깨끗함으로 바꿈" in lines[1]
+    assert "019" in lines[2] and "있음 90%, ?" in lines[2]
+    assert lines[-1].endswith("맞게 바꿈 1 · 잘못 바꿈(놓침이 될 수 있음) 0")
+    assert te.mark_lines([{"case": "001", "answer": "CLEAN"}]) == []

@@ -1339,6 +1339,23 @@ def start_thread(target, *args):
     threading.Thread(target=target, args=args, daemon=True).start()
 
 
+def apply_mark_votes(check, votes):
+    """2단계 확인 (VLM_MARKS): 동그라미마다 VLM이 답한 것 [(상자, 답 True/False/None, 확률)]을 결과에 합친다.
+
+    VLM이 "새 물건 없음"(False)이라 한 동그라미는 뺀다. 못 알아들은 답(None)은 남긴다 (잘 모르면 사람이 사진으로 보게).
+    남은 동그라미가 하나도 없으면 깨끗함으로 바꾼다. 하나라도 남으면 결과는 그대로 둔다 (어느 이름이 그 자리인지는 안 맞춤).
+    """
+    if not votes:
+        return check
+    kept = [box for box, new_item, _ in votes if new_item is not False]
+    check["markVotes"] = [{"box": [round(v) for v in box], "new": new_item, "yes": yes} for box, new_item, yes in votes]
+    if not kept and check["status"] != "CLEAN":
+        check["status"] = "CLEAN"
+        check["trash"], check["leftItems"], check["confidence"] = {}, {}, {}
+        check["markCleared"] = True
+    return check
+
+
 def apply_vlm(check, new_item, rule, yes=None):
     """VLM 답(새 물건 있음 True / 없음 False / 못 알아들음 None)을 정리 확인 결과에 합친다 (10판, VLM_RULE).
 

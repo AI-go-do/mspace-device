@@ -38,6 +38,45 @@ PROMPT = (
     "Answer with only one word: YES or NO."
 )
 
+# VLM_MARKS=1 (2단계 확인, 11/14 수연): 동그라미 자리만 잘라 입실 전·퇴실 뒤를 보여 주고 다시 묻는다
+MARK_PROMPT = (
+    "Image 1 and image 2 show the same small part of a study room, from the same camera. "
+    "Image 1 was taken before a guest used the room, image 2 after the guest left. "
+    "Ignore changes in lighting, shadows and brightness. "
+    "Ignore an object that is in both images but was moved a little, turned or flipped, and ignore chairs. "
+    "Ignore objects that are in image 1 but gone in image 2. "
+    "Is there an object in image 2 that was NOT in image 1? "
+    "Answer with only one word: YES or NO."
+)
+MARK_GROW = 2.0    # 동그라미 상자를 이 배로 넓혀 자른다 (주변이 조금 보여야 무엇이 달라졌는지 안다)
+MARK_MIN = 160     # 자른 조각의 가장 짧은 변 (원래 화면 픽셀). 너무 작으면 VLM이 못 본다
+MARK_SIDE = 448    # 자른 조각을 VLM에 보낼 때 긴 변 (작으면 이만큼 키운다)
+
+
+def mark_crop(img, box, grow=MARK_GROW, least=MARK_MIN):
+    """동그라미 상자(x, y, w, h, 화면 좌표) 주변을 잘라 낸다. 입실 전·퇴실 뒤에 같은 자리를 쓴다."""
+    h, w = img.shape[:2]
+    x, y, bw, bh = box
+    cw = min(w, max(bw * grow, least))
+    ch = min(h, max(bh * grow, least))
+    cx, cy = x + bw / 2, y + bh / 2
+    x1 = int(max(0, min(w - cw, cx - cw / 2)))
+    y1 = int(max(0, min(h - ch, cy - ch / 2)))
+    return img[y1:y1 + int(ch), x1:x1 + int(cw)]
+
+
+def prepare_mark(img, side=MARK_SIDE):
+    """자른 조각 → JPEG. 긴 변을 side로 맞춘다 (작으면 키움)."""
+    import cv2
+    h, w = img.shape[:2]
+    scale = side / max(h, w)
+    img = cv2.resize(img, (max(1, round(w * scale)), max(1, round(h * scale))),
+                     interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC)
+    ok, jpg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if not ok:
+        raise RuntimeError("사진을 JPEG로 못 바꿨어요")
+    return jpg.tobytes()
+
 
 def prepare(img, side=SIDE, eq=False):
     """사진(BGR) → JPEG 바이트. 긴 변을 side로 줄이고, eq면 밝기를 편다."""
@@ -122,10 +161,11 @@ def image_part(jpg):
 
 class VlmCheck:
     def __init__(self, url, rule="or", side=SIDE, eq=False, cache=None, send=post, clock=time.perf_counter,
-                 timeout=TIMEOUT):
+                 timeout=TIMEOUT, marks=False):
         if rule not in RULES:
             raise ValueError(f"VLM_RULE는 {', '.join(RULES)} 중 하나예요: {rule!r}")
         self.url, self.rule, self.side, self.eq = url, rule, side, eq
+        self.marks = marks  # VLM_MARKS=1: 동그라미마다 잘라서 한 번 더 묻는다 (2단계 확인, 채점에서 먼저 시험)
         self.cache_path = cache
         self.send, self.clock = send, clock
         self.model = model_name(url) if send is post else "test"
@@ -137,9 +177,9 @@ class VlmCheck:
             with open(cache, encoding="utf-8") as f:
                 self.cache = json.load(f)
 
-    def key(self, a, b):
+    def key(self, a, b, prompt=PROMPT):
         h = hashlib.sha256()
-        for part in (self.model, PROMPT, str(self.side), str(self.eq)):
+        for part in (self.model, prompt, str(self.side), str(self.eq)):
             h.update(part.encode() + b"\0")
         h.update(a)
         h.update(b)
@@ -162,16 +202,23 @@ class VlmCheck:
         """(답, 걸린 초, 캐시에서 꺼냈나)."""
         return self.ask_with_yes(a, b)[:3]
 
-    def ask_with_yes(self, a, b):
+    def ask_mark(self, before, after, box):
+        """2단계 확인 (VLM_MARKS): 동그라미 한 곳을 잘라 묻는다. (답, 걸린 초, YES일 확률 또는 None)."""
+        a = prepare_mark(mark_crop(before, box))
+        b = prepare_mark(mark_crop(after, box))
+        new_item, seconds, _, yes = self.ask_with_yes(a, b, prompt=MARK_PROMPT)
+        return new_item, seconds, yes
+
+    def ask_with_yes(self, a, b, prompt=PROMPT):
         """(답, 걸린 초, 캐시에서 꺼냈나, YES일 확률 또는 None). 확률을 바로 돌려줘서 두 스레드가 물어도 안 섞인다."""
-        key = self.key(a, b)
+        key = self.key(a, b, prompt)
         if key in self.cache and "yes" in self.cache[key]:  # 확률을 적기 전(#70 전) 캐시는 다시 묻는다
             hit = self.cache[key]
             return parse(hit["text"]), hit["seconds"], True, hit.get("yes")
         body = {"messages": [{"role": "user", "content": [
                     {"type": "text", "text": "Image 1:"}, image_part(a),
                     {"type": "text", "text": "Image 2:"}, image_part(b),
-                    {"type": "text", "text": PROMPT}]}],
+                    {"type": "text", "text": prompt}]}],
                 "temperature": 0, "max_tokens": 5, "logprobs": True, "top_logprobs": 10}
         started = self.clock()
         reply = self.send(self.url, body)
@@ -214,4 +261,4 @@ def from_env(env):
         raise ValueError(f"VLM_URL은 젯슨 안(127.0.0.1)만 돼요. 사진이 밖으로 나가지 않게 멈춰요: {url}")
     return VlmCheck(url, rule=(env.get("VLM_RULE") or "or").strip().lower(),
                     side=int(env.get("VLM_SIDE") or SIDE), eq=env.get("VLM_EQ") == "1",
-                    cache=(env.get("VLM_CACHE") or None))
+                    cache=(env.get("VLM_CACHE") or None), marks=env.get("VLM_MARKS") == "1")

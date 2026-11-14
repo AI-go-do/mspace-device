@@ -140,6 +140,15 @@ def judge(before, after, find, room_items=None, desk=None, labeler=None, clock=t
     if desk is not None:  # 채점 보기용: 사진 비교가 건너뛰었나(None) · 달라진 곳 몇 개였나. 판정에는 안 쓴다
         changes = desk.changes(after)
         check["deskChanges"] = None if changes is None else len(changes)
+    if vlm is not None and getattr(vlm, "marks", False) and check["status"] != "CLEAN" and watcher.last_marks:
+        # VLM_MARKS (2단계 확인): 1단계(YOLO·책상 비교)가 친 동그라미마다 그 자리만 잘라 VLM에게 다시 묻는다
+        votes = []
+        for box in watcher.last_marks:
+            new_item, mark_seconds, yes = vlm.ask_mark(before, after, box)
+            votes.append((box, new_item, yes))
+            seconds += mark_seconds
+        check["markStatus"] = check["status"]
+        room_camera.apply_mark_votes(check, votes)
     if vlm is not None:  # VLM_URL (10판): 입실·퇴실 사진을 VLM에게 한 번 더 보여 준다
         new_item, vlm_seconds, _, yes = vlm.ask_with_yes(vlm.prepare(before), vlm.prepare(after))
         check["yoloStatus"] = check["status"]
@@ -171,6 +180,7 @@ def score(cases, run_case):
                      "trash": check.get("trash", {}), "leftItems": check.get("leftItems", {}),
                      "people": check.get("people", 0), "memo": case.memo, "desk": check.get("deskChanges", "off"),
                      "yolo": check.get("yoloStatus"), "vlm": check.get("vlm"), "vlmYes": check.get("vlmYesRaw"),
+                     "markVotes": check.get("markVotes"), "markCleared": bool(check.get("markCleared")),
                      "evidence": evidence_row(case.answer, check)})
     n = len(rows)
     right = sum(r["ok"] for r in rows)
@@ -192,7 +202,7 @@ def score(cases, run_case):
 def candidate_name(env):
     """채점한 설정을 한 줄로 (README 기록용). 게이트웨이 설정 이름 그대로."""
     keys = ("YOLO_MODEL", "DESK_PHOTO", "DESK_AREA", "FLOOR_AREA", "DESK_LIGHT", "DESK_THRESH", "DESK_MIN_AREA",
-            "TILE_GRID", "DESK_MOVE", "DESK_MOVE_SAME", "DESK_KEEP_SMALL", "DESK_FURNITURE_SMALL", "DESK_FURNITURE_SEEN", "LABEL_MODEL", "ROOM_ITEMS", "VLM_NAME", "VLM_RULE", "VLM_SIDE", "VLM_EQ")
+            "TILE_GRID", "DESK_MOVE", "DESK_MOVE_SAME", "DESK_KEEP_SMALL", "DESK_FURNITURE_SMALL", "DESK_FURNITURE_SEEN", "LABEL_MODEL", "ROOM_ITEMS", "VLM_NAME", "VLM_RULE", "VLM_SIDE", "VLM_EQ", "VLM_MARKS")
     if env.get("VLM_URL") and not (env.get("VLM_NAME") or env.get("VLM_RULE")):
         env = {**env, "VLM_RULE": "or"}  # VLM_URL만 줘도 VLM을 켠 것 (기본 규칙 or). 주소는 안 적는다
     parts = [f"{k}={env[k]}" for k in keys if env.get(k)]
@@ -222,6 +232,8 @@ def report(result, candidate, out=print):
             f"{' (' + ' '.join(skipped) + ')' if skipped else ''}")
     for line in vlm_yes_lines(result["rows"]):
         out(line)
+    for line in mark_lines(result["rows"]):
+        out(line)
     out("통과" if result["passed"] else "아직 기준 못 넘음")
     names = " ".join(r["case"] for r in wrong) or "없음"
     out("README 실험 기록에 붙일 줄:")
@@ -236,6 +248,23 @@ def desk_note(row):
     if desk == "off":
         return ""
     return " [사진 비교 건너뜀]" if desk is None else f" [사진 비교 {desk}곳]"
+
+
+def mark_lines(rows):
+    """2단계 확인(VLM_MARKS)을 켰을 때: 동그라미마다 VLM이 뭐라 했는지, 깨끗함으로 바꾼 쌍이 맞았는지."""
+    asked = [r for r in rows if r.get("markVotes")]
+    if not asked:
+        return []
+    lines = ["2단계 확인 (VLM_MARKS, 동그라미 자리만 잘라 다시 물음):"]
+    for r in asked:
+        votes = ", ".join({True: "있음", False: "없음", None: "?"}[v["new"]]
+                          + (f" {v['yes']:.0%}" if v.get("yes") is not None else "") for v in r["markVotes"])
+        cleared = " → 깨끗함으로 바꿈" if r.get("markCleared") else ""
+        lines.append(f"  {r['case']} (정답 {KOREAN[r['answer']]}): {votes}{cleared}")
+    good = sum(r["answer"] == "CLEAN" for r in asked if r.get("markCleared"))
+    bad = sum(r["answer"] != "CLEAN" for r in asked if r.get("markCleared"))
+    lines.append(f"  깨끗함으로 바꾼 {good + bad}쌍 중 맞게 바꿈 {good} · 잘못 바꿈(놓침이 될 수 있음) {bad}")
+    return lines
 
 
 def vlm_yes_lines(rows, limit=0.8):

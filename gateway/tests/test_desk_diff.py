@@ -607,3 +607,47 @@ def test_desk_finds_are_circled_on_the_photo_but_moved_room_things_are_not():
         t += 1
     assert check["leftItems"] == {"cell phone": 1}
     assert w.last_marks == [phone.box]  # 뒤집힌 리모컨(laptop으로 봄)은 동그라미 없음
+
+
+def test_move_rename_drops_a_moved_remote_seen_as_mouse():
+    """DESK_MOVE_RENAME: 리모컨이 사라지고 비슷한 크기 mouse가 새로 생기면 옮긴 리모컨으로 보고 뺀다 (11/14, #57)."""
+    import tidy_eval
+    before, after = desk(REMOTE, noise=6), desk(MOVED_REMOTE, noise=6)
+    remote = Detection("remote", 0.8, (700, 700, 45, 30))
+    mouse = Detection("mouse", 0.86, (1000, 800, 30, 45))
+    find = lambda f: [remote] if f is before else [mouse]
+    # 사진 비교를 건너뛴 경우(조명이 크게 바뀜)처럼 옮긴 짝을 못 찾게, 비교 없이 이름만으로 본다
+    off = DeskCompare(AREA, light="ssim", move=True)
+    on = DeskCompare(AREA, light="ssim", move=True, move_rename=True)
+    for d in (off, on):
+        d.changes = lambda frame: None
+    assert tidy_eval.judge(before, after, find, room_items={"remote": 1}, desk=off)[0]["leftItems"] == {"mouse": 1}
+    assert tidy_eval.judge(before, after, find, room_items={"remote": 1}, desk=on)[0]["status"] == "CLEAN"
+
+
+def test_move_rename_keeps_new_things_when_nothing_is_gone_or_size_differs():
+    import tidy_eval
+    before = desk(REMOTE, noise=6)
+    remote = Detection("remote", 0.8, (700, 700, 45, 30))
+    mouse = Detection("mouse", 0.86, (1000, 800, 30, 45))
+    laptop = Detection("laptop", 0.9, (300, 300, 300, 200))
+    d = DeskCompare(AREA, light="ssim", move=True, move_rename=True)
+    d.changes = lambda frame: None
+    after = desk(REMOTE, noise=6)
+    # 리모컨이 그대로 있으면 사라진 게 없으니 mouse는 새 물건
+    check, _ = tidy_eval.judge(before, after, lambda f: [remote] if f is before else [remote, mouse], desk=d)
+    assert check["leftItems"] == {"mouse": 1}
+    # 리모컨이 사라져도 크기가 아주 다른 노트북은 옮긴 게 아님
+    check, _ = tidy_eval.judge(before, after, lambda f: [remote] if f is before else [laptop], desk=d)
+    assert check["leftItems"] == {"laptop": 1}
+    # 사라진 리모컨 하나는 한 번만 짝지음
+    mouse2 = Detection("mouse", 0.5, (1200, 800, 30, 45))
+    check, _ = tidy_eval.judge(before, after, lambda f: [remote] if f is before else [mouse, mouse2], desk=d)
+    assert check["leftItems"] == {"mouse": 1}
+
+
+def test_move_rename_setting_comes_from_env():
+    import desk_diff
+    import gateway
+    assert DeskCompare(AREA, **desk_diff.settings(gateway.load_config({"DESK_MOVE_RENAME": "1", "PORT": "x"}))).move_rename
+    assert not DeskCompare(AREA, **desk_diff.settings(gateway.load_config({"PORT": "x"}))).move_rename

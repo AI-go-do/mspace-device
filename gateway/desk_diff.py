@@ -208,13 +208,14 @@ class DeskCompare:
     """깨끗한 책상 사진 한 장을 들고 있다가 퇴실 뒤 책상과 비교한다."""
 
     def __init__(self, area, path=None, thresh=DIFF_THRESH, min_area=MIN_AREA, light="mean", move=False,
-                 move_same=MOVE_SAME, keep_small=0.0, furniture_small=0.0, furniture_seen=False):
+                 move_same=MOVE_SAME, keep_small=0.0, furniture_small=0.0, furniture_seen=False, move_rename=False):
         self.area = area
         # DESK_THRESH·DESK_MIN_AREA·DESK_LIGHT·DESK_MOVE·DESK_MOVE_SAME·DESK_KEEP_SMALL
         self.tune = {"thresh": thresh, "min_area": min_area, "light": light, "move": move, "move_same": move_same,
                      "keep_small": keep_small}
         self.furniture_small = furniture_small  # DESK_FURNITURE_SMALL: room_camera.desk_items가 쓴다
         self.furniture_seen = furniture_seen    # DESK_FURNITURE_SEEN: room_camera.desk_items가 쓴다 (12판)
+        self.move_rename = move_rename          # DESK_MOVE_RENAME: room_camera.RoomWatcher.renamed_moves가 쓴다 (11/14)
         self.path = path              # 껐다 켜도 남게 저장할 파일 (.png). None이면 메모리에만
         self.base = None              # 깨끗한 책상 (prepare 결과)
         self.known = []               # 기준 때 모델이 찾은 물건 자리 (리모컨을 옮기면 빈 자리도 "달라짐"이라 뺀다)
@@ -306,9 +307,10 @@ class DeskCompare:
 
 def settings(config):
     """게이트웨이 설정(DESK_THRESH, DESK_MIN_AREA, DESK_LIGHT, DESK_MOVE, DESK_MOVE_SAME, DESK_KEEP_SMALL,
-    DESK_FURNITURE_SMALL, DESK_FURNITURE_SEEN) → DeskCompare에 넘길 값."""
+    DESK_FURNITURE_SMALL, DESK_FURNITURE_SEEN, DESK_MOVE_RENAME) → DeskCompare에 넘길 값."""
     return {"thresh": config.desk_thresh, "min_area": config.desk_min_area, "light": config.desk_light,
             "move": config.desk_move, "move_same": config.desk_move_same,
             "keep_small": getattr(config, "desk_keep_small", 0.0),
             "furniture_small": getattr(config, "desk_furniture_small", 0.0),
-            "furniture_seen": getattr(config, "desk_furniture_seen", False)}
+            "furniture_seen": getattr(config, "desk_furniture_seen", False),
+            "move_rename": getattr(config, "desk_move_rename", False)}

@@ -1040,6 +1040,37 @@ class RoomWatcher:
                     dropped.append(d)  # 옮김·이름 잘못 봄으로 뺀 것 (사진에 동그라미 안 침)
         return {k: v for k, v in items.items() if v > 0}
 
+    def renamed_moves(self, dets, now_items, base, desk, dropped=None):
+        """DESK_MOVE_RENAME=1: 옮기면서 이름까지 바뀐 비품은 빼고 다시 센다 (11/14 수연, #57 옮긴 리모컨을 mouse로 봄).
+
+        입실 때 있던 물건(이름 A)이 지금 그 개수보다 줄었고, 다른 이름 B가 늘었는데 B 상자가 A 상자와 크기가 비슷하면
+        A를 옮긴 걸 B로 잘못 본 것으로 보고 B를 하나 뺀다. 사라진 A 하나는 한 번만 짝지어 준다.
+        책상 사진 비교의 "옮긴 짝"(DESK_MOVE)이 크기·무늬 차이나 비교 건너뜀으로 못 찾을 때를 이름으로 한 번 더 본다.
+        """
+        items = dict(now_items)
+        gone = {}  # 이름 → 입실 때보다 줄어든 개수
+        for label, n in base.items():
+            if items.get(label, 0) < n:
+                gone[label] = n - items.get(label, 0)
+        if not gone:
+            return items
+        known = [(box, label) for box, label in zip(desk.known, desk.known_labels) if label in gone]
+        for d in sorted(self.objects(dets), key=lambda d: d.score):
+            if dropped is not None and d in dropped:
+                continue
+            if items.get(d.label, 0) <= max(base.get(d.label, 0), self.room_items.get(d.label, 0)):
+                continue
+            match = next(((box, label) for box, label in known
+                          if label != d.label and gone.get(label, 0) > 0 and similar_size(d.box, box)), None)
+            if match is None:
+                continue
+            known.remove(match)
+            gone[match[1]] -= 1
+            items[d.label] -= 1
+            if dropped is not None:
+                dropped.append(d)
+        return {k: v for k, v in items.items() if v > 0}
+
     def check(self, dets, now_iso, photo=None, base=None, desk=None):
         """깨끗할 때보다 늘어난 물건만 골라 결과를 만든다 (종류별 개수, 자리는 보지 않음).
 
@@ -1068,6 +1099,10 @@ class RoomWatcher:
         if compared and desk.tune.get("move") and not getattr(desk, "partial", False):
             # 일부만 본 비교(DESK_KEEP_SMALL)는 못 본 자리가 있어, 예전에 비교를 건너뛸 때처럼 빼지 않고 센다
             now_items = self.not_moved(dets, now_items, base, desk, dropped=dropped)
+        if (desk is not None and getattr(desk, "move_rename", False) and desk.tune.get("move")
+                and not getattr(desk, "partial", False)):
+            # 이름과 상자 크기만 보므로 사진 비교를 건너뛴 때(조명이 크게 바뀜)에도 쓴다
+            now_items = self.renamed_moves(dets, now_items, base, desk, dropped=dropped)
         trash, left, confidence = {}, {}, {}
         marks = []
         scores = self.scores(dets)

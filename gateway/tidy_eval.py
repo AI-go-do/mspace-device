@@ -145,7 +145,8 @@ def judge(before, after, find, room_items=None, desk=None, labeler=None, clock=t
         # VLM_MARKS (2단계 확인): 1단계(YOLO·책상 비교)가 친 동그라미마다 그 자리만 잘라 VLM에게 다시 묻는다
         votes = []
         for box in marks:
-            new_item, mark_seconds, yes = vlm.ask_mark(before, after, box)
+            ask = vlm.ask_circled if str(vlm.marks) == "2" else vlm.ask_mark
+            new_item, mark_seconds, yes = ask(before, after, box)
             votes.append((box, new_item, yes))
             seconds += mark_seconds
         check["markStatus"] = check["status"]
@@ -256,7 +257,7 @@ def mark_lines(rows):
     asked = [r for r in rows if r.get("markVotes")]
     if not asked:
         return []
-    lines = ["2단계 확인 (VLM_MARKS, 동그라미 자리만 잘라 다시 물음):"]
+    lines = ["2단계 확인 (VLM_MARKS, 동그라미 자리를 다시 물음):"]
     for r in asked:
         votes = ", ".join({True: "있음", False: "없음", None: "?"}[v["new"]]
                           + (f" {v['yes']:.0%}" if v.get("yes") is not None else "") for v in r["markVotes"])

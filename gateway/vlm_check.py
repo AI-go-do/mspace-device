@@ -48,6 +48,18 @@ MARK_PROMPT = (
     "Is there an object in image 2 that was NOT in image 1? "
     "Answer with only one word: YES or NO."
 )
+# VLM_MARKS=2: 잘라 보면 옮긴 물건도 "새 물건"처럼 보여서(11/14 1차: 깨끗한 003·010·044도 88~97% 있음),
+# 사진 전체를 보여 주되 물어볼 자리에 빨간 동그라미를 그리고 "원래 어딘가에 있던 거야, 새로 생긴 거야?"를 묻는다
+CIRCLE_PROMPT = (
+    "Image 1 is a study room before a guest used it. Image 2 is the same room, from the same camera, after the guest left. "
+    "There is a red circle at the same place in both images. "
+    "Look at what is inside the red circle in image 2. "
+    "Ignore changes in lighting, shadows and brightness, and ignore chairs. "
+    "If it is an object that was already somewhere in image 1 (maybe at a different place, turned or flipped), answer NO. "
+    "If nothing is there, or something was only taken away, answer NO. "
+    "Answer YES only if it is a new object that was nowhere in image 1. "
+    "Answer with only one word: YES or NO."
+)
 MARK_GROW = 2.0    # 동그라미 상자를 이 배로 넓혀 자른다 (주변이 조금 보여야 무엇이 달라졌는지 안다)
 MARK_MIN = 160     # 자른 조각의 가장 짧은 변 (원래 화면 픽셀). 너무 작으면 VLM이 못 본다
 MARK_SIDE = 448    # 자른 조각을 VLM에 보낼 때 긴 변 (작으면 이만큼 키운다)
@@ -165,7 +177,7 @@ class VlmCheck:
         if rule not in RULES:
             raise ValueError(f"VLM_RULE는 {', '.join(RULES)} 중 하나예요: {rule!r}")
         self.url, self.rule, self.side, self.eq = url, rule, side, eq
-        self.marks = marks  # VLM_MARKS=1: 동그라미마다 잘라서 한 번 더 묻는다 (2단계 확인, 채점에서 먼저 시험)
+        self.marks = marks  # VLM_MARKS: "1" 동그라미 자리를 잘라서 / "2" 사진 전체에 동그라미를 그려서 한 번 더 묻는다 (채점에서 먼저 시험)
         self.cache_path = cache
         self.send, self.clock = send, clock
         self.model = model_name(url) if send is post else "test"
@@ -207,6 +219,14 @@ class VlmCheck:
         a = prepare_mark(mark_crop(before, box))
         b = prepare_mark(mark_crop(after, box))
         new_item, seconds, _, yes = self.ask_with_yes(a, b, prompt=MARK_PROMPT)
+        return new_item, seconds, yes
+
+    def ask_circled(self, before, after, box):
+        """VLM_MARKS=2: 사진 전체에 그 자리만 빨간 동그라미를 그려 묻는다. (답, 걸린 초, YES일 확률 또는 None)."""
+        import room_camera
+        a = self.prepare(room_camera.draw_marks(before, [box]))
+        b = self.prepare(room_camera.draw_marks(after, [box]))
+        new_item, seconds, _, yes = self.ask_with_yes(a, b, prompt=CIRCLE_PROMPT)
         return new_item, seconds, yes
 
     def ask_with_yes(self, a, b, prompt=PROMPT):
@@ -261,4 +281,4 @@ def from_env(env):
         raise ValueError(f"VLM_URL은 젯슨 안(127.0.0.1)만 돼요. 사진이 밖으로 나가지 않게 멈춰요: {url}")
     return VlmCheck(url, rule=(env.get("VLM_RULE") or "or").strip().lower(),
                     side=int(env.get("VLM_SIDE") or SIDE), eq=env.get("VLM_EQ") == "1",
-                    cache=(env.get("VLM_CACHE") or None), marks=env.get("VLM_MARKS") == "1")
+                    cache=(env.get("VLM_CACHE") or None), marks=(env.get("VLM_MARKS") or "").strip() if env.get("VLM_MARKS") in ("1", "2") else False)

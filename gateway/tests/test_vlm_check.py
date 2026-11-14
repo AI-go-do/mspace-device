@@ -419,7 +419,8 @@ def test_mark_crop_stays_inside_and_is_big_enough():
 
 def test_marks_setting_comes_from_env(monkeypatch):
     monkeypatch.setattr(vc, "model_name", lambda url, timeout=10: "m")
-    assert vc.from_env({"VLM_URL": "http://127.0.0.1:8091", "VLM_MARKS": "1"}).marks is True
+    assert vc.from_env({"VLM_URL": "http://127.0.0.1:8091", "VLM_MARKS": "1"}).marks == "1"
+    assert vc.from_env({"VLM_URL": "http://127.0.0.1:8091", "VLM_MARKS": "2"}).marks == "2"
     assert vc.from_env({"VLM_URL": "http://127.0.0.1:8091"}).marks is False
     assert "VLM_MARKS=1" in te.candidate_name({"VLM_URL": "http://127.0.0.1:8091", "VLM_MARKS": "1"})
 
@@ -447,3 +448,12 @@ def test_marks_also_ask_desk_compare_circles():
     check, _ = te.judge(before, after, lambda f: [], desk=desk, vlm=vc.VlmCheck("http://x", rule="or", send=send, marks=True))
     assert check["markStatus"] == "NEEDS_CLEANING" and check["markCleared"] and check["status"] == "CLEAN"
     assert len(calls) == 2
+
+
+def test_marks_2_asks_the_whole_photo_with_a_red_circle():
+    phone = Detection("cell phone", 0.9, (100, 100, 40, 60))
+    find = lambda f: [phone] if f[0, 0, 0] == 1 else []
+    send, calls = answers(("NO", 0.2), ("NO", 0.05))
+    check, _ = te.judge(frame(0), frame(1), find, vlm=vc.VlmCheck("http://x", rule="or", send=send, marks="2"))
+    assert check["markCleared"] and check["status"] == "CLEAN"
+    assert vc.CIRCLE_PROMPT in json.dumps(calls[0])

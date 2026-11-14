@@ -433,3 +433,17 @@ def test_mark_lines_say_what_vlm_said_per_circle():
     assert "019" in lines[2] and "있음 90%, ?" in lines[2]
     assert lines[-1].endswith("맞게 바꿈 1 · 잘못 바꿈(놓침이 될 수 있음) 0")
     assert te.mark_lines([{"case": "001", "answer": "CLEAN"}]) == []
+
+
+def test_marks_also_ask_desk_compare_circles():
+    """책상 비교로만 찾은 동그라미(이름 모름)도 2단계로 묻는다 (11/14 1차: 003·010이 안 물어진 버그)."""
+    import cv2
+    from desk_diff import DeskCompare
+    before = np.full((720, 1280, 3), 200, np.uint8)
+    after = before.copy()
+    cv2.rectangle(after, (600, 400), (660, 450), (20, 20, 20), -1)
+    send, calls = answers(("NO", 0.1), ("NO", 0.05))
+    desk = DeskCompare((0, 0, 1, 1), light="ssim", move=True)
+    check, _ = te.judge(before, after, lambda f: [], desk=desk, vlm=vc.VlmCheck("http://x", rule="or", send=send, marks=True))
+    assert check["markStatus"] == "NEEDS_CLEANING" and check["markCleared"] and check["status"] == "CLEAN"
+    assert len(calls) == 2

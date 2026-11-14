@@ -135,15 +135,16 @@ def judge(before, after, find, room_items=None, desk=None, labeler=None, clock=t
     seconds = clock() - started
     if check is None:
         raise RuntimeError("정리 확인 결과가 비어 있어요 (RoomWatcher.check)")
+    marks = list(watcher.last_marks)  # 아래에서 check를 한 번 더 부르면 지워져서 먼저 둔다 (책상 비교 동그라미 포함)
     # 3시간 뒤 다시 확인(RECHECK)처럼 YOLO 개수만 봤으면 남음이었나 (물건이 있을 확률 표의 "recheck" 칸)
     check["evidence"]["count"] = watcher.check(found, "", base=base)["status"] != "CLEAN"
     if desk is not None:  # 채점 보기용: 사진 비교가 건너뛰었나(None) · 달라진 곳 몇 개였나. 판정에는 안 쓴다
         changes = desk.changes(after)
         check["deskChanges"] = None if changes is None else len(changes)
-    if vlm is not None and getattr(vlm, "marks", False) and check["status"] != "CLEAN" and watcher.last_marks:
+    if vlm is not None and getattr(vlm, "marks", False) and check["status"] != "CLEAN" and marks:
         # VLM_MARKS (2단계 확인): 1단계(YOLO·책상 비교)가 친 동그라미마다 그 자리만 잘라 VLM에게 다시 묻는다
         votes = []
-        for box in watcher.last_marks:
+        for box in marks:
             new_item, mark_seconds, yes = vlm.ask_mark(before, after, box)
             votes.append((box, new_item, yes))
             seconds += mark_seconds
